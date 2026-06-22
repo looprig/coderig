@@ -1,0 +1,26 @@
+# Binaries
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build artifacts
+*.test
+*.out
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local multi-repo dev workspace (never commit — overlays looprig locally)
+go.work
+go.work.sum
