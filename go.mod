@@ -3,7 +3,7 @@ module github.com/ciram-co/swe
 go 1.26.4
 
 require (
-	github.com/ciram-co/looprig v0.1.0
+	github.com/ciram-co/looprig v0.1.1-0.20260623211416-ede4211e7181
 	github.com/nats-io/nats.go v1.52.0
 )
 
@@ -53,3 +53,5 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+replace charm.land/bubbletea/v2 => github.com/ciram-co/bubbletea/v2 v2.0.0-20260623210731-9571e88971cd
