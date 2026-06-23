@@ -24,7 +24,7 @@ import (
 func spawnCfg(t *testing.T, agent identity.AgentName) loop.Config {
 	t.Helper()
 	sp, runner := newTestSwarmSpawner(t)
-	if _, err := sp.Spawn(context.Background(), loop.Provenance{}, agent, "do the thing"); err != nil {
+	if _, err := sp.Spawn(context.Background(), loop.Provenance{}, agent, "do the thing", "toolu_skills"); err != nil {
 		t.Fatalf("Spawn(%q) error = %v", agent, err)
 	}
 	if !runner.called {

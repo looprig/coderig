@@ -31,17 +31,19 @@ type fakeRunner struct {
 	reply  string
 	runErr error
 
-	called    bool
-	gotParent loop.Provenance
-	gotCfg    loop.Config
-	gotBlocks []content.Block
+	called             bool
+	gotParent          loop.Provenance
+	gotCfg             loop.Config
+	gotBlocks          []content.Block
+	gotParentToolUseID string
 }
 
-func (f *fakeRunner) RunSubagent(_ context.Context, parent loop.Provenance, cfg loop.Config, blocks []content.Block) (string, error) {
+func (f *fakeRunner) RunSubagent(_ context.Context, parent loop.Provenance, cfg loop.Config, blocks []content.Block, parentToolUseID string) (string, error) {
 	f.called = true
 	f.gotParent = parent
 	f.gotCfg = cfg
 	f.gotBlocks = blocks
+	f.gotParentToolUseID = parentToolUseID
 	if f.runErr != nil {
 		return "", f.runErr
 	}
@@ -105,7 +107,7 @@ func TestSpawnResolvesPermittedAgent(t *testing.T) {
 			t.Parallel()
 			sp, runner := newTestSwarmSpawner(t)
 
-			got, err := sp.Spawn(context.Background(), parent, tt.name, "do the thing")
+			got, err := sp.Spawn(context.Background(), parent, tt.name, "do the thing", "toolu_3")
 			if err != nil {
 				t.Fatalf("Spawn(%q) error = %v", tt.name, err)
 			}
@@ -117,6 +119,11 @@ func TestSpawnResolvesPermittedAgent(t *testing.T) {
 			}
 			if runner.gotParent != parent {
 				t.Errorf("RunSubagent parent = %+v, want %+v", runner.gotParent, parent)
+			}
+			// The spawning call's provider tool-use id is threaded through unchanged so
+			// the sub-loop's LoopStarted can be correlated to its parent card in the TUI.
+			if runner.gotParentToolUseID != "toolu_3" {
+				t.Errorf("RunSubagent parentToolUseID = %q, want %q", runner.gotParentToolUseID, "toolu_3")
 			}
 			if runner.gotCfg.AgentName != tt.name {
 				t.Errorf("cfg.AgentName = %q, want %q", runner.gotCfg.AgentName, tt.name)
@@ -166,7 +173,7 @@ func TestSpawnEnablesRuntimeContext(t *testing.T) {
 	parent := loop.Provenance{LoopID: mustUUID(t)}
 
 	sp, runner := newTestSwarmSpawner(t)
-	if _, err := sp.Spawn(context.Background(), parent, operator.Name, "do it"); err != nil {
+	if _, err := sp.Spawn(context.Background(), parent, operator.Name, "do it", "toolu_rt"); err != nil {
 		t.Fatalf("Spawn error = %v", err)
 	}
 	if runner.gotCfg.RuntimeContext == nil {
@@ -182,7 +189,7 @@ func TestSpawnFreshToolSetPerCall(t *testing.T) {
 	parent := loop.Provenance{LoopID: mustUUID(t)}
 
 	sp, first := newTestSwarmSpawner(t)
-	if _, err := sp.Spawn(context.Background(), parent, operator.Name, "a"); err != nil {
+	if _, err := sp.Spawn(context.Background(), parent, operator.Name, "a", "toolu_a"); err != nil {
 		t.Fatalf("Spawn #1 error = %v", err)
 	}
 	firstChecker := first.gotCfg.Tools.Permission
@@ -190,7 +197,7 @@ func TestSpawnFreshToolSetPerCall(t *testing.T) {
 	// Re-bind a fresh runner so the second call's cfg is captured independently.
 	second := &fakeRunner{reply: "x"}
 	sp.session = second
-	if _, err := sp.Spawn(context.Background(), parent, operator.Name, "b"); err != nil {
+	if _, err := sp.Spawn(context.Background(), parent, operator.Name, "b", "toolu_b"); err != nil {
 		t.Fatalf("Spawn #2 error = %v", err)
 	}
 	secondChecker := second.gotCfg.Tools.Permission
@@ -224,7 +231,7 @@ func TestSpawnUnknownAgent(t *testing.T) {
 			t.Parallel()
 			sp, runner := newTestSwarmSpawner(t)
 
-			_, err := sp.Spawn(context.Background(), parent, tt.agent, "do it")
+			_, err := sp.Spawn(context.Background(), parent, tt.agent, "do it", "toolu_u")
 			if err == nil {
 				t.Fatalf("Spawn(%q) error = nil, want *UnknownAgentError", tt.agent)
 			}

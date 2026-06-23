@@ -18,7 +18,7 @@ import (
 // than the concrete session — lets the spawner's agent-resolution + cfg-assembly logic
 // be unit-tested with a fake that captures the cfg, with no real session or network.
 type subagentRunner interface {
-	RunSubagent(ctx context.Context, parent loop.Provenance, cfg loop.Config, blocks []content.Block) (string, error)
+	RunSubagent(ctx context.Context, parent loop.Provenance, cfg loop.Config, blocks []content.Block, parentToolUseID string) (string, error)
 }
 
 // spawner.go wires the concrete tools.Spawner the orchestrator's Subagent tool needs.
@@ -105,7 +105,7 @@ func (sp *swarmSpawner) bind(sess *session.Session) { sp.session = sess }
 // sub-loop's in-flight TURN (RunSubagent translates it into a loop-targeted Interrupt
 // and drains to TurnInterrupted) — it does NOT tear the persistent sub-loop down. The
 // sub-loop survives idle under the session root and routes follow-ups back.
-func (sp *swarmSpawner) Spawn(ctx context.Context, parent loop.Provenance, agent identity.AgentName, message string) (string, error) {
+func (sp *swarmSpawner) Spawn(ctx context.Context, parent loop.Provenance, agent identity.AgentName, message string, parentToolUseID string) (string, error) {
 	a, ok := sp.registry.Lookup(agent)
 	if !ok {
 		return "", &UnknownAgentError{Name: agent}
@@ -122,7 +122,7 @@ func (sp *swarmSpawner) Spawn(ctx context.Context, parent loop.Provenance, agent
 		RuntimeContext: sp.runtimeCtx, // swarm-wide volatile per-turn context, shared with the orchestrator
 	}
 	blocks := []content.Block{&content.TextBlock{Text: message}}
-	return sp.session.RunSubagent(ctx, parent, cfg, blocks)
+	return sp.session.RunSubagent(ctx, parent, cfg, blocks, parentToolUseID)
 }
 
 // compile-time assertion: swarmSpawner satisfies the tool's narrow Spawner interface.
