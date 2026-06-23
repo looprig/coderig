@@ -38,8 +38,8 @@ github.com/charmbracelet/x/windows v0.2.2 h1:IofanmuvaxnKHuV04sC0eBy/smG6kIKrWG2
 github.com/charmbracelet/x/windows v0.2.2/go.mod h1:/8XtdKZzedat74NQFn0NGlGL4soHB0YQZrETF96h75k=
 github.com/ciram-co/bubbletea/v2 v2.0.0-20260623210731-9571e88971cd h1:eHgiL3Gt7vWcwQLvQTD+5ZwJyJSoEiFhfPjIsf6YOi4=
 github.com/ciram-co/bubbletea/v2 v2.0.0-20260623210731-9571e88971cd/go.mod h1:DGW2q8gvzHnOpMpZTORs0aySVHCox5C+2Svk0fci1qs=
-github.com/ciram-co/looprig v0.1.1-0.20260623211416-ede4211e7181 h1:c8O2ecVg6sTJ98UaZlO9fybr5Jxklpp2vI65feq/lQs=
-github.com/ciram-co/looprig v0.1.1-0.20260623211416-ede4211e7181/go.mod h1:J/faN9RX7yqF+lpwBGvYZtosuLmLVz2EJ+VX1nMLFdM=
+github.com/ciram-co/looprig v0.1.1 h1:oLPqkAJhBrXeRfwfGI+u/wx2kGf8/rk/uPcK+wZTCrY=
+github.com/ciram-co/looprig v0.1.1/go.mod h1:J/faN9RX7yqF+lpwBGvYZtosuLmLVz2EJ+VX1nMLFdM=
 github.com/clipperhouse/displaywidth v0.11.0 h1:lBc6kY44VFw+TDx4I8opi/EtL9m20WSEFgwIwO+UVM8=
 github.com/clipperhouse/displaywidth v0.11.0/go.mod h1:bkrFNkf81G8HyVqmKGxsPufD3JhNl3dSqnGhOoSD/o0=
 github.com/clipperhouse/uax29/v2 v2.7.0 h1:+gs4oBZ2gPfVrKPthwbMzWZDaAFPGYK72F0NJv2v7Vk=
