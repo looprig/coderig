@@ -281,6 +281,40 @@ func TestPurgeLegacyOutput(t *testing.T) {
 		}
 	})
 
+	t.Run("listing survives a legacy purge", func(t *testing.T) {
+		xdg := t.TempDir()
+		t.Setenv("XDG_DATA_HOME", xdg)
+		root, err := persistence.OpenSessionStoreRoot()
+		if err != nil {
+			t.Fatalf("OpenSessionStoreRoot: %v", err)
+		}
+		id := seedSession(t, root, "kept work", time.Now())
+		legacy := filepath.Join(xdg, "looprig", "jetstream")
+		if err := os.MkdirAll(legacy, 0o700); err != nil {
+			t.Fatalf("seed legacy: %v", err)
+		}
+
+		factory, err := swe.NewSessionStoreFactory()
+		if err != nil {
+			t.Fatalf("NewSessionStoreFactory: %v", err)
+		}
+		var pbuf bytes.Buffer
+		if err := purgeLegacy(factory, &pbuf); err != nil {
+			t.Fatalf("purgeLegacy: %v", err)
+		}
+		if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+			t.Errorf("legacy store not removed: %v", err)
+		}
+
+		var lbuf bytes.Buffer
+		if err := listSessions(factory, &lbuf); err != nil {
+			t.Fatalf("listSessions after purge: %v", err)
+		}
+		if !strings.Contains(lbuf.String(), id.String()) {
+			t.Errorf("session missing from listing after purge:\n%s", lbuf.String())
+		}
+	})
+
 	t.Run("symlinked legacy path is refused", func(t *testing.T) {
 		xdg := t.TempDir()
 		t.Setenv("XDG_DATA_HOME", xdg)

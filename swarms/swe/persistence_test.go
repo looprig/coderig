@@ -132,6 +132,38 @@ func TestSessionStoreFactoryCloseClosesEngine(t *testing.T) {
 	}
 }
 
+// TestSessionStoreFactoryRepeatedClearMintsDistinct proves a repeated /clear cycle mints a
+// fresh session id (and a fresh engine) each time, and that each agent closes its own engine
+// — no id reuse, no engine leak across reopens.
+func TestSessionStoreFactoryRepeatedClearMintsDistinct(t *testing.T) {
+	opener := &fakeEngineOpener{}
+	f, _ := newFakeFactory(opener)
+
+	seen := map[uuid.UUID]bool{}
+	for i := 0; i < 4; i++ {
+		a, err := f.Open(context.Background(), SessionSelector{}, Config{})
+		if err != nil {
+			t.Fatalf("Open #%d: %v", i, err)
+		}
+		id := opener.lastID
+		if id.IsZero() {
+			t.Fatalf("reopen #%d minted a zero id", i)
+		}
+		if seen[id] {
+			t.Errorf("reopen #%d reused session id %v", i, id)
+		}
+		seen[id] = true
+
+		engine := opener.engine
+		if err := a.Close(context.Background()); err != nil {
+			t.Fatalf("Close #%d: %v", i, err)
+		}
+		if !engine.closed {
+			t.Errorf("reopen #%d did not close its own engine", i)
+		}
+	}
+}
+
 // TestSessionStoreFactoryBuildFailureClosesEngine proves a construction failure after the
 // engine is opened still closes that engine (no leaked engine/lock on the error path).
 func TestSessionStoreFactoryBuildFailureClosesEngine(t *testing.T) {
