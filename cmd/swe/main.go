@@ -48,6 +48,7 @@ type cliFlags struct {
 	resume        uuid.UUID
 	runtimeSkills bool
 	greeting      bool
+	purgeLegacy   bool
 }
 
 // FlagParseError reports a malformed CLI invocation (an unknown flag, a non-UUID --resume
@@ -82,6 +83,7 @@ func parseFlags(args []string) (cliFlags, error) {
 		resume        = fs.String("resume", "", "resume the session with this id")
 		runtimeSkills = fs.Bool("runtime-skills", false, "enable the untrusted, human-gated workspace skill source (.skills/) for read-only agents")
 		greeting      = fs.Bool("greeting", false, "show a UI-only startup greeting listing the swarm's agents and skills")
+		purgeLegacy   = fs.Bool("purge-legacy-sessions", false, "DESTRUCTIVE: permanently delete the pre-isolation shared StoreDir (~/.looprig/jetstream) and exit")
 	)
 	if err := fs.Parse(args); err != nil {
 		return cliFlags{}, &FlagParseError{Reason: "invalid flags", Cause: err}
@@ -93,7 +95,7 @@ func parseFlags(args []string) (cliFlags, error) {
 		return cliFlags{}, &FlagParseError{Reason: "unexpected argument " + strconv.Quote(fs.Arg(0))}
 	}
 
-	out := cliFlags{list: *list, runtimeSkills: *runtimeSkills, greeting: *greeting}
+	out := cliFlags{list: *list, runtimeSkills: *runtimeSkills, greeting: *greeting, purgeLegacy: *purgeLegacy}
 
 	// Detect whether --resume was explicitly given (vs left at its empty default): an
 	// explicit --resume with an empty/whitespace value is a malformed invocation, rejected
@@ -118,6 +120,11 @@ func parseFlags(args []string) (cliFlags, error) {
 
 	if out.list && !out.resume.IsZero() {
 		return cliFlags{}, &FlagParseError{Reason: "--list and --resume are mutually exclusive"}
+	}
+	// The destructive purge runs alone: it neither lists nor resumes, so combining it with
+	// either is an ambiguous request rejected at the boundary.
+	if out.purgeLegacy && (out.list || !out.resume.IsZero()) {
+		return cliFlags{}, &FlagParseError{Reason: "--purge-legacy-sessions cannot be combined with --list or --resume"}
 	}
 	return out, nil
 }
@@ -148,6 +155,23 @@ func listSessions(factory *swe.SessionStoreFactory, w io.Writer) error {
 		fmt.Fprintf(w, "%s  %-7s  %s  %s\n",
 			e.Meta.ID, e.Meta.Status, e.Meta.UpdatedAt.Format(time.RFC3339), title)
 	}
+	return nil
+}
+
+// purgeLegacy deletes the pre-isolation shared StoreDir and reports the outcome to w. It
+// prints the exact removed path ONLY after a successful deletion; an absent store is a
+// no-op with a friendly note and no path. A symlinked or escaping legacy path is refused by
+// the store (returned as an error), so the target is never followed. It opens no engine.
+func purgeLegacy(factory *swe.SessionStoreFactory, w io.Writer) error {
+	result, err := factory.PurgeLegacy()
+	if err != nil {
+		return err
+	}
+	if result.Removed {
+		fmt.Fprintln(w, "removed legacy session store:", result.Path)
+		return nil
+	}
+	fmt.Fprintln(w, "no legacy session store to remove")
 	return nil
 }
 
@@ -192,6 +216,17 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	if perr != nil {
 		fmt.Fprintln(errOut, "persistence:", perr)
 		return exitFailed
+	}
+
+	// --purge-legacy-sessions: delete the pre-isolation shared StoreDir and exit. It is
+	// destructive but confined (the store derives + containment-checks the path) and opens no
+	// engine. Handled before --list because the two are mutually exclusive at the boundary.
+	if flags.purgeLegacy {
+		if err := purgeLegacy(factory, out); err != nil {
+			fmt.Fprintln(errOut, "purge:", err)
+			return exitFailed
+		}
+		return exitOK
 	}
 
 	// --list: print the engine-free filesystem session list and exit (no TUI, no engine). It

@@ -193,6 +193,13 @@ func (f *SessionStoreFactory) List() ([]persistence.SessionListEntry, error) {
 	return f.root.ListSessionMeta()
 }
 
+// PurgeLegacy removes the former shared embedded StoreDir (the pre-isolation
+// <app-dir>/jetstream). The path is derived and confinement-checked inside the store; this
+// CLI-facing wrapper never accepts a deletion path. It opens no engine.
+func (f *SessionStoreFactory) PurgeLegacy() (persistence.PurgeLegacyResult, error) {
+	return f.root.PurgeLegacyStore()
+}
+
 // buildPersistedAgent is the production agentBuilder: it builds the per-session journal
 // dependencies over the engine's JetStream context and constructs the persisted (new or
 // resumed) agent under the factory-resolved id.
