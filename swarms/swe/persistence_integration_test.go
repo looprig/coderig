@@ -4,7 +4,6 @@ package swe
 
 import (
 	"context"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -12,7 +11,6 @@ import (
 	"github.com/ciram-co/looprig/pkg/content"
 	"github.com/ciram-co/looprig/pkg/event"
 	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/looprig/pkg/journal"
 	"github.com/ciram-co/looprig/pkg/persistence"
 	"github.com/ciram-co/looprig/pkg/uuid"
 	"github.com/ciram-co/swe/agents/orchestrator"
@@ -23,17 +21,17 @@ import (
 // integration tests, which need to drive a turn to a terminal.)
 func textChunk(s string) content.Chunk { return &content.TextChunk{Text: s} }
 
-// openEngine starts an embedded engine on dir (created under a temp XDG root) and tears it
-// down via cleanup. It is the CLI-shaped composition: a real embedded server over a
-// persistent on-disk StoreDir, exactly as cmd/swe wires it.
-func openEngine(t *testing.T, dir string) *persistence.Engine {
+// newIntegrationFactory points the data root at a temp XDG home and returns the production
+// session-store factory over it: real isolated per-session engines, opened on demand. It is
+// the CLI-shaped composition — each session gets its own embedded StoreDir under sessions/.
+func newIntegrationFactory(t *testing.T) *SessionStoreFactory {
 	t.Helper()
-	eng, err := persistence.Open(persistence.EngineOptions{DataDir: dir, SyncInterval: 2 * time.Second})
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	root, err := persistence.OpenSessionStoreRoot()
 	if err != nil {
-		t.Fatalf("persistence.Open: %v", err)
+		t.Fatalf("OpenSessionStoreRoot: %v", err)
 	}
-	t.Cleanup(func() { _ = eng.Close() })
-	return eng
+	return newSessionStoreFactory(root)
 }
 
 // drainTurn submits input through the persisted agent and drains a fresh subscription to
@@ -68,23 +66,14 @@ func drainTurn(t *testing.T, a *sessionAgent, text string) {
 	}
 }
 
-// TestPersistenceNewSessionBasics proves Open with a ZERO selector builds a NEW persisted
-// session: it has a non-zero SessionID (the composition root minted + injected it) and,
-// being a NEW (not restored) session, ReplayBacklog returns nil so the TUI skips the
-// cold-restore repaint. Orchestrator-as-primary for the persisted path is asserted in the
-// round-trip test via the replayed LoopStarted's attribution name.
-func TestPersistenceNewSessionBasics(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", root)
-	dir := filepath.Join(root, "looprig", "jetstream")
+// TestSessionStoreNewSessionBasics proves openWithClient with a ZERO selector builds a NEW
+// persisted session over its own isolated engine: it has a non-zero SessionID (the factory
+// minted + injected it) and, being a NEW (not restored) session, ReplayBacklog returns nil
+// so the TUI skips the cold-restore repaint.
+func TestSessionStoreNewSessionBasics(t *testing.T) {
+	f := newIntegrationFactory(t)
 
-	eng := openEngine(t, dir)
-	p, err := NewPersistence(eng.JetStream())
-	if err != nil {
-		t.Fatalf("NewPersistence: %v", err)
-	}
-
-	a, err := p.openWithClient(context.Background(),
+	a, err := f.openWithClient(context.Background(),
 		&fakeLLM{chunks: []content.Chunk{textChunk("first reply")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
 	if err != nil {
 		t.Fatalf("openWithClient (new): %v", err)
@@ -94,7 +83,6 @@ func TestPersistenceNewSessionBasics(t *testing.T) {
 	if a.SessionID().IsZero() {
 		t.Fatal("new persisted session has a zero SessionID")
 	}
-	// A NEW session is not a restore: ReplayBacklog returns nil (the TUI skips the repaint).
 	if backlog, err := a.ReplayBacklog(context.Background()); err != nil {
 		t.Fatalf("new-session ReplayBacklog: %v", err)
 	} else if len(backlog) != 0 {
@@ -103,9 +91,7 @@ func TestPersistenceNewSessionBasics(t *testing.T) {
 }
 
 // primaryLoopAgentName returns the AgentName the LoopStarted for loopID carries in evs, or
-// the empty string if no such LoopStarted is present. The restored backlog includes the
-// primary loop's LoopStarted (replayed from the beginning of the durable log), whose
-// Header.AgentName is the attribution name the loop ran under.
+// the empty string if no such LoopStarted is present.
 func primaryLoopAgentName(evs []event.Event, loopID uuid.UUID) identity.AgentName {
 	for _, e := range evs {
 		ls, ok := e.(event.LoopStarted)
@@ -119,26 +105,16 @@ func primaryLoopAgentName(evs []event.Event, loopID uuid.UUID) identity.AgentNam
 	return ""
 }
 
-// TestPersistenceRoundTrip is the headline CLI-shaped wiring smoke: a NEW persisted
-// session (built through the real composition wiring — embedded engine + journal + lease +
-// appenders) runs a turn that persists, the agent is Closed (releasing the lease), the
-// embedded server is RESTARTED on the SAME StoreDir, and the SAME session is RESUMED via
-// the Restore path. The restored session's ReplayBacklog reproduces the committed Enduring
-// events and a fresh turn continues — proving the durable log survived a full
-// process-restart cycle. It mirrors the prior coding agent's TestPersistenceWiringRoundTrip.
-func TestPersistenceRoundTrip(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", root)
-	dir := filepath.Join(root, "looprig", "jetstream")
+// TestSessionStoreRoundTrip is the headline CLI-shaped wiring smoke over isolated engines: a
+// NEW persisted session runs a turn that persists, the agent is Closed (which releases the
+// session lock and closes its engine), and the SAME session is RESUMED — opening a fresh
+// isolated engine on the SAME StoreDir. The restored session's ReplayBacklog reproduces the
+// committed Enduring events and a fresh turn continues, proving the durable log survived a
+// full close/reopen cycle on its own StoreDir.
+func TestSessionStoreRoundTrip(t *testing.T) {
+	f := newIntegrationFactory(t)
 
-	// --- original run: a NEW persisted session ---
-	eng := openEngine(t, dir)
-	p, err := NewPersistence(eng.JetStream())
-	if err != nil {
-		t.Fatalf("NewPersistence: %v", err)
-	}
-
-	a, err := p.openWithClient(context.Background(),
+	a, err := f.openWithClient(context.Background(),
 		&fakeLLM{chunks: []content.Chunk{textChunk("first reply")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
 	if err != nil {
 		t.Fatalf("openWithClient (new): %v", err)
@@ -150,38 +126,23 @@ func TestPersistenceRoundTrip(t *testing.T) {
 
 	drainTurn(t, a, "hello")
 
-	// Clean shutdown releases the lease so a successor (the restored session) can
-	// re-acquire without waiting out the TTL.
+	// A clean Close releases the lock + closes the engine, so a resume can reopen the same
+	// session directory without contending the lock or waiting out the lease TTL.
 	if err := a.Close(context.Background()); err != nil {
 		t.Fatalf("Close (original): %v", err)
 	}
 
-	// --- simulate restart: shut the server, re-open a fresh engine on the SAME StoreDir ---
-	if err := eng.Close(); err != nil {
-		t.Fatalf("engine Close (restart): %v", err)
-	}
-	eng2 := openEngine(t, dir)
-	p2, err := NewPersistence(eng2.JetStream())
-	if err != nil {
-		t.Fatalf("NewPersistence (restart): %v", err)
-	}
-
-	// --- resume the same session (the Restore path) ---
-	a2, err := p2.openWithClient(context.Background(),
+	a2, err := f.openWithClient(context.Background(),
 		&fakeLLM{chunks: []content.Chunk{textChunk("after restore")}}, newModelFactory("test-key"), SessionSelector{Resume: sessionID}, Config{})
 	if err != nil {
 		t.Fatalf("openWithClient (resume): %v", err)
 	}
 	t.Cleanup(func() { _ = a2.Close(context.Background()) })
 
-	// Identity is stable across the restart.
 	if a2.SessionID() != sessionID {
 		t.Errorf("resumed SessionID = %v, want %v", a2.SessionID(), sessionID)
 	}
 
-	// The restored session's ReplayBacklog reproduces the committed Enduring history: it
-	// MUST contain the user turn's TurnStarted and the bracketing RestoreDone. The headline
-	// property: the durable projection survived.
 	backlog, err := a2.ReplayBacklog(context.Background())
 	if err != nil {
 		t.Fatalf("resumed ReplayBacklog: %v", err)
@@ -192,68 +153,75 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	if !hasType(backlog, event.RestoreDone{}) {
 		t.Errorf("resumed backlog missing RestoreDone (restore was not bracketed): %v", typeNames(backlog))
 	}
-
-	// Orchestrator-as-primary survived the persist/restore round-trip: the replayed
-	// primary-loop LoopStarted is attributed to the orchestrator (the persisted path reused
-	// orchestratorConfig, so the journaled primary ran AS the orchestrator).
 	if got := primaryLoopAgentName(backlog, a2.PrimaryLoopID()); got != orchestrator.Name {
 		t.Errorf("restored primary-loop LoopStarted AgentName = %q, want %q (orchestrator-as-primary)", got, orchestrator.Name)
 	}
 
-	// The session continues: a fresh turn is accepted and reaches a terminal.
 	drainTurn(t, a2, "continue")
 }
 
-// TestPersistenceListAndResumeSeams covers the --list / --resume building blocks at the
-// swarm layer: a NEW persisted session appears in the catalog listing (replay-free), and
-// the lease is released on Close so a successor Resume can re-acquire it. It mirrors
-// the prior coding agent's TestPersistenceListAndResumeSeams.
-func TestPersistenceListAndResumeSeams(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", root)
-	dir := filepath.Join(root, "looprig", "jetstream")
+// TestSessionStoreDistinctSessionsCoexist proves two sessions can be active simultaneously,
+// each over its own isolated engine + StoreDir, neither contending the other. This is the
+// core isolation property the feature delivers.
+func TestSessionStoreDistinctSessionsCoexist(t *testing.T) {
+	f := newIntegrationFactory(t)
 
-	eng := openEngine(t, dir)
-	p, err := NewPersistence(eng.JetStream())
+	a, err := f.openWithClient(context.Background(),
+		&fakeLLM{chunks: []content.Chunk{textChunk("a reply")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
 	if err != nil {
-		t.Fatalf("NewPersistence: %v", err)
+		t.Fatalf("openWithClient (a): %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
+
+	b, err := f.openWithClient(context.Background(),
+		&fakeLLM{chunks: []content.Chunk{textChunk("b reply")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
+	if err != nil {
+		t.Fatalf("openWithClient (b): %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close(context.Background()) })
+
+	if a.SessionID() == b.SessionID() {
+		t.Fatal("two new sessions share a SessionID")
 	}
 
-	// An empty catalog lists nothing (the --list-with-no-sessions path).
-	if metas, err := p.List(context.Background()); err != nil {
+	// Both sessions accept and complete a turn while simultaneously active.
+	drainTurn(t, a, "to a")
+	drainTurn(t, b, "to b")
+}
+
+// TestSessionStoreListFindsSession proves the engine-free filesystem List enumerates a
+// session directory created by opening a session.
+func TestSessionStoreListFindsSession(t *testing.T) {
+	f := newIntegrationFactory(t)
+
+	// An empty store lists nothing.
+	if entries, err := f.List(); err != nil {
 		t.Fatalf("List (empty): %v", err)
-	} else if len(metas) != 0 {
-		t.Errorf("List on a fresh engine = %d sessions, want 0", len(metas))
+	} else if len(entries) != 0 {
+		t.Errorf("List on a fresh store = %d entries, want 0", len(entries))
 	}
 
-	a, err := p.openWithClient(context.Background(),
+	a, err := f.openWithClient(context.Background(),
 		&fakeLLM{chunks: []content.Chunk{textChunk("reply")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
 	if err != nil {
 		t.Fatalf("openWithClient: %v", err)
 	}
 	sessionID := a.SessionID()
-	drainTurn(t, a, "list me")
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
 
-	// The listing reads the KV catalog only (no replay) and includes the running session.
-	metas, err := p.List(context.Background())
+	entries, err := f.List()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if !containsSession(metas, sessionID) {
-		t.Errorf("List did not include %v", sessionID)
+	found := false
+	for _, e := range entries {
+		if e.Meta.ID == sessionID {
+			found = true
+		}
 	}
-
-	if err := a.Close(context.Background()); err != nil {
-		t.Fatalf("Close: %v", err)
+	if !found {
+		t.Errorf("List did not include the open session %v: %+v", sessionID, entries)
 	}
-
-	// After a clean Close the lease is released: a successor Restore re-acquires it.
-	a2, err := p.openWithClient(context.Background(),
-		&fakeLLM{chunks: []content.Chunk{textChunk("resumed")}}, newModelFactory("test-key"), SessionSelector{Resume: sessionID}, Config{})
-	if err != nil {
-		t.Fatalf("resume after Close (lease not released?): %v", err)
-	}
-	_ = a2.Close(context.Background())
 }
 
 // hasType reports whether evs contains an event of the same concrete type as want.
@@ -273,13 +241,4 @@ func typeNames(evs []event.Event) []string {
 		out[i] = reflect.TypeOf(e).String()
 	}
 	return out
-}
-
-func containsSession(metas []journal.SessionMeta, id uuid.UUID) bool {
-	for _, m := range metas {
-		if m.SessionID == id {
-			return true
-		}
-	}
-	return false
 }

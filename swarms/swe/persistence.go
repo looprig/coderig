@@ -2,12 +2,14 @@ package swe
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"time"
 
 	"github.com/ciram-co/looprig/pkg/journal"
 	"github.com/ciram-co/looprig/pkg/llm"
+	"github.com/ciram-co/looprig/pkg/persistence"
 	"github.com/ciram-co/looprig/pkg/session"
 	"github.com/ciram-co/looprig/pkg/uuid"
 	"github.com/nats-io/nats.go"
@@ -43,12 +45,12 @@ const gcInterval = 5 * time.Minute
 // The bucket TTL is the backstop if it fails.
 const leaseReleaseTimeout = 5 * time.Second
 
-// Persistence is the per-process durable-journal context the composition root builds once
-// (over the embedded engine's JetStreamContext) and reuses for every session it opens
-// (across a /clear reopen). It owns the shared, session-independent infrastructure: the
-// JetStream context, the lease manager, and the derived session catalog. Per-session
-// objects (the stream journal, object store, replayer, GC) are built per session by the
-// persisted constructors. It is read-only after construction and safe to share.
+// Persistence is the per-SESSION durable-journal context built fresh over one isolated
+// embedded engine's JetStreamContext, every time the factory opens a session (a new session
+// or a /clear reopen mints a fresh id → a fresh engine → a fresh Persistence). It owns the
+// session-local journal infrastructure: the JetStream context, the lease manager, and the
+// catalog. Per-session objects (the stream journal, object store, replayer, GC) are built by
+// the persisted constructors. It is read-only after construction.
 type Persistence struct {
 	js      nats.JetStreamContext
 	leases  *journal.LeaseManager
@@ -76,11 +78,147 @@ func NewPersistence(js nats.JetStreamContext) (*Persistence, error) {
 	return &Persistence{js: js, leases: leases, catalog: catalog}, nil
 }
 
-// List returns the replay-free session catalog (id, title, last-active, status) the CLI's
-// --list path prints. It reads the KV bucket only — no stream consumer, no replay — so it
-// is cheap even with many sessions.
-func (p *Persistence) List(ctx context.Context) ([]journal.SessionMeta, error) {
-	return p.catalog.ListSessions(ctx)
+// sessionEngine is the per-session embedded engine the factory builds journal dependencies
+// from and closes on the agent's teardown. *persistence.SessionEngine satisfies it.
+type sessionEngine interface {
+	JetStream() nats.JetStreamContext
+	Close() error
+}
+
+// engineOpener opens an isolated embedded engine for a session id. The production opener
+// wraps *persistence.SessionStoreRoot; unit tests inject a fake that records the id and
+// returns a fake engine, so they never start NATS.
+type engineOpener interface {
+	OpenSessionEngine(id uuid.UUID) (sessionEngine, error)
+}
+
+// storeRootEngineOpener adapts *persistence.SessionStoreRoot to engineOpener (the concrete
+// *persistence.SessionEngine it returns satisfies the sessionEngine interface).
+type storeRootEngineOpener struct{ root *persistence.SessionStoreRoot }
+
+func (o storeRootEngineOpener) OpenSessionEngine(id uuid.UUID) (sessionEngine, error) {
+	return o.root.OpenSessionEngine(id)
+}
+
+// agentBuilder turns a live session engine's JetStream context into a persisted
+// *sessionAgent. isNew selects the new-vs-resume construction; id is the factory-resolved
+// session id. Production builds the real journal-backed agent; unit tests inject a fake that
+// returns a headless agent without starting NATS.
+type agentBuilder func(ctx context.Context, js nats.JetStreamContext, client llm.LLM, factory ModelFactory, id uuid.UUID, isNew bool, sel SessionSelector, cfg Config) (*sessionAgent, error)
+
+// SessionStoreFactory is the session-scoped composition root that replaces the former
+// process-global startPersistence + shared Persistence. It owns the confined session store
+// and, on each open, mints (for a new session) or receives (for a resume) a session id,
+// opens that session's isolated embedded engine, builds the journal dependencies from that
+// engine, and installs engine close as the persisted agent's teardown. Two distinct sessions
+// can therefore be active at once over independent StoreDirs.
+type SessionStoreFactory struct {
+	root        *persistence.SessionStoreRoot
+	opener      engineOpener
+	build       agentBuilder
+	buildClient func() (llm.LLM, ModelFactory, error)
+}
+
+// NewSessionStoreFactory opens the confined session store and returns the production factory:
+// real per-session engines, the real journal-backed agent builder, and the real provider
+// client builder (reads LLM_API_KEY). It fails closed if the session store cannot be opened.
+func NewSessionStoreFactory() (*SessionStoreFactory, error) {
+	root, err := persistence.OpenSessionStoreRoot()
+	if err != nil {
+		return nil, err
+	}
+	return newSessionStoreFactory(root), nil
+}
+
+// newSessionStoreFactory wires the production collaborators around an already-opened store
+// root. It is shared by NewSessionStoreFactory and the integration tests (which open the
+// root under a temp XDG home and then inject a fake client via openWithClient).
+func newSessionStoreFactory(root *persistence.SessionStoreRoot) *SessionStoreFactory {
+	f := &SessionStoreFactory{
+		root:        root,
+		opener:      storeRootEngineOpener{root: root},
+		buildClient: buildClient,
+	}
+	f.build = f.buildPersistedAgent
+	return f
+}
+
+// Open builds a fully-persisted SWE-Swarm session for sel (new or resumed) and returns it as
+// a tui.Agent. It builds the provider client + ModelFactory exactly like the headless New
+// path (reads LLM_API_KEY, refuses an unclassified provider, fails loud on a missing key),
+// then delegates to the session-scoped construction seam. The returned *sessionAgent
+// satisfies tui.Agent.
+func (f *SessionStoreFactory) Open(ctx context.Context, sel SessionSelector, cfg Config) (*sessionAgent, error) {
+	client, factory, err := f.buildClient()
+	if err != nil {
+		return nil, err
+	}
+	return f.openWithClient(ctx, client, factory, sel, cfg)
+}
+
+// openWithClient resolves the session id (minting one for a new session BEFORE any engine is
+// constructed), opens that id's isolated engine, builds the persisted agent from the engine's
+// JetStream context, and installs engine close as the agent teardown so a clean Close drains
+// the journal and then releases the session's lock + StoreDir. It is the seam the integration
+// tests drive with an injected fake client.
+func (f *SessionStoreFactory) openWithClient(ctx context.Context, client llm.LLM, factory ModelFactory, sel SessionSelector, cfg Config) (*sessionAgent, error) {
+	id, isNew := sel.Resume, false
+	if id.IsZero() {
+		isNew = true
+		minted, err := uuid.New()
+		if err != nil {
+			return nil, &session.SessionError{Kind: session.SessionIDGenerationFailed, Cause: err}
+		}
+		id = minted
+	}
+
+	engine, err := f.opener.OpenSessionEngine(id)
+	if err != nil {
+		return nil, err
+	}
+
+	agent, err := f.build(ctx, engine.JetStream(), client, factory, id, isNew, sel, cfg)
+	if err != nil {
+		_ = engine.Close()
+		return nil, err
+	}
+	agent.teardown = appendEngineClose(agent.teardown, engine)
+	return agent, nil
+}
+
+// List returns the session manifests read directly from the filesystem session store
+// (most-recently-updated first), the engine-free source the CLI --list path prints. It
+// never opens an embedded engine, so it stays cheap and cannot contend a running session.
+func (f *SessionStoreFactory) List() ([]persistence.SessionListEntry, error) {
+	return f.root.ListSessionMeta()
+}
+
+// buildPersistedAgent is the production agentBuilder: it builds the per-session journal
+// dependencies over the engine's JetStream context and constructs the persisted (new or
+// resumed) agent under the factory-resolved id.
+func (f *SessionStoreFactory) buildPersistedAgent(ctx context.Context, js nats.JetStreamContext, client llm.LLM, factory ModelFactory, id uuid.UUID, isNew bool, sel SessionSelector, cfg Config) (*sessionAgent, error) {
+	p, err := NewPersistence(js)
+	if err != nil {
+		return nil, err
+	}
+	return p.openResolved(ctx, client, factory, id, isNew, sel, cfg)
+}
+
+// appendEngineClose composes the existing persistence teardown (the GC-stop closure) with
+// the session engine's Close, running engine Close AFTER the prior teardown — and therefore
+// after session.Shutdown's final append — so the journal is flushed before the StoreDir is
+// closed and the lock released. An engine close error is joined so neither error is lost.
+func appendEngineClose(prev func(context.Context) error, engine sessionEngine) func(context.Context) error {
+	return func(ctx context.Context) error {
+		var err error
+		if prev != nil {
+			err = prev(ctx)
+		}
+		if cerr := engine.Close(); cerr != nil {
+			err = errors.Join(err, cerr)
+		}
+		return err
+	}
 }
 
 // SessionSelector chooses which session a persisted Open opens. The zero value (Resume
@@ -93,30 +231,15 @@ type SessionSelector struct {
 	AllowConfigMismatch bool
 }
 
-// Open constructs a fully-persisted SWE-Swarm session over p, opening the session sel
-// selects (new or resumed), and returns it as a tui.Agent. It is the production entry the
-// composition root calls after building the embedded engine + Persistence. cfg carries the
-// human-set construction modes (RuntimeSkills) through to the wiring, identically to the
-// headless New path. It builds the provider client + ModelFactory exactly like New (reads
-// LLM_API_KEY, refuses an unclassified provider, fails loud on a missing key) then
-// delegates to the persisted construction seam. The returned *sessionAgent satisfies
-// tui.Agent.
-func (p *Persistence) Open(ctx context.Context, sel SessionSelector, cfg Config) (*sessionAgent, error) {
-	client, factory, err := buildClient()
-	if err != nil {
-		return nil, err
-	}
-	return p.openWithClient(ctx, client, factory, sel, cfg)
-}
-
-// openWithClient is the persisted construction seam shared by Open and the integration
-// tests (which inject a fake llm.LLM + key-bound ModelFactory). It branches on sel: a zero
-// Resume opens a NEW persisted session, a non-zero Resume RESTORES it. It resolves the
+// openResolved is the persisted construction seam shared by the factory and the integration
+// tests (which inject a fake llm.LLM + key-bound ModelFactory). It branches on isNew: a NEW
+// open builds over the factory-minted id (the journal must use the SAME id the session
+// directory + engine were opened with); a RESUME restores sel.Resume. It resolves the
 // workspace root once (fail-fast on os.Getwd error) and builds the SAME orchestratorWiring
 // the headless New uses (leaf registry + unbound spawner + primary cfg with Subagent
 // wired) under cfg (the human-set modes — RuntimeSkills), so both branches construct an
 // identical orchestrator and both bind the live session onto the spawner after building it.
-func (p *Persistence) openWithClient(ctx context.Context, client llm.LLM, factory ModelFactory, sel SessionSelector, cfg Config) (*sessionAgent, error) {
+func (p *Persistence) openResolved(ctx context.Context, client llm.LLM, factory ModelFactory, id uuid.UUID, isNew bool, sel SessionSelector, cfg Config) (*sessionAgent, error) {
 	// The workspace root is the process working directory: file tools are confined to it
 	// and the PermissionChecker uses it for containment + path relativisation.
 	root, err := os.Getwd()
@@ -135,26 +258,23 @@ func (p *Persistence) openWithClient(ctx context.Context, client llm.LLM, factor
 	// New path injects, so the persisted and headless fingerprints cannot drift.
 	fields := orchestratorFingerprintFields(root, cfg)
 
-	if sel.Resume.IsZero() {
-		return p.openNew(ctx, wiring, fields)
+	if isNew {
+		return p.openNew(ctx, wiring, id, fields)
 	}
 	return p.openResume(ctx, wiring, sel, fields)
 }
 
-// openNew opens a NEW persisted session. It resolves the journal chicken-and-egg by
-// minting the sessionID FIRST, then acquiring the lease, constructing the journal (which
-// writes the opening LeaseFence), building the catalog-backed event appender + the command
-// appender, and finally calling newPersistentSessionAgent with the INJECTED sessionID +
-// both appenders + the lease-release hook (so a clean Shutdown frees ownership) + the
-// orchestrator spawn caps. On any failure before the session is built it releases the
+// openNew opens a NEW persisted session over the factory-minted sessionID (the engine and
+// session directory were already opened on that id). It acquires the lease, constructs the
+// journal (which writes the opening LeaseFence), builds the catalog-backed event appender +
+// the command appender, and finally calls newPersistentSessionAgent with the INJECTED
+// sessionID + both appenders + the lease-release hook (so a clean Shutdown frees ownership) +
+// the orchestrator spawn caps. On any failure before the session is built it releases the
 // lease so a retry can re-acquire without waiting out the TTL.
-func (p *Persistence) openNew(ctx context.Context, wiring orchestratorWiring, fields session.ConfigFingerprintFields) (*sessionAgent, error) {
-	// (1) Mint the sessionID FIRST — the journal needs it to bind the stream + write the
-	// opening LeaseFence before the session exists. (chicken-and-egg resolution)
-	sessionID, err := uuid.New()
-	if err != nil {
-		return nil, &session.SessionError{Kind: session.SessionIDGenerationFailed, Cause: err}
-	}
+func (p *Persistence) openNew(ctx context.Context, wiring orchestratorWiring, sessionID uuid.UUID, fields session.ConfigFingerprintFields) (*sessionAgent, error) {
+	// (1) The sessionID was minted by the factory BEFORE the engine was opened — the session
+	// directory, lock, and embedded StoreDir are already keyed on it. The journal binds the
+	// stream + writes the opening LeaseFence under that SAME id. (chicken-and-egg resolution)
 
 	// (2) Acquire the single-writer lease, then build the journal (opening LeaseFence).
 	lease, err := p.leases.Acquire(ctx, sessionID)

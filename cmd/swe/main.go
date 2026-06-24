@@ -1,9 +1,10 @@
 // Command swe is the SWE-Swarm TUI entry point and composition root. It parses the CLI
-// invocation (--list / --resume), starts the embedded JetStream engine on the default
-// StoreDir, and either prints the resumable-session catalog (--list) or hands the shared
-// CLI runtime (internal/cli.Run) a thunk that opens/resumes the PERSISTED swarm session.
-// It is wiring only: all runtime behavior (logging, signal teardown, the TUI) lives in
-// internal/cli, and all session/persistence behavior lives in swarms/swe.
+// invocation (--list / --resume), opens the session-store factory (which opens one isolated
+// embedded JetStream engine per session on demand), and either prints the engine-free
+// filesystem session list (--list) or hands the shared CLI runtime (internal/cli.Run) a
+// thunk that opens/resumes the PERSISTED swarm session. It is wiring only: all runtime
+// behavior (logging, signal teardown, the TUI) lives in internal/cli, and all
+// session/persistence behavior lives in swarms/swe.
 package main
 
 import (
@@ -19,7 +20,6 @@ import (
 	"time"
 
 	"github.com/ciram-co/looprig/pkg/cli"
-	"github.com/ciram-co/looprig/pkg/persistence"
 	"github.com/ciram-co/looprig/pkg/tui"
 	"github.com/ciram-co/looprig/pkg/uuid"
 	"github.com/ciram-co/swe/swarms/swe"
@@ -28,9 +28,6 @@ import (
 // bannerName is the SWE-Swarm's user-facing banner name shown in the TUI session-ready
 // notice (passed through internal/cli.Banner).
 const bannerName = "SWE"
-
-// listTimeout bounds the --list catalog read.
-const listTimeout = 10 * time.Second
 
 // Process exit codes main returns via os.Exit. exitOK / exitRuntime mirror the runtime's
 // codes; exitUsage is the boundary-failure code for a malformed invocation or a
@@ -125,48 +122,31 @@ func parseFlags(args []string) (cliFlags, error) {
 	return out, nil
 }
 
-// startPersistence builds the embedded engine on the default StoreDir and the per-process
-// swe.Persistence context (lease manager + catalog) over it. On any failure it returns a
-// typed error and no engine (so the caller fails loud). The engine and Persistence are
-// owned by main for the whole process; the caller closes the engine at exit.
-func startPersistence() (*persistence.Engine, *swe.Persistence, error) {
-	opts, err := persistence.DefaultEngineOptions()
-	if err != nil {
-		return nil, nil, err
-	}
-	engine, err := persistence.Open(opts)
-	if err != nil {
-		return nil, nil, err
-	}
-	p, err := swe.NewPersistence(engine.JetStream())
-	if err != nil {
-		_ = engine.Close()
-		return nil, nil, err
-	}
-	return engine, p, nil
-}
-
-// listSessions prints the replay-free session catalog (id, status, last-active, title) to
-// w, newest-active first. It is the --list path: it reads the KV index only (no replay, no
-// stream consumer). An empty catalog prints a friendly note rather than nothing.
-func listSessions(ctx context.Context, p *swe.Persistence, w io.Writer) error {
-	lctx, cancel := context.WithTimeout(ctx, listTimeout)
-	defer cancel()
-	metas, err := p.List(lctx)
+// listSessions prints the engine-free filesystem session list (id, status, last-active,
+// title) to w, newest-updated first. It is the --list path: it reads the directory manifests
+// only — no engine, no replay — so it is cheap and cannot contend a running session. A
+// missing or corrupt manifest is shown as "metadata-invalid"; an empty store prints a
+// friendly note rather than nothing.
+func listSessions(factory *swe.SessionStoreFactory, w io.Writer) error {
+	entries, err := factory.List()
 	if err != nil {
 		return err
 	}
-	if len(metas) == 0 {
+	if len(entries) == 0 {
 		fmt.Fprintln(w, "no sessions yet")
 		return nil
 	}
-	for _, m := range metas {
-		title := m.Title
+	for _, e := range entries {
+		if e.Err != nil {
+			fmt.Fprintf(w, "%s  %s\n", e.Meta.ID, "metadata-invalid")
+			continue
+		}
+		title := e.Meta.Title
 		if title == "" {
 			title = "(untitled)"
 		}
 		fmt.Fprintf(w, "%s  %-7s  %s  %s\n",
-			m.SessionID, m.Status, m.LastActiveAt.Format(time.RFC3339), title)
+			e.Meta.ID, e.Meta.Status, e.Meta.UpdatedAt.Format(time.RFC3339), title)
 	}
 	return nil
 }
@@ -176,9 +156,11 @@ func listSessions(ctx context.Context, p *swe.Persistence, w io.Writer) error {
 // session); every later call (a /clear reopen) starts a fresh NEW session, so /clear never
 // re-restores the same id. The first-call latch is guarded so a reopen is deterministically
 // a new session. cfg carries the human-set construction modes (RuntimeSkills) and applies to
-// every open, including a /clear reopen (the launch flag holds for the whole process). The
-// returned thunk yields a tui.Agent (the persisted *sessionAgent satisfies it).
-func openThunk(p *swe.Persistence, resume uuid.UUID, cfg swe.Config) tui.OpenAgent {
+// every open, including a /clear reopen (the launch flag holds for the whole process). Each
+// open mints (or, on the first call, resumes) a session over its OWN isolated engine, so a
+// /clear reopen's new session never shares a StoreDir with the one it replaces. The returned
+// thunk yields a tui.Agent (the persisted *sessionAgent satisfies it).
+func openThunk(factory *swe.SessionStoreFactory, resume uuid.UUID, cfg swe.Config) tui.OpenAgent {
 	var opened bool
 	return func(c context.Context) (tui.Agent, error) {
 		sel := swe.SessionSelector{}
@@ -186,11 +168,11 @@ func openThunk(p *swe.Persistence, resume uuid.UUID, cfg swe.Config) tui.OpenAge
 			sel.Resume = resume // only the first open resumes; /clear reopens start fresh
 		}
 		opened = true
-		return p.Open(c, sel, cfg)
+		return factory.Open(c, sel, cfg)
 	}
 }
 
-// run is the testable composition root: it parses flags, starts the embedded engine,
+// run is the testable composition root: it parses flags, opens the session-store factory,
 // handles --list (print + exit) or builds the persisted openThunk and delegates to
 // internal/cli.Run. It returns a process exit code and never calls os.Exit, so main stays
 // the single exit point. ctx is the process root (signal-aware); out/errOut are the list
@@ -202,21 +184,20 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 		return exitUsage
 	}
 
-	// Start the embedded JetStream engine over the persistent StoreDir under the user data
-	// dir. It outlives every agent (a /clear reopens a fresh session against the same
-	// engine) and is shut down cleanly at exit. A failure to start fails loud — persistence
-	// is the point.
-	engine, persist, perr := startPersistence()
+	// Open the session-store factory: the session-scoped composition root that owns the
+	// confined session store and opens one isolated embedded engine per session on demand
+	// (each agent closes its own engine on teardown). A failure to open the store fails loud
+	// — persistence is the point.
+	factory, perr := swe.NewSessionStoreFactory()
 	if perr != nil {
 		fmt.Fprintln(errOut, "persistence:", perr)
 		return exitFailed
 	}
-	defer func() { _ = engine.Close() }()
 
-	// --list: print the replay-free session catalog and exit (no TUI, no replay). It reads
-	// only the KV index, so it is cheap even with many sessions and runs no turn.
+	// --list: print the engine-free filesystem session list and exit (no TUI, no engine). It
+	// reads only the directory manifests, so it is cheap even with many sessions.
 	if flags.list {
-		if err := listSessions(ctx, persist, out); err != nil {
+		if err := listSessions(factory, out); err != nil {
 			fmt.Fprintln(errOut, "list:", err)
 			return exitFailed
 		}
@@ -224,13 +205,14 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	}
 
 	// The initial open honors --resume; every /clear reopen starts a FRESH persisted
-	// session. The --runtime-skills and --greeting modes apply to every open. The startup
-	// greeting (§5a) is built ONCE here from the registry (deterministic, no LLM call) —
-	// empty unless --greeting is set — and handed to the TUI as an opening transcript
-	// entry via the Banner; it is NOT a turn, NOT a command, and never enters the model's
-	// context. internal/cli.Run owns logging, signal teardown, the TUI, and bounded Close.
+	// session over a fresh isolated engine. The --runtime-skills and --greeting modes apply
+	// to every open. The startup greeting (§5a) is built ONCE here from the registry
+	// (deterministic, no LLM call) — empty unless --greeting is set — and handed to the TUI
+	// as an opening transcript entry via the Banner; it is NOT a turn, NOT a command, and
+	// never enters the model's context. internal/cli.Run owns logging, signal teardown, the
+	// TUI, and bounded Close.
 	cfg := swe.Config{RuntimeSkills: flags.runtimeSkills, Greeting: flags.greeting}
-	open := openThunk(persist, flags.resume, cfg)
+	open := openThunk(factory, flags.resume, cfg)
 	return cli.Run(ctx, open, cli.Banner{Name: bannerName, Greeting: swe.Greeting(cfg)})
 }
 
