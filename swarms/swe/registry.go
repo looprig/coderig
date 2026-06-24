@@ -66,6 +66,14 @@ type Config struct {
 	// a turn, NOT a command, never in the model's context. The model can never set it;
 	// only a launch flag does (cmd/swe's --greeting). See Greeting() and greeting.go.
 	Greeting bool
+
+	// ModelCatalog is the OPTIONAL model-tier catalog (§ optional model tiers). Its zero
+	// value (all tiers empty) preserves the swarm's existing default model and disables
+	// title-model generation, so a caller that sets nothing is unaffected. A non-empty
+	// Standard selects its first model for normal loops; a non-empty Economy enables
+	// best-effort title generation; Premium is stored but never implicitly selected. Every
+	// supplied spec is validated at construction. See model_catalog.go.
+	ModelCatalog ModelCatalog
 }
 
 // ModelFactory turns a finished system prompt into an llm.ModelSpec. The swarm

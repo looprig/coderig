@@ -146,7 +146,7 @@ func TestOperatorEvalIntegration(t *testing.T) {
 
 	// Build the shared client + key-bound ModelFactory the same way swe.New does
 	// (buildClient), then resolve the workspace root for the operator's file tools.
-	client, factory, err := buildClient()
+	client, factory, err := buildClient(ModelCatalog{})
 	if err != nil {
 		t.Fatalf("buildClient: %v", err)
 	}

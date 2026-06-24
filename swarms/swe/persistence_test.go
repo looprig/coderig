@@ -49,7 +49,7 @@ func newFakeFactory(opener *fakeEngineOpener) (*SessionStoreFactory, *buildRecor
 	rec := &buildRecord{}
 	f := &SessionStoreFactory{
 		opener:      opener,
-		buildClient: func() (llm.LLM, ModelFactory, error) { return &fakeLLM{}, newModelFactory("k"), nil },
+		buildClient: func(ModelCatalog) (llm.LLM, ModelFactory, error) { return &fakeLLM{}, newModelFactory("k"), nil },
 		build: func(ctx context.Context, js nats.JetStreamContext, client llm.LLM, factory ModelFactory, id uuid.UUID, isNew bool, sel SessionSelector, cfg Config) (*sessionAgent, error) {
 			rec.calls++
 			rec.id = id
@@ -138,7 +138,7 @@ func TestSessionStoreFactoryBuildFailureClosesEngine(t *testing.T) {
 	opener := &fakeEngineOpener{}
 	f := &SessionStoreFactory{
 		opener:      opener,
-		buildClient: func() (llm.LLM, ModelFactory, error) { return &fakeLLM{}, newModelFactory("k"), nil },
+		buildClient: func(ModelCatalog) (llm.LLM, ModelFactory, error) { return &fakeLLM{}, newModelFactory("k"), nil },
 		build: func(ctx context.Context, js nats.JetStreamContext, client llm.LLM, factory ModelFactory, id uuid.UUID, isNew bool, sel SessionSelector, cfg Config) (*sessionAgent, error) {
 			return nil, errors.New("build failed")
 		},

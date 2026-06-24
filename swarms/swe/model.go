@@ -21,28 +21,38 @@ var model = llm.ChutesKimiK2()
 // false positive here.
 const envAPIKey = "LLM_API_KEY" // #nosec G101 -- env var name, not a credential
 
-// newModelFactory builds the swarm's ModelFactory: a closure that materializes a
-// full llm.ModelSpec for any system prompt by injecting the shared model identity
-// + the (already-read) API key. The swarm owns provider/model/sampling; agents
-// pass only their finished system prompt and never see the key. The key is closed
-// over verbatim — never normalized; credential material is passed as-is. Splitting
-// this out from buildClient gives the model_test a key-injection seam with no env
-// read or network call.
+// newModelFactory builds the swarm's ModelFactory over the DEFAULT model: a closure that
+// materializes a full llm.ModelSpec for any system prompt by injecting the shared model
+// identity + the (already-read) API key. It is newModelFactoryFor bound to the package
+// default model, kept for the tests that exercise the default seam directly.
 func newModelFactory(apiKey string) ModelFactory {
+	return newModelFactoryFor(model, apiKey)
+}
+
+// newModelFactoryFor builds a ModelFactory over an explicit base model identity: a closure
+// that materializes a full llm.ModelSpec for any system prompt by injecting base's
+// provider/model/sampling + the (already-read) API key. The swarm owns provider/model/
+// sampling; agents pass only their finished system prompt and never see the key. The key is
+// closed over verbatim — never normalized; credential material is passed as-is.
+func newModelFactoryFor(base llm.Model, apiKey string) ModelFactory {
 	return func(systemPrompt string) llm.ModelSpec {
-		return model.Spec(apiKey, systemPrompt)
+		return base.Spec(apiKey, systemPrompt)
 	}
 }
 
-// readAPIKey is the credential boundary: it resolves whether the configured
-// model's provider requires a key (failing secure on an unclassified provider),
-// reads LLM_API_KEY, and fails loud with a typed *MissingEnvError if a required
-// key is absent. env is a boundary, so a whitespace-only value is treated as
-// missing — the failure is loud at startup, not deferred to provider-call time.
-// The key is returned verbatim (the TrimSpace is a presence check, not a
-// sanitizer) so the single read+pass of credential material lives in one spot.
+// readAPIKey is the credential boundary for the DEFAULT model. See readAPIKeyFor.
 func readAPIKey() (string, error) {
-	needsKey, err := model.Provider.RequiresKey()
+	return readAPIKeyFor(model)
+}
+
+// readAPIKeyFor resolves whether base's provider requires a key (failing secure on an
+// unclassified provider), reads LLM_API_KEY, and fails loud with a typed *MissingEnvError if
+// a required key is absent. env is a boundary, so a whitespace-only value is treated as
+// missing — the failure is loud at startup, not deferred to provider-call time. The key is
+// returned verbatim (the TrimSpace is a presence check, not a sanitizer) so the single
+// read+pass of credential material lives in one spot.
+func readAPIKeyFor(base llm.Model) (string, error) {
+	needsKey, err := base.Provider.RequiresKey()
 	if err != nil {
 		return "", err // unclassified provider — fail secure
 	}
@@ -53,24 +63,34 @@ func readAPIKey() (string, error) {
 	return apiKey, nil
 }
 
-// buildClient is the env+provider construction boundary shared by swe.New: it
-// reads the API key (fail-loud via readAPIKey), builds + validates the single
-// shared provider client via auto.New, and returns the ModelFactory bound to the
-// same key. The client is built from a spec with an EMPTY system prompt — the
-// provider client is system-agnostic (the per-agent system prompt is sent every
-// turn via loop.Config.Model, materialized by the factory), so the empty-system
-// spec is only used to validate + dispatch on the provider. On any failure it
-// returns nil client + nil factory (fail secure).
-func buildClient() (llm.LLM, ModelFactory, error) {
-	apiKey, err := readAPIKey()
+// buildClient is the env+provider construction boundary shared by swe.New and the session
+// factory. It resolves the NORMAL-loop model from catalog (the Standard tier's first entry,
+// or the swarm default when no Standard is configured — a validation failure in any tier
+// fails loud here), reads the API key (fail-loud via readAPIKeyFor), builds + validates the
+// single shared provider client via auto.New, and returns the ModelFactory bound to the
+// resolved model + key. The client is built from a spec with an EMPTY system prompt — the
+// provider client is system-agnostic (the per-agent system prompt is sent every turn via
+// loop.Config.Model, materialized by the factory). On any failure it returns nil client +
+// nil factory (fail secure).
+func buildClient(catalog ModelCatalog) (llm.LLM, ModelFactory, error) {
+	resolver, err := newModelResolver(catalog)
+	if err != nil {
+		return nil, nil, err
+	}
+	base := model
+	if standard, ok := resolver.standardModel(); ok {
+		base = standard
+	}
+
+	apiKey, err := readAPIKeyFor(base)
 	if err != nil {
 		return nil, nil, err
 	}
 	// Empty system: the provider client carries only provider/baseURL/key; the
 	// system prompt is a per-turn concern the factory bakes into each agent's spec.
-	client, err := auto.New(model.Spec(apiKey, ""))
+	client, err := auto.New(base.Spec(apiKey, ""))
 	if err != nil {
 		return nil, nil, err
 	}
-	return client, newModelFactory(apiKey), nil
+	return client, newModelFactoryFor(base, apiKey), nil
 }

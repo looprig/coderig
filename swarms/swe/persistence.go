@@ -116,7 +116,7 @@ type SessionStoreFactory struct {
 	root        *persistence.SessionStoreRoot
 	opener      engineOpener
 	build       agentBuilder
-	buildClient func() (llm.LLM, ModelFactory, error)
+	buildClient func(catalog ModelCatalog) (llm.LLM, ModelFactory, error)
 }
 
 // NewSessionStoreFactory opens the confined session store and returns the production factory:
@@ -149,7 +149,7 @@ func newSessionStoreFactory(root *persistence.SessionStoreRoot) *SessionStoreFac
 // then delegates to the session-scoped construction seam. The returned *sessionAgent
 // satisfies tui.Agent.
 func (f *SessionStoreFactory) Open(ctx context.Context, sel SessionSelector, cfg Config) (*sessionAgent, error) {
-	client, factory, err := f.buildClient()
+	client, factory, err := f.buildClient(cfg.ModelCatalog)
 	if err != nil {
 		return nil, err
 	}

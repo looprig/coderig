@@ -97,16 +97,16 @@ func TestReadAPIKey(t *testing.T) {
 func TestBuildClientFailsLoudOnMissingKey(t *testing.T) {
 	t.Setenv(envAPIKey, "")
 
-	client, factory, err := buildClient()
+	client, factory, err := buildClient(ModelCatalog{})
 	if client != nil {
-		t.Errorf("buildClient() client = %v, want nil", client)
+		t.Errorf("buildClient(ModelCatalog{}) client = %v, want nil", client)
 	}
 	if factory != nil {
-		t.Errorf("buildClient() factory = %v, want nil", factory)
+		t.Errorf("buildClient(ModelCatalog{}) factory = %v, want nil", factory)
 	}
 	var me *MissingEnvError
 	if !errors.As(err, &me) {
-		t.Fatalf("buildClient() error = %v, want *MissingEnvError", err)
+		t.Fatalf("buildClient(ModelCatalog{}) error = %v, want *MissingEnvError", err)
 	}
 }
 
@@ -115,15 +115,15 @@ func TestBuildClientFailsLoudOnMissingKey(t *testing.T) {
 func TestBuildClientHappy(t *testing.T) {
 	t.Setenv(envAPIKey, "secret-key")
 
-	client, factory, err := buildClient()
+	client, factory, err := buildClient(ModelCatalog{})
 	if err != nil {
-		t.Fatalf("buildClient() error = %v", err)
+		t.Fatalf("buildClient(ModelCatalog{}) error = %v", err)
 	}
 	if client == nil {
-		t.Fatal("buildClient() returned nil client")
+		t.Fatal("buildClient(ModelCatalog{}) returned nil client")
 	}
 	if factory == nil {
-		t.Fatal("buildClient() returned nil factory")
+		t.Fatal("buildClient(ModelCatalog{}) returned nil factory")
 	}
 	const sys = "<role/>"
 	if spec := factory(sys); spec.System != sys {

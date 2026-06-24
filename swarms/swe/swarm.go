@@ -210,7 +210,7 @@ func buildOrchestratorWiring(client llm.LLM, factory ModelFactory, root string, 
 // so the orchestrator can spawn the leaf registry's agents by name; a spawned leaf has no
 // Subagent tool (least privilege — only the primary holds the spawn capability).
 func New(ctx context.Context, cfg Config) (tui.Agent, error) {
-	client, factory, err := buildClient()
+	client, factory, err := buildClient(cfg.ModelCatalog)
 	if err != nil {
 		return nil, err
 	}
