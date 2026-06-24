@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/ciram-co/looprig/pkg/event"
 	"github.com/ciram-co/looprig/pkg/journal"
 	"github.com/ciram-co/looprig/pkg/llm"
 	"github.com/ciram-co/looprig/pkg/persistence"
@@ -182,8 +183,76 @@ func (f *SessionStoreFactory) openWithClient(ctx context.Context, client llm.LLM
 		_ = engine.Close()
 		return nil, err
 	}
+	f.installTitleCoordinator(agent, client, id, cfg)
 	agent.teardown = appendEngineClose(agent.teardown, engine)
 	return agent, nil
+}
+
+// installTitleCoordinator wires best-effort session titling at the persisted-agent boundary:
+// it ensures the session manifest exists (so the session is listable as active and the
+// fallback write can update it), builds a title coordinator over the manifest, and subscribes
+// to the primary loop's first turn to feed it. Titling is entirely best-effort and
+// non-blocking — every failure here is logged and the session is unaffected.
+func (f *SessionStoreFactory) installTitleCoordinator(agent *sessionAgent, client llm.LLM, id uuid.UUID, cfg Config) {
+	metaStore, err := f.root.OpenSessionMeta(id)
+	if err != nil {
+		slog.Warn("swe: session manifest unavailable; titling disabled", "session", id, "err", err)
+		return
+	}
+	// Init is idempotent: a new session gets an active, untitled manifest; a resumed session
+	// keeps (or has repaired) its existing one. This is also where a session first becomes
+	// listable.
+	if _, err := metaStore.Init(time.Now()); err != nil {
+		slog.Warn("swe: session manifest init failed; titling disabled", "session", id, "err", err)
+		return
+	}
+
+	titleSpec, err := economyTitleModel(cfg.ModelCatalog)
+	if err != nil {
+		slog.Warn("swe: economy title model unavailable; fallback-only titling", "session", id, "err", err)
+		titleSpec = nil
+	}
+
+	coord := newTitleCoordinator(metaStore, client, titleSpec, time.Now)
+	watchTitleEvents(agent, coord)
+}
+
+// watchTitleEvents subscribes to the session's enduring events and feeds the title
+// coordinator the FIRST primary-loop user message (TurnStarted) and terminal response
+// (TurnDone), then stops. The subscription closes when the session shuts down, so the watcher
+// goroutine exits on Close — it is never waited on, and any in-flight generation runs on the
+// coordinator's own independent background context.
+func watchTitleEvents(agent *sessionAgent, coord *titleCoordinator) {
+	primary := agent.PrimaryLoopID()
+	sub, err := agent.Subscribe(event.EventFilter{Enduring: event.LoopScope{All: true}})
+	if err != nil {
+		slog.Warn("swe: title event subscription failed; fallback-only titling", "err", err)
+		return
+	}
+	go func() {
+		defer func() { _ = sub.Close() }()
+		var sawUser, sawTerminal bool
+		for ev := range sub.Events() {
+			if ev.EventHeader().LoopID != primary {
+				continue
+			}
+			switch e := ev.(type) {
+			case event.TurnStarted:
+				if !sawUser && e.Message != nil {
+					sawUser = true
+					coord.observeUserInput(e.Message.Blocks)
+				}
+			case event.TurnDone:
+				if !sawTerminal && e.Message != nil {
+					sawTerminal = true
+					coord.observeTerminalResponse(aiMessageText(e.Message))
+				}
+			}
+			if sawUser && sawTerminal {
+				return
+			}
+		}
+	}()
 }
 
 // List returns the session manifests read directly from the filesystem session store

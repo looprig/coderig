@@ -11,6 +11,7 @@ import (
 	"github.com/ciram-co/looprig/pkg/content"
 	"github.com/ciram-co/looprig/pkg/event"
 	"github.com/ciram-co/looprig/pkg/identity"
+	"github.com/ciram-co/looprig/pkg/llm"
 	"github.com/ciram-co/looprig/pkg/persistence"
 	"github.com/ciram-co/looprig/pkg/uuid"
 	"github.com/ciram-co/swe/agents/orchestrator"
@@ -221,6 +222,50 @@ func TestSessionStoreListFindsSession(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("List did not include the open session %v: %+v", sessionID, entries)
+	}
+}
+
+// TestPersistentTitleGenerated proves the end-to-end titling wiring: opening a session with
+// an Economy model configured, running one turn writes a generated title to the manifest
+// (replacing the synchronous first-user-message fallback). The Economy provider is LM Studio
+// (no key) so the wiring needs no credential.
+func TestPersistentTitleGenerated(t *testing.T) {
+	f := newIntegrationFactory(t)
+	cfg := Config{ModelCatalog: ModelCatalog{
+		Economy: []llm.ModelSpec{{Provider: llm.ProviderLMStudio, Model: "title-model"}},
+	}}
+
+	a, err := f.openWithClient(context.Background(),
+		&fakeLLM{chunks: []content.Chunk{textChunk("Add upload retries")}}, newModelFactory("test-key"),
+		SessionSelector{}, cfg)
+	if err != nil {
+		t.Fatalf("openWithClient: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
+	id := a.SessionID()
+
+	drainTurn(t, a, "make uploads retry on failure")
+
+	// The fallback lands synchronously on TurnStarted; the generated title lands
+	// asynchronously after TurnDone. Poll the manifest until the generated title appears.
+	store, err := f.root.OpenSessionMeta(id)
+	if err != nil {
+		t.Fatalf("OpenSessionMeta: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	var meta persistence.SessionMeta
+	for time.Now().Before(deadline) {
+		meta, err = store.Read()
+		if err == nil && meta.TitleSource == persistence.TitleSourceGenerated {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if meta.TitleSource != persistence.TitleSourceGenerated {
+		t.Fatalf("title source = %q, want generated (meta %+v, err %v)", meta.TitleSource, meta, err)
+	}
+	if meta.Title == "" {
+		t.Error("generated title is empty")
 	}
 }
 

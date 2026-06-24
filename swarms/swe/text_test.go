@@ -1,31 +1,10 @@
 package swe
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/ciram-co/looprig/pkg/content"
 )
-
-// aiMessageText concatenates the text of every *content.TextBlock in m, ignoring
-// non-text blocks. A nil message yields the empty string. It is the package's
-// final-text projection, used only by tests (this file and the
-// integration-tagged operator_eval_integration_test.go) to flatten a turn's
-// terminal AIMessage into a plain string. It lives in this untagged _test.go
-// helper so it is available to both the default and -tags integration builds.
-// Salvaged from the prior coding agent's text_test.go.
-func aiMessageText(m *content.AIMessage) string {
-	if m == nil {
-		return ""
-	}
-	var b strings.Builder
-	for _, blk := range m.Blocks {
-		if tb, ok := blk.(*content.TextBlock); ok {
-			b.WriteString(tb.Text)
-		}
-	}
-	return b.String()
-}
 
 // TestAIMessageText proves the projection helper concatenates only text blocks,
 // ignores non-text blocks, and tolerates a nil message.

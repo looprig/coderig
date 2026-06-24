@@ -94,3 +94,24 @@ func buildClient(catalog ModelCatalog) (llm.LLM, ModelFactory, error) {
 	}
 	return client, newModelFactoryFor(base, apiKey), nil
 }
+
+// economyTitleModel resolves the Economy tier into a title-spec builder for the session-title
+// coordinator, or (nil, nil) when no Economy model is configured. It validates the catalog
+// and reads the API key for the economy provider; a validation or key error is returned so
+// the caller can warn and fall back to fallback-only titling. The returned closure keeps the
+// key closed over — the key itself is never returned to the caller.
+func economyTitleModel(catalog ModelCatalog) (func(system string) llm.ModelSpec, error) {
+	resolver, err := newModelResolver(catalog)
+	if err != nil {
+		return nil, err
+	}
+	economy, ok := resolver.economyModel()
+	if !ok {
+		return nil, nil // no Economy tier → no generation
+	}
+	apiKey, err := readAPIKeyFor(economy)
+	if err != nil {
+		return nil, err
+	}
+	return func(system string) llm.ModelSpec { return economy.Spec(apiKey, system) }, nil
+}
