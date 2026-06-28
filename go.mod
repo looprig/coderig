@@ -3,7 +3,7 @@ module github.com/ciram-co/swe
 go 1.26.4
 
 require (
-	github.com/ciram-co/looprig v0.1.2
+	github.com/ciram-co/looprig v0.2.0
 	github.com/nats-io/nats.go v1.52.0
 )
 

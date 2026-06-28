@@ -40,6 +40,8 @@ github.com/ciram-co/bubbletea/v2 v2.0.0-20260623210731-9571e88971cd h1:eHgiL3Gt7
 github.com/ciram-co/bubbletea/v2 v2.0.0-20260623210731-9571e88971cd/go.mod h1:DGW2q8gvzHnOpMpZTORs0aySVHCox5C+2Svk0fci1qs=
 github.com/ciram-co/looprig v0.1.2 h1:1jzMe4UocVW4gKdk+TaGpXOiL1+zRLgew5PZU8HIy7g=
 github.com/ciram-co/looprig v0.1.2/go.mod h1:J/faN9RX7yqF+lpwBGvYZtosuLmLVz2EJ+VX1nMLFdM=
+github.com/ciram-co/looprig v0.2.0 h1:Q8oO4KCL0K3ZnYW279/MFoUzqb7LnsnnbKdbLAq1FFE=
+github.com/ciram-co/looprig v0.2.0/go.mod h1:J/faN9RX7yqF+lpwBGvYZtosuLmLVz2EJ+VX1nMLFdM=
 github.com/clipperhouse/displaywidth v0.11.0 h1:lBc6kY44VFw+TDx4I8opi/EtL9m20WSEFgwIwO+UVM8=
 github.com/clipperhouse/displaywidth v0.11.0/go.mod h1:bkrFNkf81G8HyVqmKGxsPufD3JhNl3dSqnGhOoSD/o0=
 github.com/clipperhouse/uax29/v2 v2.7.0 h1:+gs4oBZ2gPfVrKPthwbMzWZDaAFPGYK72F0NJv2v7Vk=
