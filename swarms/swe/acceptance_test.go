@@ -21,42 +21,44 @@ import (
 )
 
 // acceptance_test.go is the swarm's CROSS-CUTTING acceptance suite: it drives the
-// ASSEMBLED swarm (orchestrator-as-primary + the agent-aware Subagent tool + the
+// ASSEMBLED swarm (operator-as-primary + the agent-aware Subagent tool + the
 // swarmSpawner + the real leaf registry + the session under the spawn caps) end-to-end
 // through the same surface a TUI uses — Submit a user turn, observe the session event
 // stream, route gate decisions — proving the wired behaviour, not a unit in isolation.
 //
 // It uses the fake llm.LLM (no network, no key): a SCRIPTED fake that routes its reply
-// by the requesting agent's system prompt (orchestrator vs a named leaf) so a single
-// shared client drives BOTH the orchestrator turn (which emits a Subagent tool call)
+// by the requesting agent's system prompt (the primary operator vs a named leaf) so a
+// single shared client drives BOTH the primary turn (which emits a Subagent tool call)
 // and the spawned leaf turn (which completes) — the production wiring shares one client
-// across the whole tree. Routing by system prompt + a per-route call counter is robust
-// to interleaving (it never depends on a fragile global call order).
+// across the whole tree. The primary operator and a spawned operator LEAF both carry the
+// operator role, so the primary is distinguished by the delegation block its system prompt
+// alone carries; routing by that marker + a per-route call counter is robust to
+// interleaving (it never depends on a fragile global call order).
 //
 // The unit-level roster/cfg assertions live in swarm_test.go and spawner_test.go; this
 // file EXTENDS them to the end-to-end plane and does not duplicate them.
 
 // scriptedReply is one fake-LLM turn's worth of chunks for a given route, consumed in
-// order across successive Stream() calls on that route (so the orchestrator can emit a
+// order across successive Stream() calls on that route (so the primary can emit a
 // tool call on its first turn and a final text on its second).
 type scriptedReply struct {
 	chunks []content.Chunk
 }
 
 // route classifies a request by the agent driving it, read from the system prompt the
-// swarm bakes into each loop's ModelSpec (Identity + the agent's Role). It is the
-// stable join key between a Stream() call and the script the test wants that agent to
-// follow — far more robust than a global call-ordinal, since the orchestrator and a
-// spawned leaf interleave their Stream() calls.
+// swarm bakes into each loop's ModelSpec (Identity + the agent's Role [+ delegation]). It
+// is the stable join key between a Stream() call and the script the test wants that agent
+// to follow — far more robust than a global call-ordinal, since the primary and a spawned
+// leaf interleave their Stream() calls.
 type route string
 
-// routeOrchestrator names the orchestrator (primary) loop's route; a leaf route is the
-// leaf's agent name (e.g. route(operator.Name)). routeUnknown is the fail-safe sentinel
-// classify returns when no role marker matches, so an unrouted request streams a visible
-// fail-loud text rather than silently following the wrong script.
+// routePrimary names the PRIMARY operator loop's route; a leaf route is the leaf's agent
+// name (e.g. route(operator.Name)). routeUnknown is the fail-safe sentinel classify returns
+// when no role marker matches, so an unrouted request streams a visible fail-loud text
+// rather than silently following the wrong script.
 const (
-	routeOrchestrator route = "orchestrator"
-	routeUnknown      route = ""
+	routePrimary route = "primary"
+	routeUnknown route = ""
 )
 
 // scriptedSwarmLLM is a controllable llm.LLM that drives the whole swarm tree from one
@@ -67,7 +69,7 @@ const (
 type scriptedSwarmLLM struct {
 	mu sync.Mutex
 
-	// scripts maps a route to its ordered replies. The orchestrator route typically has
+	// scripts maps a route to its ordered replies. The primary route typically has
 	// two (tool-call turn, then final-text turn); a leaf route has one (its final text).
 	scripts map[route][]scriptedReply
 	// calls counts Stream() invocations per route, so the i-th call on a route gets that
@@ -95,15 +97,17 @@ func (c *scriptedSwarmLLM) Invoke(context.Context, llm.Request) (*llm.Response, 
 	return nil, errInvokeUnused
 }
 
-// classify reads a request's system prompt and returns its route. The orchestrator's
-// role marker wins (it is the only loop carrying it); otherwise the first registered
-// leaf route whose name appears as a role marker matches.
+// classify reads a request's system prompt and returns its route. The PRIMARY operator's
+// delegation block is the distinguishing marker (only the primary's system prompt carries
+// it — a spawned operator leaf has the operator role but no delegation block), so it is
+// matched first; otherwise the first registered leaf route whose name appears as a role
+// marker matches.
 func (c *scriptedSwarmLLM) classify(system string) route {
-	if strings.Contains(system, `<role name="orchestrator">`) {
-		return routeOrchestrator
+	if strings.Contains(system, "<delegation>") {
+		return routePrimary
 	}
 	for r := range c.scripts {
-		if r == routeOrchestrator {
+		if r == routePrimary {
 			continue
 		}
 		if strings.Contains(system, `<role name="`+string(r)+`">`) {
@@ -189,7 +193,7 @@ func jsonString(s string) string {
 	return b.String()
 }
 
-// observerFilter delivers the primary loop's EPHEMERAL stream (so the orchestrator's
+// observerFilter delivers the primary loop's EPHEMERAL stream (so the primary's
 // ToolCallStarted/Completed are observable — those are Ephemeral) plus ENDURING events
 // from EVERY loop (so a spawned leaf's LoopStarted / PermissionRequested / terminals all
 // arrive). Leaf ephemerals (the token firehose) are deliberately excluded — the swarm
@@ -289,7 +293,7 @@ func (r *recorder) waitFor(pred func(event.Event) bool) (event.Event, bool) {
 	}
 }
 
-// isPrimaryTurnDone matches the orchestrator primary's terminal TurnDone.
+// isPrimaryTurnDone matches the primary operator's terminal TurnDone.
 func isPrimaryTurnDone(primary uuid.UUID) func(event.Event) bool {
 	return func(ev event.Event) bool {
 		td, ok := ev.(event.TurnDone)
@@ -307,11 +311,11 @@ func isNonPrimaryLoopStarted(primary uuid.UUID) func(event.Event) bool {
 }
 
 // TestAcceptanceLeavesCannotSpawn proves the depth-1-by-construction invariant on the
-// ASSEMBLED swarm: the orchestrator (primary) carries Subagent (auto-approved) and ONLY
-// the read/Todo/AskUser set, while EVERY leaf the registry can spawn carries its own
-// allowlist with NO Subagent — so a leaf can never spawn a grandchild. This consolidates
-// the roster assertion across the whole registry end-to-end (the per-agent toolset units
-// live in swarm_test.go / spawner_test.go).
+// ASSEMBLED swarm: the primary operator carries Subagent, while EVERY leaf the registry
+// can spawn carries its own allowlist with NO Subagent — so a leaf can never spawn a
+// grandchild (a spawned operator leaf, in particular, has no Subagent and cannot spawn).
+// This consolidates the roster assertion across the whole registry end-to-end (the
+// per-agent toolset units live in swarm_test.go / spawner_test.go).
 func TestAcceptanceLeavesCannotSpawn(t *testing.T) {
 	t.Parallel()
 
@@ -321,15 +325,13 @@ func TestAcceptanceLeavesCannotSpawn(t *testing.T) {
 		t.Fatalf("leafRegistry() error = %v", err)
 	}
 
-	// Orchestrator: Subagent present + auto-approved; the set is exactly the six.
-	orchSpawner := newSwarmSpawner(reg, deps, newScriptedSwarmLLM(), newModelFactory("k"), loader, NewRuntimeContextProvider())
-	orchTS := orchestratorToolSet(deps.Root, orchSpawner, toolCatalog(reg))
-	orchNames := toolNames(t, orchTS)
-	if !containsName(orchNames, "Subagent") {
-		t.Errorf("orchestrator toolset = %v, want it to contain Subagent (only the primary may spawn)", orchNames)
-	}
-	if !containsName(orchAutoApproved(), "Subagent") {
-		t.Error("Subagent is not in the orchestrator's auto-approve set")
+	// Primary operator: Subagent present (only the primary may spawn). It is the operator
+	// leaf union PLUS Subagent (the per-tool permission assertions live in swarm_test.go).
+	primarySpawner := newSwarmSpawner(reg, deps, newScriptedSwarmLLM(), newModelFactory("k"), loader, NewRuntimeContextProvider())
+	primarySkill := buildLeafSkill(loader, operatorBuiltin(), deps, Config{})
+	primaryTS := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, primarySpawner, toolCatalog(reg), primarySkill)
+	if names := toolNames(t, primaryTS); !containsName(names, "Subagent") {
+		t.Errorf("primary operator toolset = %v, want it to contain Subagent (only the primary may spawn)", names)
 	}
 
 	// Every leaf: NO Subagent (cannot spawn — depth 1 by construction).
@@ -349,24 +351,20 @@ func TestAcceptanceLeavesCannotSpawn(t *testing.T) {
 	}
 }
 
-// orchAutoApproved returns a copy of the orchestrator's auto-approve set for assertion
-// without mutating the package var.
-func orchAutoApproved() []string { return append([]string(nil), orchestratorAutoApprovedTools...) }
-
-// TestAcceptanceEndToEndSpawn drives the assembled swarm: the orchestrator (scripted to
+// TestAcceptanceEndToEndSpawn drives the assembled swarm: the primary operator (scripted to
 // emit a Subagent{operator,...} call then a final text) Submits a turn; the test asserts
 // on the whole-session stream that a sub-loop was created and attributed to the leaf —
 // a LoopStarted whose Header.AgentName == "operator" carrying a non-zero Header.Cause
-// LoopID (a real child of the orchestrator's turn) — and that the orchestrator's turn
+// LoopID (a real child of the primary's turn) — and that the primary's turn
 // completes with the final text. The leaf is scripted to return its own final text,
-// which the Subagent tool returns to the orchestrator as the tool result.
+// which the Subagent tool returns to the primary as the tool result.
 func TestAcceptanceEndToEndSpawn(t *testing.T) {
 	t.Parallel()
 
 	client := newScriptedSwarmLLM()
-	client.script(routeOrchestrator,
+	client.script(routePrimary,
 		subagentCallReply("call-1", operator.Name, "implement the fix"),
-		textReply("orchestrator: done, the operator handled it"),
+		textReply("primary: done, the operator handled it"),
 	)
 	client.script(route(operator.Name), textReply("operator: fix applied"))
 
@@ -379,7 +377,7 @@ func TestAcceptanceEndToEndSpawn(t *testing.T) {
 	}
 
 	// A sub-loop is created and ATTRIBUTED to the operator leaf, as a real child of the
-	// orchestrator's turn (non-zero Cause.LoopID = the spawning loop).
+	// primary's turn (non-zero Cause.LoopID = the spawning loop).
 	ev, ok := rec.waitFor(isNonPrimaryLoopStarted(primary))
 	if !ok {
 		t.Fatal("never observed a LoopStarted for a spawned (non-primary) sub-loop")
@@ -389,36 +387,36 @@ func TestAcceptanceEndToEndSpawn(t *testing.T) {
 		t.Errorf("spawned LoopStarted AgentName = %q, want %q (attributed to the operator leaf)", ls.Header.AgentName, operator.Name)
 	}
 	if ls.Header.Cause.LoopID.IsZero() {
-		t.Error("spawned LoopStarted Cause.LoopID is zero, want the orchestrator's loop (a real child of the spawning turn)")
+		t.Error("spawned LoopStarted Cause.LoopID is zero, want the primary's loop (a real child of the spawning turn)")
 	}
 	if ls.Header.Cause.LoopID != primary {
-		t.Errorf("spawned LoopStarted Cause.LoopID = %v, want the orchestrator primary %v", ls.Header.Cause.LoopID, primary)
+		t.Errorf("spawned LoopStarted Cause.LoopID = %v, want the primary %v", ls.Header.Cause.LoopID, primary)
 	}
 
-	// The orchestrator's turn completes with its scripted final text — the Subagent tool
-	// returned the leaf's final text, the orchestrator ran a second turn, and it ended
+	// The primary's turn completes with its scripted final text — the Subagent tool
+	// returned the leaf's final text, the primary ran a second turn, and it ended
 	// successfully on the primary loop.
 	done, ok := rec.waitFor(isPrimaryTurnDone(primary))
 	if !ok {
-		t.Fatal("never observed the orchestrator's terminal TurnDone")
+		t.Fatal("never observed the primary's terminal TurnDone")
 	}
 	if got := aiMessageText(done.(event.TurnDone).Message); !strings.Contains(got, "the operator handled it") {
-		t.Errorf("orchestrator final text = %q, want it to contain the scripted final answer", got)
+		t.Errorf("primary final text = %q, want it to contain the scripted final answer", got)
 	}
 }
 
-// TestAcceptanceUnknownAgentFailsSecure proves the fail-secure boundary end-to-end: an
-// orchestrator turn that calls Subagent with an UNREGISTERED agent name yields a
+// TestAcceptanceUnknownAgentFailsSecure proves the fail-secure boundary end-to-end: a
+// primary turn that calls Subagent with an UNREGISTERED agent name yields a
 // tool-result ERROR (carrying the UnknownAgentError text) and spawns NO sub-loop — no
-// LoopStarted is published for the unknown name. The orchestrator then completes its turn
+// LoopStarted is published for the unknown name. The primary then completes its turn
 // (a real model would recover; the script just ends the turn).
 func TestAcceptanceUnknownAgentFailsSecure(t *testing.T) {
 	t.Parallel()
 
 	client := newScriptedSwarmLLM()
-	client.script(routeOrchestrator,
+	client.script(routePrimary,
 		subagentCallReply("call-x", "nope", "do something"),
-		textReply("orchestrator: recovered from the unknown agent"),
+		textReply("primary: recovered from the unknown agent"),
 	)
 
 	agent := newAcceptanceSwarm(t, client)
@@ -439,18 +437,18 @@ func TestAcceptanceUnknownAgentFailsSecure(t *testing.T) {
 		return isTC && tc.Coordinates.LoopID == primary
 	})
 	if !ok {
-		t.Fatal("never observed the orchestrator's Subagent ToolCallCompleted")
+		t.Fatal("never observed the primary's Subagent ToolCallCompleted")
 	}
 	tc := ev.(event.ToolCallCompleted)
 	if !strings.Contains(tc.ResultPreview, "unknown subagent") || !strings.Contains(tc.ResultPreview, `"nope"`) {
 		t.Errorf("Subagent result preview = %q, want it to carry the unknown-agent error naming %q", tc.ResultPreview, "nope")
 	}
 
-	// The orchestrator's turn still completes; once it has, the whole turn's events are
+	// The primary's turn still completes; once it has, the whole turn's events are
 	// recorded — so a zero count of non-primary LoopStarted proves the unknown agent
 	// spawned nothing (no sub-loop was ever announced).
 	if _, ok := rec.waitFor(isPrimaryTurnDone(primary)); !ok {
-		t.Fatal("never observed the orchestrator's terminal TurnDone")
+		t.Fatal("never observed the primary's terminal TurnDone")
 	}
 	if n := rec.count(isNonPrimaryLoopStarted(primary)); n != 0 {
 		t.Errorf("observed %d non-primary LoopStarted, want 0 (an unknown agent spawns nothing)", n)
@@ -458,30 +456,30 @@ func TestAcceptanceUnknownAgentFailsSecure(t *testing.T) {
 }
 
 // TestAcceptanceQuotaCapRejectsSpawn proves the spawn quota is enforced through the SWARM
-// path: with the orchestrator's session built under a Quota of 1, the orchestrator's
+// path: with the primary's session built under a Quota of 1, the primary's
 // SECOND Subagent call (the quota+1-th spawn) comes back as a tool-result ERROR and
 // publishes NO second sub-loop. The first spawn succeeds (one leaf LoopStarted); the
 // second is refused by the session's NewLoop cap (the typed *SessionError, rendered into
 // the tool-result string by the Subagent tool). The session-level typed-error assertions
 // live in the session package's quota_cap_test; this proves the cap is wired live on the
-// orchestrator's session and surfaces to the spawning model.
+// primary's session and surfaces to the spawning model.
 func TestAcceptanceQuotaCapRejectsSpawn(t *testing.T) {
 	t.Parallel()
 
 	client := newScriptedSwarmLLM()
 	// Two Subagent calls then a final text. The leaf returns quickly so the first spawn
 	// completes before the second is attempted.
-	client.script(routeOrchestrator,
+	client.script(routePrimary,
 		subagentCallReply("call-a", operator.Name, "task one"),
 		subagentCallReply("call-b", operator.Name, "task two"),
-		textReply("orchestrator: done"),
+		textReply("primary: done"),
 	)
 	client.script(route(operator.Name), textReply("operator: ok"))
 
 	// Build the swarm wiring by hand so the session can be capped at Quota=1 (newWithClient
-	// uses the production caps). This exercises the SAME wiring (orchestratorConfig +
+	// uses the production caps). This exercises the SAME wiring (operatorPrimaryConfig +
 	// spawner.bind) under a tighter quota.
-	agent := newCappedAcceptanceSwarm(t, client, session.Limits{Depth: orchestratorSpawnDepth, Quota: 1})
+	agent := newCappedAcceptanceSwarm(t, client, session.Limits{Depth: operatorSpawnDepth, Quota: 1})
 	primary := agent.PrimaryLoopID()
 	rec := newRecorder(t, agent)
 
@@ -489,9 +487,9 @@ func TestAcceptanceQuotaCapRejectsSpawn(t *testing.T) {
 		t.Fatalf("Submit() error = %v", err)
 	}
 
-	// The orchestrator's turn must end (it eventually streams the final text).
+	// The primary's turn must end (it eventually streams the final text).
 	if _, ok := rec.waitFor(isPrimaryTurnDone(primary)); !ok {
-		t.Fatal("never observed the orchestrator's terminal TurnDone")
+		t.Fatal("never observed the primary's terminal TurnDone")
 	}
 
 	// Exactly ONE leaf sub-loop was spawned: the second Subagent call was refused by the
@@ -512,16 +510,16 @@ func TestAcceptanceQuotaCapRejectsSpawn(t *testing.T) {
 	}
 }
 
-// newCappedAcceptanceSwarm assembles the orchestrator wiring (the SAME buildOrchestratorWiring
+// newCappedAcceptanceSwarm assembles the operator wiring (the SAME buildOperatorWiring
 // the production New path uses) but starts the session under explicit limits, then binds the
 // live session onto the spawner exactly as newWithClient does. It lets an acceptance test
 // drive the assembled swarm under a tighter cap than the production defaults.
 func newCappedAcceptanceSwarm(t *testing.T, client *scriptedSwarmLLM, limits session.Limits) *sessionAgent {
 	t.Helper()
 	root := t.TempDir()
-	wiring, err := buildOrchestratorWiring(client, newModelFactory("test-key"), root, Config{})
+	wiring, err := buildOperatorWiring(client, newModelFactory("test-key"), root, Config{})
 	if err != nil {
-		t.Fatalf("buildOrchestratorWiring() error = %v", err)
+		t.Fatalf("buildOperatorWiring() error = %v", err)
 	}
 	agent, err := newSessionAgent(context.Background(), wiring.cfg, session.WithLimits(limits))
 	if err != nil {
@@ -534,18 +532,18 @@ func newCappedAcceptanceSwarm(t *testing.T, client *scriptedSwarmLLM, limits ses
 
 // TestAcceptanceGateAttributedToLeaf proves a SPAWNED leaf's permission gate is attributed
 // to the LEAF's loop and is routable via the session's Approve(loopID, callID, scope): the
-// orchestrator spawns the operator, the operator is scripted to call WriteFile (which the
+// primary spawns the operator, the operator is scripted to call WriteFile (which the
 // operator's policy gates as Ask), and the test — watching the whole-session stream from a
 // goroutine — observes a PermissionRequested whose Header.LoopID is the LEAF's loop (not the
-// orchestrator's), then Approves it on that exact loop id. The whole flow then drains to the
-// orchestrator's TurnDone, proving the gate decision reached the right loop and unblocked it.
+// primary's), then Approves it on that exact loop id. The whole flow then drains to the
+// primary's TurnDone, proving the gate decision reached the right loop and unblocked it.
 func TestAcceptanceGateAttributedToLeaf(t *testing.T) {
 	t.Parallel()
 
 	client := newScriptedSwarmLLM()
-	client.script(routeOrchestrator,
+	client.script(routePrimary,
 		subagentCallReply("call-1", operator.Name, "write a file"),
-		textReply("orchestrator: file written"),
+		textReply("primary: file written"),
 	)
 	// The operator first calls WriteFile (gated Ask), then — after approval — ends its turn.
 	client.script(route(operator.Name),
@@ -555,11 +553,11 @@ func TestAcceptanceGateAttributedToLeaf(t *testing.T) {
 
 	// Assemble via the capped seam (default caps) which roots the workspace at t.TempDir(),
 	// so the operator's WriteFile target is a real, writable, in-root path.
-	agent := newCappedAcceptanceSwarm(t, client, session.Limits{Depth: orchestratorSpawnDepth, Quota: orchestratorSpawnQuota})
+	agent := newCappedAcceptanceSwarm(t, client, session.Limits{Depth: operatorSpawnDepth, Quota: operatorSpawnQuota})
 	primary := agent.PrimaryLoopID()
 	rec := newRecorder(t, agent)
 
-	// The Subagent tool call blocks the orchestrator turn until the spawned operator
+	// The Subagent tool call blocks the primary turn until the spawned operator
 	// completes, and the operator's WriteFile blocks on its gate until approved — so the
 	// approval MUST come from a separate goroutine while Submit's effects are in flight.
 	// The driver polls the recorder for the LEAF's gate (a PermissionRequested on a
@@ -592,13 +590,13 @@ func TestAcceptanceGateAttributedToLeaf(t *testing.T) {
 		t.Fatal("never observed a PermissionRequested attributed to the spawned leaf loop")
 	}
 	if gateLoop == primary {
-		t.Errorf("gate loop id = orchestrator primary %v, want the spawned leaf's own loop", primary)
+		t.Errorf("gate loop id = primary %v, want the spawned leaf's own loop", primary)
 	}
 
-	// After the approval reaches the leaf, the spawn completes and the orchestrator's turn
+	// After the approval reaches the leaf, the spawn completes and the primary's turn
 	// ends — proving the gate decision unblocked the right loop.
 	if _, ok := rec.waitFor(isPrimaryTurnDone(primary)); !ok {
-		t.Fatal("orchestrator turn never completed after the leaf gate was approved")
+		t.Fatal("primary turn never completed after the leaf gate was approved")
 	}
 }
 
@@ -628,20 +626,20 @@ func newAllScopeRecorder(t *testing.T, agent *sessionAgent) *recorder {
 }
 
 // TestAcceptanceSkillLoadedEndToEnd drives the assembled swarm to prove a skilled leaf
-// loads an embedded skill end-to-end: the orchestrator spawns the operator (the leaf
+// loads an embedded skill end-to-end: the primary spawns the operator (the leaf
 // the swarm assigns the code-style skill), the operator is scripted to call
 // Skill{name:"code-style"} then end its turn, and the test asserts — on the leaf loop's
 // own ToolCallCompleted — that the Skill tool returned the embedded SKILL.md body (a
 // known phrase from skills/code-style/SKILL.md), NOT an error. This exercises the full
-// Task-3 wiring: the per-agent loader, the operator-bound Skill tool (auto-approved),
+// wiring: the per-agent loader, the operator-bound Skill tool (auto-approved),
 // and the embedded catalogue, through the real session.
 func TestAcceptanceSkillLoadedEndToEnd(t *testing.T) {
 	t.Parallel()
 
 	client := newScriptedSwarmLLM()
-	client.script(routeOrchestrator,
+	client.script(routePrimary,
 		subagentCallReply("call-1", operator.Name, "apply the style checklist"),
-		textReply("orchestrator: operator loaded the skill"),
+		textReply("primary: operator loaded the skill"),
 	)
 	// The operator loads the skill (auto-approved), then ends its turn.
 	client.script(route(operator.Name),
@@ -675,9 +673,9 @@ func TestAcceptanceSkillLoadedEndToEnd(t *testing.T) {
 		t.Errorf("Skill result carries an error string, want the skill body: %q", tc.ResultPreview)
 	}
 
-	// The orchestrator's turn completes with its scripted final text.
+	// The primary's turn completes with its scripted final text.
 	if _, ok := rec.waitFor(isPrimaryTurnDone(primary)); !ok {
-		t.Fatal("never observed the orchestrator's terminal TurnDone")
+		t.Fatal("never observed the primary's terminal TurnDone")
 	}
 }
 

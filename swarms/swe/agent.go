@@ -19,9 +19,9 @@ import (
 // sessionAgent is a thin wrapper over a session.Session that exposes the tui.Agent
 // surface (the streaming/lifecycle methods plus the Approve/Deny/ProvideAnswer gate
 // trio). It is salvaged from the prior coding agent's Coding wrapper, generalized over an
-// arbitrary primary loop.Config so the SAME wrapper drives the orchestrator (the
-// swarm's primary) now and the operator-for-eval primary in a later phase. The
-// caller owns it and must call Close to release the underlying actor goroutine.
+// arbitrary primary loop.Config so the SAME wrapper drives the operator (the
+// swarm's primary) and any other primary configuration. The caller owns it and must
+// call Close to release the underlying actor goroutine.
 //
 // It holds no submit/gate/subscribe state of its own — every method delegates to
 // the session — so the wrapper's sole responsibility is lifetime ownership (the

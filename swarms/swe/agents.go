@@ -42,8 +42,9 @@ type leafBuiltin struct {
 }
 
 // leafBuiltins is the fixed roster of spawnable leaves, in deterministic catalog
-// order. The orchestrator is deliberately absent: it is the primary loop, not a
-// spawnable leaf.
+// order. The primary loop (an operator carrying the Subagent tool) is assembled in
+// swarm.go; the operator also appears here as a spawnable leaf, but a spawned operator
+// leaf has no Subagent tool, so it cannot itself spawn.
 func leafBuiltins() []leafBuiltin {
 	return []leafBuiltin{
 		{
@@ -51,7 +52,9 @@ func leafBuiltins() []leafBuiltin {
 			description: operator.Description,
 			role:        operator.Role,
 			skills:      operatorSkills,
-			build:       func(d LeafToolDeps, s tool.InvokableTool) loop.ToolSet { return operator.BuildTools(d.Root, d.HTTPCl, s) },
+			build: func(d LeafToolDeps, s tool.InvokableTool) loop.ToolSet {
+				return operator.BuildTools(d.Root, d.HTTPCl, s)
+			},
 		},
 		{
 			name:                researcher.Name,
@@ -81,21 +84,22 @@ func leafBuiltins() []leafBuiltin {
 // leafRegistry builds the SWE-Swarm's registry of spawnable LEAF agents from the
 // four leaf packages, adapting each leaf's raw-signature BuildTools into the
 // swe.Agent shape (func(LeafToolDeps) loop.ToolSet) at the composition root — so
-// the leaf packages never import swarms/swe (no import cycle). The orchestrator is
-// deliberately absent: it is the primary loop, not a spawnable leaf. Each leaf's
+// the leaf packages never import swarms/swe (no import cycle). The primary loop (an
+// operator carrying the Subagent tool) is assembled in swarm.go, not here. Each leaf's
 // AllowsRuntimeSkills is carried through from its builtin definition (§7a: true for
 // the read-only explorer + researcher). A duplicate name fails secure with a
 // *DuplicateAgentError.
 //
 // It also returns the ONE per-agent-scoped skill loader (built over the embedded
-// SkillsFS + the allow-map derived from every leaf's Skills), TYPED as the narrow
-// tools.SkillDescriber the spawner needs (interface segregation: the spawner only
-// reads catalog metadata). The loader is wired two ways: a per-agent tools.Skill
-// tool — built here from the loader's Load capability — is captured in each skilled
-// leaf's BuildTools closure (so the leaf gets the Skill tool, which auto-approves by
-// being named in HardApprove for an embedded name), and the spawner uses the returned
-// SkillDescriber to append the <available_skills> catalog to a skilled leaf's system
-// prompt.
+// SkillsFS + the allow-map derived from every leaf's Skills), TYPED as the combined
+// skillLoaderDescriber: the spawner + catalog read it as a tools.SkillDescriber, while
+// the composition root also builds the primary operator's own code-style Skill tool from
+// its tools.SkillLoader half (so the primary's Skill matches the operator leaf's). The
+// loader is wired multiple ways: a per-agent tools.Skill tool — built here from the
+// loader's Load capability — is captured in each skilled leaf's BuildTools closure (so
+// the leaf gets the Skill tool, which auto-approves by being named in HardApprove for an
+// embedded name), and the spawner uses the SkillDescriber to append the
+// <available_skills> catalog to a skilled leaf's system prompt.
 //
 // RUNTIME (WORKSPACE) SKILLS — §7a. A leaf gets a Skill tool when it has ≥1 embedded
 // skill OR it is workspace-eligible AND the cfg.RuntimeSkills mode is on (BOTH gates).
@@ -116,7 +120,7 @@ func leafBuiltins() []leafBuiltin {
 // PermissionChecker — the per-loop approval-isolation guarantee. The Skill tool is
 // the one captured value: it is immutable + side-effect-free (loader + agent name +
 // the fixed workspace root), so sharing one instance across a leaf's spawns is safe.
-func leafRegistry(deps LeafToolDeps, cfg Config) (*Registry, tools.SkillDescriber, error) {
+func leafRegistry(deps LeafToolDeps, cfg Config) (*Registry, skillLoaderDescriber, error) {
 	builtins := leafBuiltins()
 
 	scopes := make([]skillScope, 0, len(builtins))
@@ -144,6 +148,17 @@ func leafRegistry(deps LeafToolDeps, cfg Config) (*Registry, tools.SkillDescribe
 		return nil, nil, err
 	}
 	return reg, loader, nil
+}
+
+// skillLoaderDescriber is the embedded skill loader's full surface: both the Skill
+// tool's tools.SkillLoader (Load/Allowed) and the catalog builder's tools.SkillDescriber
+// (Describe). leafRegistry returns it (the concrete embeddedSkillLoader satisfies both)
+// so the composition root can build BOTH a Skill tool (needs SkillLoader — the leaves AND
+// the primary operator) and the <available_skills> catalog (needs SkillDescriber) from
+// the one loader, while every consumer narrows to the half it needs.
+type skillLoaderDescriber interface {
+	tools.SkillLoader
+	tools.SkillDescriber
 }
 
 // buildLeafSkill constructs the per-agent Skill tool for one leaf, honoring BOTH

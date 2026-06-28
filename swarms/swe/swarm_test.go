@@ -2,29 +2,35 @@ package swe
 
 import (
 	"context"
+	"encoding/xml"
 	"net/http"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/ciram-co/looprig/pkg/loop"
+	"github.com/ciram-co/looprig/pkg/tool"
 	"github.com/ciram-co/looprig/pkg/tools"
 	"github.com/ciram-co/looprig/pkg/tui"
-	"github.com/ciram-co/swe/agents/orchestrator"
+	"github.com/ciram-co/swe/agents/operator"
 )
 
-// testWiring builds the orchestrator's spawner + Subagent catalog from the real leaf
-// registry for the toolset/config tests. The spawner is UNBOUND (its session is nil);
-// these tests only assemble + inspect the cfg/toolset and never run a turn, so no bind
-// is needed.
-func testWiring(t *testing.T) (*swarmSpawner, []tools.SubagentCatalogEntry) {
+// operatorPrimaryArgs builds the inputs operatorPrimaryConfig / operatorPrimaryToolSet
+// need from the real leaf registry — the deps, the unbound spawner + Subagent catalog,
+// the skill loader (as describer), and the primary's own code-style Skill tool — exactly
+// the way buildOperatorWiring assembles them. The spawner is UNBOUND (its session is nil);
+// these tests only assemble + inspect the cfg/toolset and never run a turn, so no bind is
+// needed.
+func operatorPrimaryArgs(t *testing.T, root string) (LeafToolDeps, *swarmSpawner, []tools.SubagentCatalogEntry, skillLoaderDescriber, tool.InvokableTool) {
 	t.Helper()
-	deps := LeafToolDeps{Root: "/tmp/workspace-root", HTTPCl: &http.Client{}}
+	deps := LeafToolDeps{Root: root, HTTPCl: &http.Client{}}
 	reg, loader, err := leafRegistry(deps, Config{})
 	if err != nil {
 		t.Fatalf("leafRegistry() error = %v", err)
 	}
-	return newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory("test-key"), loader, NewRuntimeContextProvider()), toolCatalog(reg)
+	spawner := newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory("test-key"), loader, NewRuntimeContextProvider())
+	skill := buildLeafSkill(loader, operatorBuiltin(), deps, Config{})
+	return deps, spawner, toolCatalog(reg), loader, skill
 }
 
 // TestNewWithClientHappy proves swe.New (via the fake-client seam) builds a usable
@@ -45,187 +51,265 @@ func TestNewWithClientHappy(t *testing.T) {
 	var _ tui.Agent = agent
 }
 
-// TestOrchestratorConfigIsPrimaryWithIdentityAndRole proves the orchestrator
-// config: its AgentName is the orchestrator's name (so it runs AS the primary),
-// and its system prompt is the shared Identity followed by the orchestrator's Role
-// (the swarm prepends identity to each agent's role).
-func TestOrchestratorConfigIsPrimaryWithIdentityAndRole(t *testing.T) {
+// TestOperatorPrimaryConfigIsPrimaryWithIdentityRoleAndDelegation proves the primary
+// operator config: its AgentName is the operator's name (so it runs AS the primary),
+// and its system prompt is the shared Identity + the operator's Role + the primary-only
+// delegation fragment + the trusted code-style <available_skills> catalog. It is routed
+// through the shared buildOperatorWiring seam (the production assembly).
+func TestOperatorPrimaryConfigIsPrimaryWithIdentityRoleAndDelegation(t *testing.T) {
 	t.Parallel()
 
-	spawner, catalog := testWiring(t)
-	cfg := orchestratorConfig(&fakeLLM{}, newModelFactory("test-key"), "/tmp/workspace-root", spawner, catalog, NewRuntimeContextProvider())
+	wiring, err := buildOperatorWiring(&fakeLLM{}, newModelFactory("test-key"), "/tmp/workspace-root", Config{})
+	if err != nil {
+		t.Fatalf("buildOperatorWiring() error = %v", err)
+	}
+	cfg := wiring.cfg
 
-	if cfg.AgentName != orchestrator.Name {
-		t.Errorf("cfg.AgentName = %q, want %q", cfg.AgentName, orchestrator.Name)
+	if cfg.AgentName != operator.Name {
+		t.Errorf("cfg.AgentName = %q, want %q", cfg.AgentName, operator.Name)
 	}
 	if cfg.Client == nil {
 		t.Error("cfg.Client = nil, want the supplied client")
 	}
-	want := Identity + orchestrator.Role
-	if cfg.Model.System != want {
-		t.Errorf("cfg.Model.System = %q, want Identity+orchestrator.Role", cfg.Model.System)
+	// The system prompt begins with Identity + operator.Role + operatorDelegation; the
+	// trusted code-style <available_skills> catalog follows.
+	wantPrefix := Identity + operator.Role + operatorDelegation
+	if !strings.HasPrefix(cfg.Model.System, wantPrefix) {
+		t.Errorf("cfg.Model.System does not start with Identity+operator.Role+operatorDelegation:\n%s", cfg.Model.System)
 	}
 	if !strings.Contains(cfg.Model.System, "<identity product=\"SWE\">") {
 		t.Error("system prompt missing the shared identity block")
 	}
-	if !strings.Contains(cfg.Model.System, "<role name=\"orchestrator\">") {
-		t.Error("system prompt missing the orchestrator role block")
+	if !strings.Contains(cfg.Model.System, "<role name=\"operator\">") {
+		t.Error("system prompt missing the operator role block")
+	}
+	if !strings.Contains(cfg.Model.System, "<delegation>") {
+		t.Error("system prompt missing the primary-only delegation block")
+	}
+	// The primary carries the trusted code-style catalog (proving the skill-catalog
+	// wiring on the primary): an <available_skills> block listing code-style.
+	if !strings.Contains(cfg.Model.System, "<available_skills>") || !strings.Contains(cfg.Model.System, "code-style") {
+		t.Errorf("system prompt missing the code-style <available_skills> catalog:\n%s", cfg.Model.System)
 	}
 }
 
-// TestOrchestratorConfigCarriesRuntimeContext proves the orchestrator's primary
+// TestOperatorPrimaryConfigCarriesRuntimeContext proves the primary operator's
 // loop.Config has a non-nil RuntimeContext when one is wired (so the loop injects the
 // volatile date/cwd/git tail every turn), and that a nil provider leaves it OFF.
-func TestOrchestratorConfigCarriesRuntimeContext(t *testing.T) {
+func TestOperatorPrimaryConfigCarriesRuntimeContext(t *testing.T) {
 	t.Parallel()
 
 	t.Run("provider wired -> non-nil RuntimeContext", func(t *testing.T) {
 		t.Parallel()
-		spawner, catalog := testWiring(t)
+		deps, spawner, catalog, loader, skill := operatorPrimaryArgs(t, "/tmp/workspace-root")
 		rc := NewRuntimeContextProvider()
-		cfg := orchestratorConfig(&fakeLLM{}, newModelFactory("test-key"), "/tmp/workspace-root", spawner, catalog, rc)
+		cfg := operatorPrimaryConfig(&fakeLLM{}, newModelFactory("test-key"), deps, spawner, catalog, rc, loader, skill)
 		if cfg.RuntimeContext == nil {
-			t.Error("orchestrator cfg.RuntimeContext = nil, want the wired provider")
+			t.Error("operator cfg.RuntimeContext = nil, want the wired provider")
 		}
 	})
 
 	t.Run("nil provider -> RuntimeContext stays nil (OFF)", func(t *testing.T) {
 		t.Parallel()
-		spawner, catalog := testWiring(t)
-		cfg := orchestratorConfig(&fakeLLM{}, newModelFactory("test-key"), "/tmp/workspace-root", spawner, catalog, nil)
+		deps, spawner, catalog, loader, skill := operatorPrimaryArgs(t, "/tmp/workspace-root")
+		cfg := operatorPrimaryConfig(&fakeLLM{}, newModelFactory("test-key"), deps, spawner, catalog, nil, loader, skill)
 		if cfg.RuntimeContext != nil {
-			t.Error("orchestrator cfg.RuntimeContext != nil with a nil provider, want OFF")
+			t.Error("operator cfg.RuntimeContext != nil with a nil provider, want OFF")
 		}
 	})
 }
 
-// TestBuildOrchestratorWiringEnablesRuntimeContext proves the SHARED construction
-// seam (used by New, openNew, openResume) wires a non-nil RuntimeContext onto the
-// orchestrator's primary cfg, so every construction path inherits runtime-context
-// injection.
-func TestBuildOrchestratorWiringEnablesRuntimeContext(t *testing.T) {
+// TestBuildOperatorWiringEnablesRuntimeContext proves the SHARED construction seam (used
+// by New, openNew, openResume) wires a non-nil RuntimeContext onto the primary operator's
+// cfg, so every construction path inherits runtime-context injection.
+func TestBuildOperatorWiringEnablesRuntimeContext(t *testing.T) {
 	t.Parallel()
-	wiring, err := buildOrchestratorWiring(&fakeLLM{}, newModelFactory("test-key"), "/tmp/workspace-root", Config{})
+	wiring, err := buildOperatorWiring(&fakeLLM{}, newModelFactory("test-key"), "/tmp/workspace-root", Config{})
 	if err != nil {
-		t.Fatalf("buildOrchestratorWiring() error = %v", err)
+		t.Fatalf("buildOperatorWiring() error = %v", err)
 	}
 	if wiring.cfg.RuntimeContext == nil {
-		t.Error("wiring.cfg.RuntimeContext = nil, want runtime context enabled for the orchestrator")
+		t.Error("wiring.cfg.RuntimeContext = nil, want runtime context enabled for the operator")
 	}
 }
 
-// TestOrchestratorToolSetIsExactlyTheSix proves the orchestrator's toolset is EXACTLY
-// ReadFile, Glob, Grep, Todo, AskUser, Subagent — and in particular that the agent-aware
-// Subagent IS now wired (the orchestrator can spawn leaf agents by name).
-func TestOrchestratorToolSetIsExactlyTheSix(t *testing.T) {
+// TestOperatorPrimaryToolSetIsLeafUnionPlusSubagent proves the PRIMARY operator's toolset
+// is EXACTLY the operator leaf's toolset PLUS Subagent — the drift guard the
+// operatorPrimaryToolSet doc promises. It builds both over the SAME root + skill and
+// asserts primary-minus-Subagent == leaf tools, and that Subagent is present on the
+// primary (so the primary can spawn) and absent from the leaf (so a spawned operator
+// cannot).
+func TestOperatorPrimaryToolSetIsLeafUnionPlusSubagent(t *testing.T) {
 	t.Parallel()
 
-	spawner, catalog := testWiring(t)
-	ts := orchestratorToolSet("/tmp/workspace-root", spawner, catalog)
-	if ts.Permission == nil {
-		t.Fatal("orchestratorToolSet() Permission = nil, want non-nil PermissionChecker")
+	deps, spawner, catalog, _, skill := operatorPrimaryArgs(t, "/tmp/workspace-root")
+	primary := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, spawner, catalog, skill)
+	if primary.Permission == nil {
+		t.Fatal("operatorPrimaryToolSet() Permission = nil, want non-nil PermissionChecker")
+	}
+	leaf := operator.BuildTools(deps.Root, deps.HTTPCl, skill)
+
+	primaryNames := sortedNames(t, primary)
+	leafNames := sortedNames(t, leaf)
+
+	if !containsName(primaryNames, "Subagent") {
+		t.Errorf("primary toolset = %v, want it to contain Subagent (the primary must be able to spawn)", primaryNames)
+	}
+	if containsName(leafNames, "Subagent") {
+		t.Errorf("operator leaf toolset = %v, must NOT contain Subagent (a spawned operator cannot spawn)", leafNames)
 	}
 
-	want := []string{"AskUser", "Glob", "Grep", "ReadFile", "Subagent", "Todo"}
-	got := make([]string, 0, len(ts.Registry))
-	for _, tl := range ts.Registry {
-		info, err := tl.Info(t.Context())
-		if err != nil {
-			t.Fatalf("Info() error = %v", err)
-		}
-		got = append(got, info.Name)
-	}
-	sort.Strings(got)
-
-	if len(got) != len(want) {
-		t.Fatalf("orchestrator tool names = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("orchestrator tool names = %v, want %v", got, want)
+	// primary MINUS Subagent must equal the leaf set exactly (no drift).
+	got := make([]string, 0, len(primaryNames))
+	for _, n := range primaryNames {
+		if n != "Subagent" {
+			got = append(got, n)
 		}
 	}
-
-	var hasSubagent bool
-	for _, n := range got {
-		if n == "Subagent" {
-			hasSubagent = true
-		}
-	}
-	if !hasSubagent {
-		t.Error("Subagent is absent, want it wired (the orchestrator must be able to spawn leaves)")
+	if !equalStringSlice(got, leafNames) {
+		t.Errorf("primary tools minus Subagent = %v, want the leaf union %v", got, leafNames)
 	}
 }
 
-// TestOrchestratorAutoApproveSetIsTheSix proves the orchestrator's hard-approve set is
-// exactly the six toolset members — every tool the orchestrator has is auto-approved
-// (it reads/searches/plans/asks/spawns; never directly mutates or networks) and Subagent
-// IS in the set (it has no path/command boundary, so it auto-approves only by being
-// named here).
-func TestOrchestratorAutoApproveSetIsTheSix(t *testing.T) {
-	t.Parallel()
-
-	want := []string{"AskUser", "Glob", "Grep", "ReadFile", "Subagent", "Todo"}
-	got := append([]string(nil), orchestratorAutoApprovedTools...)
-	sort.Strings(got)
-	if len(got) != len(want) {
-		t.Fatalf("orchestratorAutoApprovedTools = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("orchestratorAutoApprovedTools = %v, want %v", got, want)
-		}
-	}
-
-	var hasSubagent bool
-	for _, n := range got {
-		if n == "Subagent" {
-			hasSubagent = true
-		}
-	}
-	if !hasSubagent {
-		t.Error("Subagent is not auto-approved, want it in the hard-approve set")
-	}
+// sortedNames returns the toolset's tool names, sorted.
+func sortedNames(t *testing.T, ts loop.ToolSet) []string {
+	t.Helper()
+	out := toolNames(t, ts)
+	sort.Strings(out)
+	return out
 }
 
-// TestOrchestratorToolSetAllToolsAutoApproved proves the PermissionChecker
-// auto-approves every tool the orchestrator carries with a valid in-workspace call
-// — none gate. This is the contract: a read/search/plan/ask/spawn orchestrator never
-// prompts. Each tool is driven with args that clear the Stage-1 containment boundary
-// (an in-root path); Subagent has no path boundary and reaches AutoApprove via the
-// hard-approve list — so the assertion exercises the HardApprove stage, not a
-// malformed-args fail-secure ask.
-func TestOrchestratorToolSetAllToolsAutoApproved(t *testing.T) {
+// TestOperatorPrimaryToolSetPermissions proves the primary operator's PermissionChecker
+// auto-approves the read/search/plan/ask/spawn/skill tools and human-gates (never
+// auto-approves) the mutating + network tools (WriteFile, EditFile, Bash, WebSearch,
+// Fetch). Subagent has no path/command boundary and reaches AutoApprove only via the
+// hard-approve list; the Skill tool (embedded code-style) auto-approves the same way.
+func TestOperatorPrimaryToolSetPermissions(t *testing.T) {
 	t.Parallel()
 
 	// A real, existing root so the Stage-1 containment check (which EvalSymlinks the
 	// root) clears for the read/search tools.
 	root := t.TempDir()
-	// Per-tool valid args: the read/search tools carry an in-root path/root field so
-	// containment clears; Todo/AskUser are path-free; Subagent carries a name+message.
-	args := map[string]string{
+	deps, spawner, catalog, _, skill := operatorPrimaryArgs(t, root)
+	ts := operatorPrimaryToolSet(root, deps.HTTPCl, spawner, catalog, skill)
+
+	// Per-tool valid args: the auto-approve tools carry args that clear Stage-1
+	// containment; the gated tools carry empty args (a gated tool is never auto-approved
+	// regardless of args — fail-secure — so the security-relevant assertion is "not
+	// auto-approve").
+	autoApprove := map[string]string{
 		"ReadFile": `{"path":"file.txt"}`,
 		"Glob":     `{"pattern":"*.go","root":"."}`,
 		"Grep":     `{"pattern":"foo","path":"."}`,
 		"Todo":     `{}`,
 		"AskUser":  `{}`,
 		"Subagent": `{"agent":"operator","message":"do it"}`,
+		"Skill":    `{"name":"code-style"}`,
+	}
+	gated := map[string]string{
+		"WriteFile": `{}`,
+		"EditFile":  `{}`,
+		"Bash":      `{}`,
+		"WebSearch": `{}`,
+		"Fetch":     `{}`,
 	}
 
-	spawner, catalog := testWiring(t)
-	ts := orchestratorToolSet(root, spawner, catalog)
 	for _, tl := range ts.Registry {
 		info, err := tl.Info(t.Context())
 		if err != nil {
 			t.Fatalf("Info() error = %v", err)
 		}
-		callArgs, ok := args[info.Name]
+		name := info.Name
+		switch {
+		case hasKey(autoApprove, name):
+			eff := ts.Permission.Check(t.Context(), tl, name, autoApprove[name])
+			if eff != loop.EffectAutoApprove {
+				t.Errorf("Check(%q) = %v, want EffectAutoApprove", name, eff)
+			}
+		case hasKey(gated, name):
+			eff := ts.Permission.Check(t.Context(), tl, name, gated[name])
+			if eff == loop.EffectAutoApprove {
+				t.Errorf("Check(%q) = EffectAutoApprove, want a human gate (Ask/Deny — never auto-approve)", name)
+			}
+		default:
+			t.Errorf("unexpected tool %q in primary toolset (no permission expectation)", name)
+		}
+	}
+}
+
+// hasKey reports whether m has key k.
+func hasKey(m map[string]string, k string) bool {
+	_, ok := m[k]
+	return ok
+}
+
+// TestOperatorPrimaryToolSetPermissionParity hardens the name-only drift guard: for EVERY
+// tool the operator LEAF carries, the PRIMARY operator's PermissionChecker must resolve the
+// SAME effect (auto-approve vs gated) as the leaf's checker — so the primary really is
+// "leaf + Subagent" in GATING semantics, not merely in tool names. It builds both toolsets
+// over the SAME root and the SAME code-style Skill (so Skill is compared too) and Checks
+// each leaf tool's effect on BOTH checkers with the SAME args; the effect is a deterministic
+// function of (policy, tool, args), so any per-side divergence — e.g. a tool silently moving
+// Ask->auto-approve on only one side — is a real drift this catches.
+func TestOperatorPrimaryToolSetPermissionParity(t *testing.T) {
+	t.Parallel()
+
+	// A real, existing root so the Stage-1 containment check clears for the read/search
+	// tools on both checkers.
+	root := t.TempDir()
+	deps, spawner, catalog, _, skill := operatorPrimaryArgs(t, root)
+	leaf := operatorBuiltin().build(deps, skill) // == operator.BuildTools(root, http, skill)
+	primary := operatorPrimaryToolSet(root, deps.HTTPCl, spawner, catalog, skill)
+
+	// Representative args per leaf tool. The SAME args go to BOTH checkers, so divergence is
+	// a real per-side drift (never an args artifact). Auto-approve tools carry in-root/embedded
+	// args so they clear containment; a gated tool is never auto-approved regardless of args.
+	args := map[string]string{
+		"ReadFile":  `{"path":"file.txt"}`,
+		"Glob":      `{"pattern":"*.go","root":"."}`,
+		"Grep":      `{"pattern":"foo","path":"."}`,
+		"WriteFile": `{"path":"out.txt","content":"x"}`,
+		"EditFile":  `{"path":"out.txt","old":"a","new":"b"}`,
+		"Bash":      `{"command":"ls"}`,
+		"WebSearch": `{"query":"go"}`,
+		"Fetch":     `{"url":"https://example.com"}`,
+		"Todo":      `{}`,
+		"AskUser":   `{}`,
+		"Skill":     `{"name":"code-style"}`,
+	}
+
+	for _, leafTool := range leaf.Registry {
+		info, err := leafTool.Info(t.Context())
+		if err != nil {
+			t.Fatalf("Info() error = %v", err)
+		}
+		name := info.Name
+		callArgs, ok := args[name]
 		if !ok {
-			t.Fatalf("no test args for tool %q", info.Name)
+			t.Fatalf("no parity args for leaf tool %q (update the args map)", name)
 		}
-		eff := ts.Permission.Check(t.Context(), tl, info.Name, callArgs)
-		if eff != loop.EffectAutoApprove {
-			t.Errorf("Check(%q, %s) = %v, want EffectAutoApprove (auto-approved)", info.Name, callArgs, eff)
+		leafEff := leaf.Permission.Check(t.Context(), leafTool, name, callArgs)
+		primaryTool := mustTool(t, primary, name)
+		primaryEff := primary.Permission.Check(t.Context(), primaryTool, name, callArgs)
+		if primaryEff != leafEff {
+			t.Errorf("tool %q: primary effect = %v, leaf effect = %v — want parity (the primary must gate exactly like the leaf)", name, primaryEff, leafEff)
 		}
+	}
+}
+
+// TestOperatorDelegationIsWellFormedXML proves the primary-only operatorDelegation fragment
+// is a single well-formed <delegation> element, mirroring each agent's TestRoleIsWellFormedXML.
+// The fragment is baked into the primary's system prompt (after operator.Role), so malformed
+// XML would corrupt that assembly; this regression-guards it like the role and identity blocks.
+func TestOperatorDelegationIsWellFormedXML(t *testing.T) {
+	t.Parallel()
+	var probe struct {
+		XMLName xml.Name `xml:"delegation"`
+	}
+	if err := xml.Unmarshal([]byte(operatorDelegation), &probe); err != nil {
+		t.Fatalf("operatorDelegation is not well-formed XML: %v", err)
+	}
+	if probe.XMLName.Local != "delegation" {
+		t.Errorf("operatorDelegation root element = %q, want %q", probe.XMLName.Local, "delegation")
 	}
 }

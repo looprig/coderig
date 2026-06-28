@@ -39,8 +39,8 @@ type Agent struct {
 }
 
 // LeafToolDeps are the construction deps a leaf agent's toolset needs. There is
-// deliberately NO Spawner here — a leaf cannot spawn (least privilege). The
-// orchestrator's spawn-capable toolset is assembled separately.
+// deliberately NO Spawner here — a leaf cannot spawn (least privilege). The primary
+// operator's spawn-capable toolset is assembled separately.
 type LeafToolDeps struct {
 	Root   string
 	HTTPCl *http.Client

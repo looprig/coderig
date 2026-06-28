@@ -20,7 +20,7 @@ import (
 //
 //   - a permitted agent resolves to a FRESH loop.Config whose AgentName is the leaf's
 //     name, whose system prompt is the swarm Identity + the leaf's Role, and whose
-//     toolset is the leaf's OWN allowlist (NOT the orchestrator's, and with no Subagent
+//     toolset is the leaf's OWN allowlist (NOT the primary operator's, and with no Subagent
 //     tool — a leaf cannot spawn);
 //   - an unknown agent fails closed with a *UnknownAgentError (errors.As-recoverable),
 //     and RunSubagent is never reached.
@@ -151,7 +151,7 @@ func TestSpawnResolvesPermittedAgent(t *testing.T) {
 			}
 
 			// The leaf gets its OWN toolset (contains the expected tools) and crucially
-			// NO Subagent (least privilege — only the primary orchestrator may spawn).
+			// NO Subagent (least privilege — only the primary operator may spawn).
 			names := toolNames(t, runner.gotCfg.Tools)
 			for _, want := range tt.tools {
 				if !containsName(names, want) {
@@ -166,7 +166,7 @@ func TestSpawnResolvesPermittedAgent(t *testing.T) {
 }
 
 // TestSpawnEnablesRuntimeContext proves a spawned leaf's fresh loop.Config carries the
-// spawner's RuntimeContextProvider, so every leaf agent (not just the orchestrator)
+// spawner's RuntimeContextProvider, so every leaf agent (not just the primary operator)
 // gets the volatile date/cwd/git tail injected each turn.
 func TestSpawnEnablesRuntimeContext(t *testing.T) {
 	t.Parallel()
@@ -223,7 +223,7 @@ func TestSpawnUnknownAgent(t *testing.T) {
 	}{
 		{name: "nonexistent agent", agent: "nope"},
 		{name: "empty agent", agent: ""},
-		{name: "the orchestrator is not a spawnable leaf", agent: "orchestrator"},
+		{name: "the retired orchestrator is not a spawnable leaf", agent: "orchestrator"},
 	}
 	for _, tt := range tests {
 		tt := tt

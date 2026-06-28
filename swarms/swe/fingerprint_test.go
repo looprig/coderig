@@ -5,15 +5,15 @@ import (
 	"testing"
 
 	"github.com/ciram-co/looprig/pkg/session"
-	"github.com/ciram-co/swe/agents/orchestrator"
+	"github.com/ciram-co/swe/agents/operator"
 )
 
-// TestOrchestratorFingerprintFields asserts the swarm-level config-fingerprint fields the
-// composition root injects: AgentKind is the swarm+primary identity ("swe:orchestrator"),
+// TestOperatorFingerprintFields asserts the swarm-level config-fingerprint fields the
+// composition root injects: AgentKind is the swarm+primary identity ("swe:operator"),
 // RuntimeSkills passes the human-set mode through verbatim, and WorkspaceRoot is the
 // canonical absolute root. These are what a restore compares so a session cannot silently
 // resume under a different agent identity, skill-trust mode, or repo.
-func TestOrchestratorFingerprintFields(t *testing.T) {
+func TestOperatorFingerprintFields(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -27,37 +27,37 @@ func TestOrchestratorFingerprintFields(t *testing.T) {
 		{
 			name: "runtime skills off",
 			cfg:  Config{RuntimeSkills: false},
-			want: session.ConfigFingerprintFields{AgentKind: "swe:orchestrator", RuntimeSkills: false, WorkspaceRoot: wantRoot},
+			want: session.ConfigFingerprintFields{AgentKind: "swe:operator", RuntimeSkills: false, WorkspaceRoot: wantRoot},
 		},
 		{
 			name: "runtime skills on",
 			cfg:  Config{RuntimeSkills: true},
-			want: session.ConfigFingerprintFields{AgentKind: "swe:orchestrator", RuntimeSkills: true, WorkspaceRoot: wantRoot},
+			want: session.ConfigFingerprintFields{AgentKind: "swe:operator", RuntimeSkills: true, WorkspaceRoot: wantRoot},
 		},
 	}
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := orchestratorFingerprintFields(root, tt.cfg)
+			got := operatorFingerprintFields(root, tt.cfg)
 			if got != tt.want {
-				t.Errorf("orchestratorFingerprintFields = %+v, want %+v", got, tt.want)
+				t.Errorf("operatorFingerprintFields = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
 }
 
-// TestOrchestratorAgentKindFormat pins the AgentKind to "<swarm>:<primary agent>" so a
-// rename of the orchestrator's attribution name is reflected in the fingerprint (and a
+// TestOperatorAgentKindFormat pins the AgentKind to "<swarm>:<primary agent>" so a
+// rename of the operator's attribution name is reflected in the fingerprint (and a
 // prior coding/other session, with a different or empty AgentKind, cannot resume as SWE).
-func TestOrchestratorAgentKindFormat(t *testing.T) {
+func TestOperatorAgentKindFormat(t *testing.T) {
 	t.Parallel()
-	want := "swe:" + string(orchestrator.Name)
-	if orchestratorAgentKind != want {
-		t.Errorf("orchestratorAgentKind = %q, want %q", orchestratorAgentKind, want)
+	want := "swe:" + string(operator.Name)
+	if operatorAgentKind != want {
+		t.Errorf("operatorAgentKind = %q, want %q", operatorAgentKind, want)
 	}
-	if orchestratorAgentKind != "swe:orchestrator" {
-		t.Errorf("orchestratorAgentKind = %q, want %q", orchestratorAgentKind, "swe:orchestrator")
+	if operatorAgentKind != "swe:operator" {
+		t.Errorf("operatorAgentKind = %q, want %q", operatorAgentKind, "swe:operator")
 	}
 }
 

@@ -14,7 +14,7 @@ import (
 	"github.com/ciram-co/looprig/pkg/llm"
 	"github.com/ciram-co/looprig/pkg/persistence"
 	"github.com/ciram-co/looprig/pkg/uuid"
-	"github.com/ciram-co/swe/agents/orchestrator"
+	"github.com/ciram-co/swe/agents/operator"
 )
 
 // textChunk wraps s as a streamed text chunk for the fake LLM. (The fake_test fakeLLM is
@@ -154,8 +154,8 @@ func TestSessionStoreRoundTrip(t *testing.T) {
 	if !hasType(backlog, event.RestoreDone{}) {
 		t.Errorf("resumed backlog missing RestoreDone (restore was not bracketed): %v", typeNames(backlog))
 	}
-	if got := primaryLoopAgentName(backlog, a2.PrimaryLoopID()); got != orchestrator.Name {
-		t.Errorf("restored primary-loop LoopStarted AgentName = %q, want %q (orchestrator-as-primary)", got, orchestrator.Name)
+	if got := primaryLoopAgentName(backlog, a2.PrimaryLoopID()); got != operator.Name {
+		t.Errorf("restored primary-loop LoopStarted AgentName = %q, want %q (operator-as-primary)", got, operator.Name)
 	}
 
 	drainTurn(t, a2, "continue")

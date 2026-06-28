@@ -18,7 +18,8 @@ import (
 // no Skill tool at all, and operator keeps its embedded-only (auto-approve) one.
 // When the mode is ON, ONLY the read-only eligible agents (explorer, researcher)
 // gain a WORKSPACE-enabled Skill tool (its CheckEffect Asks for a non-embedded
-// name); operator stays embedded-only and the orchestrator never gets one.
+// name); the operator leaf stays embedded-only, and the PRIMARY operator carries the
+// SAME embedded-only code-style Skill (it is not AllowsRuntimeSkills in this cut).
 
 // runtimeDeps is a minimal LeafToolDeps whose Root is a real, distinct path so the
 // workspace-enabled Skill tool has a non-empty workspace root.
@@ -148,10 +149,12 @@ func TestRuntimeSkillsOnWorkspaceTool(t *testing.T) {
 	}
 }
 
-// TestRuntimeSkillsOrchestratorNeverGetsTool proves the orchestrator's toolset never
-// carries a Skill tool under either mode — it is delegate-only (§7a), regardless of
-// the runtime-skills flag.
-func TestRuntimeSkillsOrchestratorNeverGetsTool(t *testing.T) {
+// TestRuntimeSkillsPrimaryHasEmbeddedSkillTool proves the PRIMARY operator's toolset
+// carries its embedded code-style Skill tool under EITHER mode, and that the tool stays
+// embedded-only (auto-approves the embedded name) — the operator is not AllowsRuntimeSkills
+// in this cut (Task 4 flips that), so the runtime-skills mode never workspace-enables the
+// primary's Skill.
+func TestRuntimeSkillsPrimaryHasEmbeddedSkillTool(t *testing.T) {
 	t.Parallel()
 
 	for _, mode := range []bool{false, true} {
@@ -165,9 +168,12 @@ func TestRuntimeSkillsOrchestratorNeverGetsTool(t *testing.T) {
 				t.Fatalf("leafRegistry() error = %v", err)
 			}
 			sp := newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory("k"), loader, NewRuntimeContextProvider())
-			ts := orchestratorToolSet(deps.Root, sp, toolCatalog(reg))
-			if containsName(toolNames(t, ts), "Skill") {
-				t.Errorf("orchestrator toolset has a Skill tool (mode=%v), want none (delegate-only)", mode)
+			skill := buildLeafSkill(loader, operatorBuiltin(), deps, Config{RuntimeSkills: mode})
+			ts := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, sp, toolCatalog(reg), skill)
+			skillTool := mustTool(t, ts, "Skill")
+			eff := ts.Permission.Check(t.Context(), skillTool, "Skill", `{"name":"code-style"}`)
+			if eff != loop.EffectAutoApprove {
+				t.Errorf("primary operator Skill effect = %v (mode=%v), want EffectAutoApprove (embedded-only)", eff, mode)
 			}
 		})
 	}

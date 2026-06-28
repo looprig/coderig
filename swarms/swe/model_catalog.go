@@ -14,7 +14,7 @@ type ModelTier string
 const (
 	// TierEconomy is the cheap tier used for best-effort session-title generation.
 	TierEconomy ModelTier = "economy"
-	// TierStandard is the tier used for normal orchestrator and subagent turns.
+	// TierStandard is the tier used for normal operator (primary) and subagent turns.
 	TierStandard ModelTier = "standard"
 	// TierPremium is stored but never implicitly selected in this change.
 	TierPremium ModelTier = "premium"
@@ -61,7 +61,7 @@ func (e *ModelCatalogError) Unwrap() error { return e.Cause }
 // llm.Model identities (the per-use API key + system prompt are injected later by the
 // ModelFactory), so a resolved or logged value never carries an API key.
 type modelResolver interface {
-	// standardModel returns the identity for normal orchestrator/subagent turns. ok is false
+	// standardModel returns the identity for normal operator/subagent turns. ok is false
 	// when no Standard tier is configured (the caller uses the swarm's default model).
 	standardModel() (llm.Model, bool)
 	// economyModel returns the identity for best-effort title generation, resolved lazily by

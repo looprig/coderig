@@ -18,8 +18,8 @@ import (
 
 // persistence.go is the SWE-Swarm's composition-root wiring for the durable session
 // journal: it turns the bare session.New / session.Restore into a fully-persisted
-// orchestrator-primary session over an embedded JetStream context. It is salvaged from
-// the prior coding agent's persistence.go and adapted to the swarm's orchestratorConfig builder, so
+// operator-primary session over an embedded JetStream context. It is salvaged from
+// the prior coding agent's persistence.go and adapted to the swarm's operatorPrimaryConfig builder, so
 // the persistence layer owns ONLY the new-vs-resume decision, the sessionID
 // chicken-and-egg resolution (mint first → build journal → inject the SAME id into
 // session.New), and GC scheduling. The single-writer lease's lifecycle is owned by the
@@ -30,10 +30,10 @@ import (
 // cmd/swe root, never here), so the swarm package never imports nats-server.
 //
 // Subagent wiring: the persisted + restored sessions are both built from the SAME
-// orchestratorWiring (leaf registry + unbound spawner + primary cfg with Subagent
-// wired) that the headless New path uses, via buildOrchestratorWiring. Both openNew and
+// operatorWiring (leaf registry + unbound spawner + primary cfg with Subagent
+// wired) that the headless New path uses, via buildOperatorWiring. Both openNew and
 // openResume bind the live session onto the wiring's spawner AFTER the session is built
-// (before any turn runs), so a persisted or restored orchestrator can spawn leaves by
+// (before any turn runs), so a persisted or restored operator can spawn leaves by
 // name exactly like a headless one. There is one wiring per Open call (its spawner is
 // session-scoped), so a /clear reopen builds a fresh wiring for the fresh session.
 
@@ -311,10 +311,10 @@ type SessionSelector struct {
 // tests (which inject a fake llm.LLM + key-bound ModelFactory). It branches on isNew: a NEW
 // open builds over the factory-minted id (the journal must use the SAME id the session
 // directory + engine were opened with); a RESUME restores sel.Resume. It resolves the
-// workspace root once (fail-fast on os.Getwd error) and builds the SAME orchestratorWiring
+// workspace root once (fail-fast on os.Getwd error) and builds the SAME operatorWiring
 // the headless New uses (leaf registry + unbound spawner + primary cfg with Subagent
 // wired) under cfg (the human-set modes — RuntimeSkills), so both branches construct an
-// identical orchestrator and both bind the live session onto the spawner after building it.
+// identical operator and both bind the live session onto the spawner after building it.
 func (p *Persistence) openResolved(ctx context.Context, client llm.LLM, factory ModelFactory, id uuid.UUID, isNew bool, sel SessionSelector, cfg Config) (*sessionAgent, error) {
 	// The workspace root is the process working directory: file tools are confined to it
 	// and the PermissionChecker uses it for containment + path relativisation.
@@ -322,7 +322,7 @@ func (p *Persistence) openResolved(ctx context.Context, client llm.LLM, factory 
 	if err != nil {
 		return nil, &WorkspaceRootError{Cause: err}
 	}
-	wiring, err := buildOrchestratorWiring(client, factory, root, cfg)
+	wiring, err := buildOperatorWiring(client, factory, root, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +332,7 @@ func (p *Persistence) openResolved(ctx context.Context, client llm.LLM, factory 
 	// into both construction paths so a NEW session stamps them and a RESUMED session compares
 	// them (a different skill-trust mode or workspace then rejects). Same fields the headless
 	// New path injects, so the persisted and headless fingerprints cannot drift.
-	fields := orchestratorFingerprintFields(root, cfg)
+	fields := operatorFingerprintFields(root, cfg)
 
 	if isNew {
 		return p.openNew(ctx, wiring, id, fields)
@@ -345,9 +345,9 @@ func (p *Persistence) openResolved(ctx context.Context, client llm.LLM, factory 
 // journal (which writes the opening LeaseFence), builds the catalog-backed event appender +
 // the command appender, and finally calls newPersistentSessionAgent with the INJECTED
 // sessionID + both appenders + the lease-release hook (so a clean Shutdown frees ownership) +
-// the orchestrator spawn caps. On any failure before the session is built it releases the
+// the operator spawn caps. On any failure before the session is built it releases the
 // lease so a retry can re-acquire without waiting out the TTL.
-func (p *Persistence) openNew(ctx context.Context, wiring orchestratorWiring, sessionID uuid.UUID, fields session.ConfigFingerprintFields) (*sessionAgent, error) {
+func (p *Persistence) openNew(ctx context.Context, wiring operatorWiring, sessionID uuid.UUID, fields session.ConfigFingerprintFields) (*sessionAgent, error) {
 	// (1) The sessionID was minted by the factory BEFORE the engine was opened — the session
 	// directory, lock, and embedded StoreDir are already keyed on it. The journal binds the
 	// stream + writes the opening LeaseFence under that SAME id. (chicken-and-egg resolution)
@@ -384,7 +384,7 @@ func (p *Persistence) openNew(ctx context.Context, wiring orchestratorWiring, se
 		session.WithEventAppender(eventAppender),
 		session.WithCommandAppender(cmdAppender),
 		session.WithLeaseRelease(lease.Release),
-		session.WithLimits(orchestratorLimits()),
+		session.WithLimits(operatorLimits()),
 		session.WithConfigFingerprintFields(fields),
 	)
 	if err != nil {
@@ -402,8 +402,8 @@ func (p *Persistence) openNew(ctx context.Context, wiring orchestratorWiring, se
 // object store, then Restore acquires the lease, folds the durable log, brings the primary
 // loop up idle, and installs its own lease-release-on-Shutdown hook (so a clean Shutdown
 // frees ownership). The resumed agent's replayer is wired so ReplayBacklog can repaint the
-// restored transcript under the orchestrator spawn caps.
-func (p *Persistence) openResume(ctx context.Context, wiring orchestratorWiring, sel SessionSelector, fields session.ConfigFingerprintFields) (*sessionAgent, error) {
+// restored transcript under the operator spawn caps.
+func (p *Persistence) openResume(ctx context.Context, wiring operatorWiring, sel SessionSelector, fields session.ConfigFingerprintFields) (*sessionAgent, error) {
 	objects, err := p.js.ObjectStore(journal.SessionObjectBucket(sel.Resume))
 	if err != nil {
 		return nil, err
@@ -413,7 +413,7 @@ func (p *Persistence) openResume(ctx context.Context, wiring orchestratorWiring,
 	// live fingerprint is computed identically; a different skill-trust mode or workspace
 	// then rejects (unless WithAllowConfigMismatch).
 	opts := []session.Option{
-		session.WithLimits(orchestratorLimits()),
+		session.WithLimits(operatorLimits()),
 		session.WithConfigFingerprintFields(fields),
 	}
 	if sel.AllowConfigMismatch {

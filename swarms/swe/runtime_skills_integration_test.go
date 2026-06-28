@@ -18,10 +18,10 @@ import (
 )
 
 // runtime_skills_integration_test.go is the P2b Phase 3c END-TO-END acceptance: with
-// RuntimeSkills ON and a real on-disk <root>/.skills/<name>/SKILL.md, the orchestrator
+// RuntimeSkills ON and a real on-disk <root>/.skills/<name>/SKILL.md, the primary operator
 // spawns the researcher, the researcher calls Skill{name:"<workspace-skill>"}, the
 // workspace load surfaces a HUMAN-GATED SkillLoadRequest (ScopeOnce) attributed to the
-// RESEARCHER's loop (not the orchestrator's), and after Approve the snapshot body is
+// RESEARCHER's loop (not the primary's), and after Approve the snapshot body is
 // returned as the tool result. It crosses the filesystem boundary (a real os.Root
 // snapshot of the workspace skill), so it is integration-tagged.
 //
@@ -57,12 +57,12 @@ func writeWorkspaceSkill(t *testing.T, root, name string) string {
 // test planted is the one the Skill tool reads).
 func newRuntimeSkillsSwarm(t *testing.T, client *scriptedSwarmLLM, root string) *sessionAgent {
 	t.Helper()
-	wiring, err := buildOrchestratorWiring(client, newModelFactory("test-key"), root, Config{RuntimeSkills: true})
+	wiring, err := buildOperatorWiring(client, newModelFactory("test-key"), root, Config{RuntimeSkills: true})
 	if err != nil {
-		t.Fatalf("buildOrchestratorWiring() error = %v", err)
+		t.Fatalf("buildOperatorWiring() error = %v", err)
 	}
 	agent, err := newSessionAgent(context.Background(), wiring.cfg,
-		session.WithLimits(session.Limits{Depth: orchestratorSpawnDepth, Quota: orchestratorSpawnQuota}))
+		session.WithLimits(session.Limits{Depth: operatorSpawnDepth, Quota: operatorSpawnQuota}))
 	if err != nil {
 		t.Fatalf("newSessionAgent() error = %v", err)
 	}
@@ -72,7 +72,7 @@ func newRuntimeSkillsSwarm(t *testing.T, client *scriptedSwarmLLM, root string) 
 }
 
 // TestRuntimeSkillWorkspaceLoadGatedEndToEnd drives the assembled swarm with RuntimeSkills
-// ON: the orchestrator spawns the researcher, the researcher loads a WORKSPACE skill via
+// ON: the primary operator spawns the researcher, the researcher loads a WORKSPACE skill via
 // Skill{name}, the load opens a SkillLoadRequest gate (ScopeOnce) on the RESEARCHER's loop,
 // the test Approves it on that exact loop, and the researcher's Skill ToolCallCompleted
 // carries the approved snapshot body — proving the §7a workspace path is enforced-gated,
@@ -84,9 +84,9 @@ func TestRuntimeSkillWorkspaceLoadGatedEndToEnd(t *testing.T) {
 	skillName := writeWorkspaceSkill(t, root, "project-local")
 
 	client := newScriptedSwarmLLM()
-	client.script(routeOrchestrator,
+	client.script(routePrimary,
 		subagentCallReply("call-1", researcher.Name, "load the project skill"),
-		textReply("orchestrator: researcher loaded the workspace skill"),
+		textReply("primary: researcher loaded the workspace skill"),
 	)
 	// The researcher loads the workspace skill (Ask-gated), then — after approval — ends.
 	client.script(route(researcher.Name),
@@ -101,10 +101,10 @@ func TestRuntimeSkillWorkspaceLoadGatedEndToEnd(t *testing.T) {
 	rec := newAllScopeRecorder(t, agent)
 
 	// The workspace Skill load BLOCKS on its gate until approved, and the Subagent tool
-	// blocks the orchestrator turn until the researcher completes — so the approval must
+	// blocks the primary turn until the researcher completes — so the approval must
 	// come from a separate goroutine while Submit's effects are in flight. The driver
 	// waits for the LEAF's SkillLoadRequest gate, asserts it is a ScopeOnce SkillLoadRequest
-	// attributed to the researcher (not the orchestrator), then Approves it on that loop.
+	// attributed to the researcher (not the primary), then Approves it on that loop.
 	gateInfo := make(chan permGate, 1)
 	go func() {
 		ev, ok := rec.waitFor(func(ev event.Event) bool {
@@ -132,7 +132,7 @@ func TestRuntimeSkillWorkspaceLoadGatedEndToEnd(t *testing.T) {
 		t.Fatal("never observed a PermissionRequested attributed to the spawned researcher loop")
 	}
 	if g.loop == primary {
-		t.Errorf("gate loop id = orchestrator primary %v, want the spawned researcher's own loop", primary)
+		t.Errorf("gate loop id = primary %v, want the spawned researcher's own loop", primary)
 	}
 
 	// The gate is a SkillLoadRequest (the §7a workspace gate), naming the workspace path,
@@ -169,9 +169,9 @@ func TestRuntimeSkillWorkspaceLoadGatedEndToEnd(t *testing.T) {
 		t.Errorf("Skill result carries an error string, want the workspace body: %q", tc.ResultPreview)
 	}
 
-	// The orchestrator's turn completes with its scripted final text.
+	// The primary's turn completes with its scripted final text.
 	if _, ok := rec.waitFor(isPrimaryTurnDone(primary)); !ok {
-		t.Fatal("never observed the orchestrator's terminal TurnDone")
+		t.Fatal("never observed the primary's terminal TurnDone")
 	}
 }
 

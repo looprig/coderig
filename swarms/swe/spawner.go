@@ -21,7 +21,7 @@ type subagentRunner interface {
 	RunSubagent(ctx context.Context, parent loop.Provenance, cfg loop.Config, blocks []content.Block, parentToolUseID string) (string, error)
 }
 
-// spawner.go wires the concrete tools.Spawner the orchestrator's Subagent tool needs.
+// spawner.go wires the concrete tools.Spawner the primary operator's Subagent tool needs.
 // It is the composition-root adapter that lets the agent-aware Subagent TOOL — which
 // depends only on the narrow tools.Spawner interface + the typed identity.AgentName —
 // resolve a named leaf agent against the swarm's Registry and run it as an IN-SESSION
@@ -37,13 +37,13 @@ type subagentRunner interface {
 // and its AgentName attributes the sub-loop to that leaf.
 //
 // LEAST PRIVILEGE. A leaf's toolset has NO Subagent tool (LeafToolDeps carries no
-// Spawner), so a spawned leaf cannot itself spawn — only the orchestrator (the
-// primary) holds the spawn capability. The recursion the old coding spawner allowed
-// is deliberately NOT reproduced for leaves.
+// Spawner), so a spawned leaf cannot itself spawn — only the primary operator holds
+// the spawn capability. The recursion the old coding spawner allowed is deliberately
+// NOT reproduced for leaves.
 //
 // LATE-BIND. The session field is set ONCE, synchronously, by the swarm's
 // construction seam right after the session is created/restored and BEFORE any turn
-// runs — the orchestrator's tools are built before the session exists (the Subagent
+// runs — the primary operator's tools are built before the session exists (the Subagent
 // tool needs this spawner, the spawner needs the session), so the cycle is resolved
 // by a single post-construction assignment (bind). No goroutine reads session until a
 // turn invokes the Subagent tool, which cannot happen until after Submit, which
@@ -74,17 +74,17 @@ type swarmSpawner struct {
 	client     llm.LLM                     // provider client shared with the parent (no per-loop client)
 	factory    ModelFactory                // builds each leaf's model spec from its finished system prompt
 	describer  tools.SkillDescriber        // reads a leaf's allowed-skill metadata for the catalog
-	runtimeCtx loop.RuntimeContextProvider // volatile per-turn context (date/cwd/git) every leaf gets; shared with the orchestrator
+	runtimeCtx loop.RuntimeContextProvider // volatile per-turn context (date/cwd/git) every leaf gets; shared with the primary operator
 }
 
 // newSwarmSpawner builds an UNBOUND swarmSpawner (its session is nil until bind is
-// called). The caller (the swarm's construction seam) wires the orchestrator's
+// called). The caller (the swarm's construction seam) wires the primary operator's
 // Subagent tool with this spawner, builds the session, then calls bind exactly once.
 // describer is the same per-agent-scoped loader the registry's Skill tools are built
 // over: a leaf's <available_skills> catalog can only list a skill it is allowed to
-// load. runtimeCtx is the swarm-wide RuntimeContextProvider (shared with the
-// orchestrator) every spawned leaf's loop.Config carries, so leaves get the same
-// volatile per-turn context as the primary; nil leaves a leaf with runtime context OFF.
+// load. runtimeCtx is the swarm-wide RuntimeContextProvider (shared with the primary
+// operator) every spawned leaf's loop.Config carries, so leaves get the same volatile
+// per-turn context as the primary; nil leaves a leaf with runtime context OFF.
 func newSwarmSpawner(registry *Registry, deps LeafToolDeps, client llm.LLM, factory ModelFactory, describer tools.SkillDescriber, runtimeCtx loop.RuntimeContextProvider) *swarmSpawner {
 	return &swarmSpawner{registry: registry, deps: deps, client: client, factory: factory, describer: describer, runtimeCtx: runtimeCtx}
 }
@@ -119,7 +119,7 @@ func (sp *swarmSpawner) Spawn(ctx context.Context, parent loop.Provenance, agent
 		Model:          sp.factory(system),
 		Tools:          a.BuildTools(sp.deps),
 		AgentName:      a.Name,
-		RuntimeContext: sp.runtimeCtx, // swarm-wide volatile per-turn context, shared with the orchestrator
+		RuntimeContext: sp.runtimeCtx, // swarm-wide volatile per-turn context, shared with the primary operator
 	}
 	blocks := []content.Block{&content.TextBlock{Text: message}}
 	return sp.session.RunSubagent(ctx, parent, cfg, blocks, parentToolUseID)

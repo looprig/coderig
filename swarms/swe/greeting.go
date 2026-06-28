@@ -3,8 +3,6 @@ package swe
 import (
 	"sort"
 	"strings"
-
-	"github.com/ciram-co/swe/agents/orchestrator"
 )
 
 // greeting.go builds the OPTIONAL, UI-only startup greeting (§5a): a deterministic,
@@ -20,9 +18,9 @@ const greetingLead = "SWE is a software-engineering swarm. It plans a task and d
 
 // Greeting returns the deterministic startup-greeting string for cfg, or the EMPTY
 // string when the greeting toggle is off (cfg.Greeting == false — the fail-secure
-// default). It is built from the swarm's wired agent set (the orchestrator primary +
-// the spawnable leaf roster) and the leaves' embedded skill names — the same source of
-// truth the Subagent catalog reads — so it costs nothing and never drifts from the
+// default). It is built from the swarm's wired spawnable roster (operator is the primary
+// AND a leaf, so it appears once) and the leaves' embedded skill names — the same source
+// of truth the Subagent catalog reads — so it costs nothing and never drifts from the
 // wiring. It performs NO I/O and NO model call: pure, side-effect-free string building,
 // safe to call at the composition root before any session exists.
 func Greeting(cfg Config) string {
@@ -32,15 +30,14 @@ func Greeting(cfg Config) string {
 	return buildGreeting(greetingCatalog(), greetingSkills())
 }
 
-// greetingCatalog returns the agent entries the greeting lists, in display order: the
-// orchestrator (the primary loop) first, then the spawnable leaves in their fixed
-// catalog order. It is derived from the package-exported agent boundaries
-// (orchestrator.Name/Description + leafBuiltins), the SAME source the leaf Registry and
-// Subagent catalog read, so the greeting can never name an agent the swarm does not wire.
+// greetingCatalog returns every spawnable leaf in catalog order. operator is listed once
+// because it is also the primary loop (the roster already contains it), so there is no
+// separate primary line. It is derived from leafBuiltins — the SAME source the leaf
+// Registry and Subagent catalog read — so the greeting can never name an agent the swarm
+// does not wire.
 func greetingCatalog() []AgentCatalogEntry {
 	builtins := leafBuiltins()
-	out := make([]AgentCatalogEntry, 0, len(builtins)+1)
-	out = append(out, AgentCatalogEntry{Name: orchestrator.Name, Description: orchestrator.Description})
+	out := make([]AgentCatalogEntry, 0, len(builtins))
 	for _, b := range builtins {
 		out = append(out, AgentCatalogEntry{Name: b.name, Description: b.description})
 	}

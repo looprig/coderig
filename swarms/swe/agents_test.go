@@ -8,7 +8,6 @@ import (
 	"github.com/ciram-co/looprig/pkg/identity"
 	"github.com/ciram-co/swe/agents/explorer"
 	"github.com/ciram-co/swe/agents/operator"
-	"github.com/ciram-co/swe/agents/orchestrator"
 	"github.com/ciram-co/swe/agents/researcher"
 	"github.com/ciram-co/swe/agents/reviewer"
 )
@@ -35,8 +34,8 @@ func equalStringSlice(a, b []string) bool {
 
 // TestLeafRegistryHasExactlyTheFourLeaves proves leafRegistry registers EXACTLY
 // the four spawnable leaf agents — operator, researcher, explorer, reviewer — in
-// that order, and that the orchestrator is deliberately absent (it is the primary,
-// not a spawnable leaf).
+// that order. operator is also the swarm's primary loop, but the leaf it registers
+// here has no Subagent tool, so a spawned operator cannot itself spawn.
 func TestLeafRegistryHasExactlyTheFourLeaves(t *testing.T) {
 	t.Parallel()
 
@@ -61,17 +60,18 @@ func TestLeafRegistryHasExactlyTheFourLeaves(t *testing.T) {
 	}
 }
 
-// TestLeafRegistryOrchestratorAbsent proves the orchestrator is NOT in the leaf
-// registry — it is the primary loop, never spawned as a leaf.
-func TestLeafRegistryOrchestratorAbsent(t *testing.T) {
+// TestLeafRegistryNoOrphanPrimary proves the retired "orchestrator" agent is NOT in the
+// leaf registry: the primary loop is now an operator (which IS a leaf), and no separate
+// primary-only agent lingers in the spawnable roster.
+func TestLeafRegistryNoOrphanPrimary(t *testing.T) {
 	t.Parallel()
 
 	reg, _, err := leafRegistry(testLeafDeps(), Config{})
 	if err != nil {
 		t.Fatalf("leafRegistry() error = %v", err)
 	}
-	if _, ok := reg.Lookup(orchestrator.Name); ok {
-		t.Errorf("Lookup(%q) = found, want absent (orchestrator is the primary, not a leaf)", orchestrator.Name)
+	if _, ok := reg.Lookup(identity.AgentName("orchestrator")); ok {
+		t.Error(`Lookup("orchestrator") = found, want absent (the retired orchestrator agent is not a leaf)`)
 	}
 }
 

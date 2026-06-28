@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/swe/agents/orchestrator"
+	"github.com/ciram-co/swe/agents/operator"
 )
 
 // TestBuildGreeting pins the deterministic, LLM-free greeting builder: it is derived
@@ -39,11 +39,11 @@ func TestBuildGreeting(t *testing.T) {
 		{
 			name: "agents render in catalog order",
 			catalog: []AgentCatalogEntry{
-				{Name: "orchestrator", Description: "delegates"},
+				{Name: "operator", Description: "delegates"},
 				{Name: "researcher", Description: "reads the web"},
 				{Name: "explorer", Description: "reads the repo"},
 			},
-			wantAgents:  []identity.AgentName{"orchestrator", "researcher", "explorer"},
+			wantAgents:  []identity.AgentName{"operator", "researcher", "explorer"},
 			wantNoSkill: true,
 		},
 		{
@@ -109,7 +109,7 @@ func TestBuildGreetingDeterministic(t *testing.T) {
 	t.Parallel()
 
 	catalog := []AgentCatalogEntry{
-		{Name: "orchestrator", Description: "delegates"},
+		{Name: "reviewer", Description: "critiques"},
 		{Name: "operator", Description: "edits code"},
 		{Name: "researcher", Description: "reads the web"},
 	}
@@ -170,26 +170,31 @@ func TestGreetingFromRegistry(t *testing.T) {
 }
 
 // TestGreetingNotInModelContext is the "not in model context" gate at the config-assembly
-// seam (§5a): even with the greeting toggle ON, the orchestrator's assembled system prompt
-// is EXACTLY Identity+Role and contains NONE of the greeting text — the greeting flows only
-// to the TUI banner, never into any loop.Config.Model.System. This holds because the
-// greeting and the system prompt are built on entirely separate paths; the assertion makes
-// that structural fact a regression test.
+// seam (§5a): even with the greeting toggle ON, the primary operator's assembled system
+// prompt (Identity + operator.Role + delegation + the trusted skill catalog) contains NONE
+// of the greeting text — the greeting flows only to the TUI banner, never into any
+// loop.Config.Model.System. This holds because the greeting and the system prompt are built
+// on entirely separate paths; the assertion makes that structural fact a regression test.
 func TestGreetingNotInModelContext(t *testing.T) {
 	t.Parallel()
 
-	spawner, catalog := testWiring(t)
-	cfg := orchestratorConfig(&fakeLLM{}, newModelFactory("test-key"), "/tmp/workspace-root", spawner, catalog, NewRuntimeContextProvider())
+	wiring, err := buildOperatorWiring(&fakeLLM{}, newModelFactory("test-key"), "/tmp/workspace-root", Config{})
+	if err != nil {
+		t.Fatalf("buildOperatorWiring() error = %v", err)
+	}
+	cfg := wiring.cfg
 
-	if want := Identity + orchestrator.Role; cfg.Model.System != want {
-		t.Fatalf("orchestrator system prompt drifted from Identity+Role; greeting must not touch it")
+	// The primary's system prompt begins with Identity + operator.Role (the greeting text
+	// is built on a separate path and must not appear anywhere in it).
+	if !strings.HasPrefix(cfg.Model.System, Identity+operator.Role) {
+		t.Fatalf("operator system prompt does not start with Identity+operator.Role; greeting must not touch it")
 	}
 	greeting := Greeting(Config{Greeting: true})
 	if greeting == "" {
 		t.Fatal("Greeting(on) empty; cannot assert it is absent from the model context")
 	}
 	if strings.Contains(cfg.Model.System, greetingLead) {
-		t.Errorf("greeting lead leaked into the orchestrator system prompt (model context):\n%s", cfg.Model.System)
+		t.Errorf("greeting lead leaked into the operator system prompt (model context):\n%s", cfg.Model.System)
 	}
 	// No agent's catalog line from the greeting body may appear in the system prompt.
 	for _, b := range leafBuiltins() {

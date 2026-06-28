@@ -113,10 +113,11 @@ func (m modelCompleter) Complete(ctx context.Context, prompt string) (string, er
 // way the eval exercises it: the shared client, a model spec whose system prompt is
 // the swarm Identity prepended to the operator's Role (the swarm owns identity; the
 // agent owns its role), the operator's exact toolset, and its attribution name. It
-// runs under the same spawn caps the swarm applies to its primary. This mirrors the
-// production loop.Config assembly (orchestratorConfig) but for the operator leaf —
-// here it is the primary, not a spawnable leaf — and lives in the test because the
-// operator is never the swarm's primary in production (only the orchestrator is).
+// runs under the same spawn caps the swarm applies to its primary. This is a SIMPLIFIED
+// primary — the operator's bare leaf toolset, with NO Subagent and NO delegation prompt
+// fragment — so the eval measures the operator's own investigate+implement craft in
+// isolation, not its delegation behaviour (the production primary built by
+// operatorPrimaryConfig additionally carries Subagent + the delegation guidance).
 func newOperatorPrimary(ctx context.Context, client llm.LLM, factory ModelFactory, root string) (*sessionAgent, error) {
 	cfg := loop.Config{
 		Client:    client,
@@ -125,8 +126,8 @@ func newOperatorPrimary(ctx context.Context, client llm.LLM, factory ModelFactor
 		AgentName: operator.Name,
 	}
 	return newSessionAgent(ctx, cfg, session.WithLimits(session.Limits{
-		Depth: orchestratorSpawnDepth,
-		Quota: orchestratorSpawnQuota,
+		Depth: operatorSpawnDepth,
+		Quota: operatorSpawnQuota,
 	}))
 }
 
