@@ -313,3 +313,23 @@ func TestOperatorDelegationIsWellFormedXML(t *testing.T) {
 		t.Errorf("operatorDelegation root element = %q, want %q", probe.XMLName.Local, "delegation")
 	}
 }
+
+// TestOperatorSpawnCaps pins the session's spawn safety caps and documents WHY Depth is 2.
+// Only the primary operator carries Subagent and every spawnable leaf has none, so the real
+// tree is depth-1 (primary → non-spawning leaf). looprig refuses a spawn whose would-be child
+// has an ancestor chain ≥ Depth, so Depth=2 permits exactly that one level and refuses anything
+// deeper. Depth=1 would refuse even the primary→leaf spawn (TestAcceptanceEndToEndSpawn would
+// break); Depth>2 is dead slack since no leaf can spawn. operatorLimits() must carry both consts.
+func TestOperatorSpawnCaps(t *testing.T) {
+	t.Parallel()
+	if operatorSpawnDepth != 2 {
+		t.Errorf("operatorSpawnDepth = %d, want 2 (the structural depth-1 tree: primary → non-spawning leaf)", operatorSpawnDepth)
+	}
+	if operatorSpawnQuota != 64 {
+		t.Errorf("operatorSpawnQuota = %d, want 64", operatorSpawnQuota)
+	}
+	lim := operatorLimits()
+	if lim.Depth != operatorSpawnDepth || lim.Quota != operatorSpawnQuota {
+		t.Errorf("operatorLimits() = {Depth:%d Quota:%d}, want {Depth:%d Quota:%d}", lim.Depth, lim.Quota, operatorSpawnDepth, operatorSpawnQuota)
+	}
+}
