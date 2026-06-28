@@ -1,6 +1,7 @@
 # Binaries
 /bin/
 *.exe
+*.exe~
 *.dll
 *.so
 *.dylib
@@ -24,3 +25,12 @@
 # Local multi-repo dev workspace (never commit — overlays looprig locally)
 go.work
 go.work.sum
+
+# Git worktrees
+.worktrees/
+
+# Claude Code project settings
+.claude/
+
+# Migration review provenance (Codex review outputs) — keep locally, don't commit
+/scripts/migration/codex_review_*
