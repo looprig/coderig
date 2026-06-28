@@ -60,8 +60,18 @@ func operatorFingerprintFields(root string, cfg Config) session.ConfigFingerprin
 // bounds spawn-chain nesting, operatorSpawnQuota bounds the total sub-loops the
 // session may ever spawn. They take effect via the wired Subagent tool; the cap is in
 // force the moment spawning is enabled.
+//
+// operatorSpawnDepth is 2 to match the swarm's STRUCTURAL shape: only the primary
+// operator carries Subagent, and every spawnable leaf (operator, reviewer) has none, so
+// the real tree is depth-1 — the primary spawns a leaf, and that leaf cannot spawn again.
+// looprig's session refuses a spawn whose would-be child has an ancestor chain ≥ Depth,
+// so the deepest spawnable loop sits at chain Depth-1; Depth=2 therefore permits exactly
+// the one level the design uses (primary→leaf, chain 1) and refuses anything deeper. It is
+// a tight backstop, not the enforcement: the capability split (no Subagent on a leaf) is
+// what actually prevents a grandchild; this cap would still catch a future wiring slip
+// that handed a leaf a Subagent. (Depth=1 would refuse even the primary→leaf spawn.)
 const (
-	operatorSpawnDepth = 3
+	operatorSpawnDepth = 2
 	operatorSpawnQuota = 64
 )
 
