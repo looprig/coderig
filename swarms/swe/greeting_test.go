@@ -40,10 +40,9 @@ func TestBuildGreeting(t *testing.T) {
 			name: "agents render in catalog order",
 			catalog: []AgentCatalogEntry{
 				{Name: "operator", Description: "delegates"},
-				{Name: "researcher", Description: "reads the web"},
-				{Name: "explorer", Description: "reads the repo"},
+				{Name: "reviewer", Description: "critiques"},
 			},
-			wantAgents:  []identity.AgentName{"operator", "researcher", "explorer"},
+			wantAgents:  []identity.AgentName{"operator", "reviewer"},
 			wantNoSkill: true,
 		},
 		{
@@ -111,7 +110,6 @@ func TestBuildGreetingDeterministic(t *testing.T) {
 	catalog := []AgentCatalogEntry{
 		{Name: "reviewer", Description: "critiques"},
 		{Name: "operator", Description: "edits code"},
-		{Name: "researcher", Description: "reads the web"},
 	}
 	skills := []string{"code-style"}
 

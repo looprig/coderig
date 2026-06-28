@@ -184,7 +184,7 @@ type operatorWiring struct {
 }
 
 // operatorBuiltin is the single operator leaf definition, shared by the primary's Skill
-// wiring (and, after Task 4, the leaf roster) so operator's skills/eligibility/build cannot
+// wiring AND the leaf roster (leafBuiltins) so operator's skills/eligibility/build cannot
 // drift between the primary and the spawnable leaf.
 func operatorBuiltin() leafBuiltin {
 	return leafBuiltin{
@@ -192,7 +192,7 @@ func operatorBuiltin() leafBuiltin {
 		description:         operator.Description,
 		role:                operator.Role,
 		skills:              operatorSkills,
-		allowsRuntimeSkills: false, // Task 4 flips this to true (extend runtime-skills to operator)
+		allowsRuntimeSkills: true, // §7a: runtime-skills (workspace .skills/) eligibility extended to operator (approved); bounded — a non-embedded workspace load is human-gated (Ask) with no prompt-injected description and no new auto-execution.
 		build: func(d LeafToolDeps, s tool.InvokableTool) loop.ToolSet {
 			return operator.BuildTools(d.Root, d.HTTPCl, s)
 		},

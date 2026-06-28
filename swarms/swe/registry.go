@@ -54,9 +54,10 @@ type LeafToolDeps struct {
 type Config struct {
 	// RuntimeSkills enables the untrusted, human-gated workspace skill source
 	// (<workspaceRoot>/.skills/<name>/SKILL.md) for the agents whose definition sets
-	// AllowsRuntimeSkills (the read-only explorer + researcher per §7a). Off by
-	// default: embedded-only. The model can never set it — only a launch flag does
-	// (cmd/swe's --runtime-skills). When off, no leaf gains a workspace skill source.
+	// AllowsRuntimeSkills (the operator per §7a; eligibility was extended to it once it
+	// merged write/exec capability). Off by default: embedded-only. The model can never
+	// set it — only a launch flag does (cmd/swe's --runtime-skills). When off, no leaf
+	// gains a workspace skill source.
 	RuntimeSkills bool
 
 	// Greeting enables the OPTIONAL, UI-only startup greeting (§5a): a deterministic,

@@ -96,9 +96,9 @@ func TestSpawnResolvesPermittedAgent(t *testing.T) {
 		role  string
 		tools []string // a subset the leaf's toolset MUST contain
 	}{
-		{name: operator.Name, role: operator.Role, tools: []string{"Bash", "WriteFile"}},
-		{name: "researcher", tools: []string{"WebSearch", "Fetch"}},
-		{name: "explorer", tools: []string{"Glob", "Grep"}},
+		// operator now carries the merged read/search + web + write/exec surface that the
+		// retired researcher (WebSearch/Fetch) and explorer (Glob/Grep) leaves used to hold.
+		{name: operator.Name, role: operator.Role, tools: []string{"Bash", "WriteFile", "WebSearch", "Fetch", "Glob", "Grep"}},
 		{name: "reviewer", tools: []string{"ReadFile"}},
 	}
 	for _, tt := range tests {
@@ -224,6 +224,10 @@ func TestSpawnUnknownAgent(t *testing.T) {
 		{name: "nonexistent agent", agent: "nope"},
 		{name: "empty agent", agent: ""},
 		{name: "the retired orchestrator is not a spawnable leaf", agent: "orchestrator"},
+		// The roster is now exactly {operator, reviewer}; the retired read-only leaves are
+		// no longer registered, so spawning them must fail closed (not silently run).
+		{name: "the retired explorer leaf is no longer spawnable", agent: "explorer"},
+		{name: "the retired researcher leaf is no longer spawnable", agent: "researcher"},
 	}
 	for _, tt := range tests {
 		tt := tt

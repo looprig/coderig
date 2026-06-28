@@ -148,7 +148,7 @@ func TestRegistryCatalogOrder(t *testing.T) {
 		stubAgent("planner", "p"),
 		stubAgent("coding", "c"),
 		stubAgent("reviewer", "r"),
-		stubAgent("explorer", "e"),
+		stubAgent("scout", "e"),
 	)
 	if err != nil {
 		t.Fatalf("NewRegistry() unexpected error: %v", err)
@@ -159,7 +159,7 @@ func TestRegistryCatalogOrder(t *testing.T) {
 		{Name: "planner", Description: "p"},
 		{Name: "coding", Description: "c"},
 		{Name: "reviewer", Description: "r"},
-		{Name: "explorer", Description: "e"},
+		{Name: "scout", Description: "e"},
 	}
 
 	// Repeated calls must return the same deterministic order.

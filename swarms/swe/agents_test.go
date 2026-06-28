@@ -6,9 +6,7 @@ import (
 	"testing"
 
 	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/swe/agents/explorer"
 	"github.com/ciram-co/swe/agents/operator"
-	"github.com/ciram-co/swe/agents/researcher"
 	"github.com/ciram-co/swe/agents/reviewer"
 )
 
@@ -32,11 +30,11 @@ func equalStringSlice(a, b []string) bool {
 	return true
 }
 
-// TestLeafRegistryHasExactlyTheFourLeaves proves leafRegistry registers EXACTLY
-// the four spawnable leaf agents — operator, researcher, explorer, reviewer — in
-// that order. operator is also the swarm's primary loop, but the leaf it registers
-// here has no Subagent tool, so a spawned operator cannot itself spawn.
-func TestLeafRegistryHasExactlyTheFourLeaves(t *testing.T) {
+// TestLeafRegistryHasExactlyTheTwoLeaves proves leafRegistry registers EXACTLY
+// the two spawnable leaf agents — operator, reviewer — in that order. operator is also
+// the swarm's primary loop (sourced from the shared operatorBuiltin), but the leaf it
+// registers here has no Subagent tool, so a spawned operator cannot itself spawn.
+func TestLeafRegistryHasExactlyTheTwoLeaves(t *testing.T) {
 	t.Parallel()
 
 	reg, _, err := leafRegistry(testLeafDeps(), Config{})
@@ -49,7 +47,7 @@ func TestLeafRegistryHasExactlyTheFourLeaves(t *testing.T) {
 	for _, e := range catalog {
 		got = append(got, e.Name)
 	}
-	want := []identity.AgentName{operator.Name, researcher.Name, explorer.Name, reviewer.Name}
+	want := []identity.AgentName{operator.Name, reviewer.Name}
 	if len(got) != len(want) {
 		t.Fatalf("Catalog() names = %v, want %v", got, want)
 	}
@@ -94,30 +92,15 @@ func TestLeafRegistryLookupCarriesLeafData(t *testing.T) {
 		wantRole          string
 		wantTools         []string
 		wantSkills        []string // the agent's allowed-skill names (nil = none)
-		wantRuntimeSkills bool     // §7a eligibility — true for the read-only explorer + researcher
+		wantRuntimeSkills bool     // §7a eligibility — true for the operator (extended), false for reviewer
 	}{
 		{
-			name:       "operator",
-			agent:      operator.Name,
-			wantDesc:   operator.Description,
-			wantRole:   operator.Role,
-			wantTools:  []string{"AskUser", "Bash", "EditFile", "Fetch", "Glob", "Grep", "ReadFile", "Skill", "Todo", "WebSearch", "WriteFile"},
-			wantSkills: []string{"code-style"},
-		},
-		{
-			name:              "researcher",
-			agent:             researcher.Name,
-			wantDesc:          researcher.Description,
-			wantRole:          researcher.Role,
-			wantTools:         []string{"AskUser", "Fetch", "Glob", "Grep", "ReadFile", "WebSearch"},
-			wantRuntimeSkills: true,
-		},
-		{
-			name:              "explorer",
-			agent:             explorer.Name,
-			wantDesc:          explorer.Description,
-			wantRole:          explorer.Role,
-			wantTools:         []string{"AskUser", "Glob", "Grep", "ReadFile"},
+			name:              "operator",
+			agent:             operator.Name,
+			wantDesc:          operator.Description,
+			wantRole:          operator.Role,
+			wantTools:         []string{"AskUser", "Bash", "EditFile", "Fetch", "Glob", "Grep", "ReadFile", "Skill", "Todo", "WebSearch", "WriteFile"},
+			wantSkills:        []string{"code-style"},
 			wantRuntimeSkills: true,
 		},
 		{
@@ -143,7 +126,7 @@ func TestLeafRegistryLookupCarriesLeafData(t *testing.T) {
 				t.Errorf("Role = %q, want %q", a.Role, tt.wantRole)
 			}
 			if a.AllowsRuntimeSkills != tt.wantRuntimeSkills {
-				t.Errorf("AllowsRuntimeSkills = %v, want %v (§7a: read-only agents only)", a.AllowsRuntimeSkills, tt.wantRuntimeSkills)
+				t.Errorf("AllowsRuntimeSkills = %v, want %v (§7a: operator eligible, reviewer not)", a.AllowsRuntimeSkills, tt.wantRuntimeSkills)
 			}
 			if !equalStringSlice(a.Skills, tt.wantSkills) {
 				t.Errorf("Skills = %v, want %v", a.Skills, tt.wantSkills)

@@ -5,9 +5,6 @@ import (
 	"github.com/ciram-co/looprig/pkg/loop"
 	"github.com/ciram-co/looprig/pkg/tool"
 	"github.com/ciram-co/looprig/pkg/tools"
-	"github.com/ciram-co/swe/agents/explorer"
-	"github.com/ciram-co/swe/agents/operator"
-	"github.com/ciram-co/swe/agents/researcher"
 	"github.com/ciram-co/swe/agents/reviewer"
 )
 
@@ -29,11 +26,17 @@ type leafBuiltin struct {
 	role        string
 	skills      []string
 	// allowsRuntimeSkills marks a leaf eligible for the untrusted, human-gated
-	// workspace skill source (§7a). True ONLY for the read-only agents (explorer +
-	// researcher); a write/exec-capable leaf (operator, reviewer) stays false — it
-	// already inspects files through its human Bash gate, so it needs no auto path to
-	// untrusted skills. It is the per-agent half of the gate; the swarm-wide
-	// RuntimeSkills mode is the other half — BOTH must be true to wire the source.
+	// workspace skill source (§7a). True ONLY for the operator (the approved decision
+	// extended eligibility to it once the operator merged write/exec capability); the
+	// reviewer stays false. operator is write/exec/network-capable, but the added attack
+	// surface is bounded, not just asserted-by-authority: a workspace load is
+	// load-a-skill-by-a-name-you-already-know, after a human Ask, with NO description
+	// injected into the prompt and NO new auto-execution — and only a NON-embedded
+	// workspace load is Ask-gated (an embedded name like code-style auto-approves via
+	// embedded-wins). So extending eligibility to a write+shell+network agent stays
+	// contained — the untrusted source is never auto-trusted. It is the per-agent half of
+	// the gate; the swarm-wide RuntimeSkills mode is the other half — BOTH must be true to
+	// wire the source.
 	allowsRuntimeSkills bool
 	// build adapts the leaf's raw BuildTools, threading the OPTIONAL per-agent Skill
 	// tool (nil when the agent has neither embedded skills nor a wired workspace
@@ -42,36 +45,14 @@ type leafBuiltin struct {
 }
 
 // leafBuiltins is the fixed roster of spawnable leaves, in deterministic catalog
-// order. The primary loop (an operator carrying the Subagent tool) is assembled in
-// swarm.go; the operator also appears here as a spawnable leaf, but a spawned operator
-// leaf has no Subagent tool, so it cannot itself spawn.
+// order: operator then reviewer. The operator entry is sourced from the shared
+// operatorBuiltin() so the spawnable operator leaf and the swarm's PRIMARY loop (an
+// operator carrying the Subagent tool, assembled in swarm.go) cannot drift — they are
+// the ONE operator definition. A spawned operator leaf has no Subagent tool, so it
+// cannot itself spawn.
 func leafBuiltins() []leafBuiltin {
 	return []leafBuiltin{
-		{
-			name:        operator.Name,
-			description: operator.Description,
-			role:        operator.Role,
-			skills:      operatorSkills,
-			build: func(d LeafToolDeps, s tool.InvokableTool) loop.ToolSet {
-				return operator.BuildTools(d.Root, d.HTTPCl, s)
-			},
-		},
-		{
-			name:                researcher.Name,
-			description:         researcher.Description,
-			role:                researcher.Role,
-			allowsRuntimeSkills: true, // §7a: read-only agent — eligible for the workspace skill source
-			build: func(d LeafToolDeps, s tool.InvokableTool) loop.ToolSet {
-				return researcher.BuildTools(d.Root, d.HTTPCl, s)
-			},
-		},
-		{
-			name:                explorer.Name,
-			description:         explorer.Description,
-			role:                explorer.Role,
-			allowsRuntimeSkills: true, // §7a: read-only agent — eligible for the workspace skill source
-			build:               func(d LeafToolDeps, s tool.InvokableTool) loop.ToolSet { return explorer.BuildTools(d.Root, s) },
-		},
+		operatorBuiltin(),
 		{
 			name:        reviewer.Name,
 			description: reviewer.Description,
@@ -82,12 +63,13 @@ func leafBuiltins() []leafBuiltin {
 }
 
 // leafRegistry builds the SWE-Swarm's registry of spawnable LEAF agents from the
-// four leaf packages, adapting each leaf's raw-signature BuildTools into the
-// swe.Agent shape (func(LeafToolDeps) loop.ToolSet) at the composition root — so
-// the leaf packages never import swarms/swe (no import cycle). The primary loop (an
-// operator carrying the Subagent tool) is assembled in swarm.go, not here. Each leaf's
-// AllowsRuntimeSkills is carried through from its builtin definition (§7a: true for
-// the read-only explorer + researcher). A duplicate name fails secure with a
+// leaf builtins (operator + reviewer), adapting each leaf's raw-signature BuildTools
+// into the swe.Agent shape (func(LeafToolDeps) loop.ToolSet) at the composition root —
+// so the leaf packages never import swarms/swe (no import cycle). The primary loop (an
+// operator carrying the Subagent tool) is assembled in swarm.go, not here, and shares
+// the operator leaf's definition (operatorBuiltin) so the two cannot drift. Each leaf's
+// AllowsRuntimeSkills is carried through from its builtin definition (§7a: true for the
+// operator, false for the reviewer). A duplicate name fails secure with a
 // *DuplicateAgentError.
 //
 // It also returns the ONE per-agent-scoped skill loader (built over the embedded
@@ -106,12 +88,13 @@ func leafBuiltins() []leafBuiltin {
 // When the leaf is workspace-eligible and the mode is on, its Skill tool is built
 // WORKSPACE-ENABLED (tools.WithWorkspaceRoot(deps.Root), the same root the file tools
 // use): an embedded name still auto-approves (embedded-wins), a non-embedded name is a
-// human-gated workspace load. The eligible agents (explorer, researcher) have no
-// embedded skills, so their workspace Skill tool gets NO <available_skills> catalog —
-// workspace skill descriptions are untrusted (§7a) and are never injected into the
-// system prompt; the model loads a workspace skill by a name it already knows. A leaf
-// that is neither skilled nor (eligible+mode-on) gets a nil Skill tool — neither the
-// tool nor a HardApprove entry.
+// human-gated workspace load. The eligible agent (operator) ALSO has the embedded
+// code-style skill, so its workspace Skill tool still carries the trusted
+// <available_skills> catalog for that embedded name (embedded-wins on load); a
+// non-embedded workspace name is never injected into the system prompt — workspace skill
+// descriptions are untrusted (§7a) and the model loads such a skill by a name it already
+// knows. A leaf that is neither skilled nor (eligible+mode-on) gets a nil Skill tool —
+// neither the tool nor a HardApprove entry.
 //
 // The deps parameter IS now read to source the workspace root for an enabled leaf's
 // Skill tool, but it is still NOT captured by the build adapters: each adapter

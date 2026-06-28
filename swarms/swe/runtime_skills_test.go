@@ -6,20 +6,19 @@ import (
 
 	"github.com/ciram-co/looprig/pkg/identity"
 	"github.com/ciram-co/looprig/pkg/loop"
-	"github.com/ciram-co/swe/agents/explorer"
 	"github.com/ciram-co/swe/agents/operator"
-	"github.com/ciram-co/swe/agents/researcher"
 	"github.com/ciram-co/swe/agents/reviewer"
 )
 
 // runtime_skills_test.go pins P2b Phase 3c: the --runtime-skills enablement gate
-// and the per-agent AllowsRuntimeSkills eligibility. When the mode is OFF (the
-// default) NO leaf gains a workspace-capable Skill tool — explorer/researcher get
-// no Skill tool at all, and operator keeps its embedded-only (auto-approve) one.
-// When the mode is ON, ONLY the read-only eligible agents (explorer, researcher)
-// gain a WORKSPACE-enabled Skill tool (its CheckEffect Asks for a non-embedded
-// name); the operator leaf stays embedded-only, and the PRIMARY operator carries the
-// SAME embedded-only code-style Skill (it is not AllowsRuntimeSkills in this cut).
+// and the per-agent AllowsRuntimeSkills eligibility. After the operator consolidation
+// the runtime-skills-eligible set is EXACTLY {operator}; reviewer is ineligible.
+// When the mode is OFF (the default) no leaf gains a workspace-capable Skill tool —
+// operator keeps its embedded-only (auto-approve) code-style Skill and reviewer gets
+// none. When the mode is ON, ONLY the eligible operator gains a WORKSPACE-enabled Skill
+// tool: its embedded code-style name still auto-approves (embedded-wins) while a
+// NON-embedded name is human-gated (EffectAsk); the ineligible reviewer still gets no
+// Skill tool.
 
 // runtimeDeps is a minimal LeafToolDeps whose Root is a real, distinct path so the
 // workspace-enabled Skill tool has a non-empty workspace root.
@@ -40,8 +39,8 @@ func skillToolFromRegistry(t *testing.T, reg *Registry, deps LeafToolDeps, agent
 }
 
 // TestAllowsRuntimeSkillsEligibility proves the per-agent eligibility flag is set on
-// EXACTLY the two read-only agents (explorer, researcher) and is false for the
-// write/exec-capable operator + reviewer — the §7a boundary, regardless of mode.
+// EXACTLY the operator (eligibility was extended to it when it merged write/exec
+// capability) and is false for the reviewer — the §7a boundary, regardless of mode.
 func TestAllowsRuntimeSkillsEligibility(t *testing.T) {
 	t.Parallel()
 
@@ -49,9 +48,7 @@ func TestAllowsRuntimeSkillsEligibility(t *testing.T) {
 		name identity.AgentName
 		want bool
 	}{
-		{name: operator.Name, want: false},
-		{name: researcher.Name, want: true},
-		{name: explorer.Name, want: true},
+		{name: operator.Name, want: true},
 		{name: reviewer.Name, want: false},
 	}
 	// Eligibility is independent of the RuntimeSkills mode: assert it under BOTH.
@@ -77,9 +74,10 @@ func TestAllowsRuntimeSkillsEligibility(t *testing.T) {
 	}
 }
 
-// TestRuntimeSkillsOffNoWorkspaceTool proves the default (mode OFF): explorer and
-// researcher get NO Skill tool, and operator keeps its embedded Skill tool which
-// AUTO-APPROVES (embedded-only). This is the HEAD behaviour, unchanged.
+// TestRuntimeSkillsOffNoWorkspaceTool proves the default (mode OFF): reviewer (skill-less
+// AND ineligible) gets NO Skill tool, and operator keeps its embedded Skill tool which
+// AUTO-APPROVES (embedded-only — the mode flag is off, so eligibility never workspace-
+// enables it). This is the HEAD behaviour, unchanged.
 func TestRuntimeSkillsOffNoWorkspaceTool(t *testing.T) {
 	t.Parallel()
 
@@ -90,16 +88,14 @@ func TestRuntimeSkillsOffNoWorkspaceTool(t *testing.T) {
 		t.Fatalf("leafRegistry() error = %v", err)
 	}
 
-	// Eligible read-only agents get NO Skill tool when the mode is off.
-	for _, agent := range []identity.AgentName{explorer.Name, researcher.Name} {
-		ts := skillToolFromRegistry(t, reg, deps, agent)
-		if containsName(toolNames(t, ts), "Skill") {
-			t.Errorf("%q toolset has a Skill tool with RuntimeSkills OFF, want none", agent)
-		}
+	// reviewer is skill-less AND runtime-skills ineligible: it gets NO Skill tool.
+	revTS := skillToolFromRegistry(t, reg, deps, reviewer.Name)
+	if containsName(toolNames(t, revTS), "Skill") {
+		t.Errorf("reviewer toolset has a Skill tool with RuntimeSkills OFF, want none")
 	}
 
-	// operator keeps its embedded Skill tool, and it AUTO-APPROVES (embedded-only):
-	// the mode flag never touches an embedded-only agent.
+	// operator keeps its embedded Skill tool, and it AUTO-APPROVES (embedded-only): with
+	// the mode off, an eligible agent's Skill is still NOT workspace-enabled.
 	opTS := skillToolFromRegistry(t, reg, deps, operator.Name)
 	skillTool := mustTool(t, opTS, "Skill")
 	eff := opTS.Permission.Check(t.Context(), skillTool, "Skill", `{"name":"code-style"}`)
@@ -108,10 +104,12 @@ func TestRuntimeSkillsOffNoWorkspaceTool(t *testing.T) {
 	}
 }
 
-// TestRuntimeSkillsOnWorkspaceTool proves the mode ON: explorer and researcher each
-// gain a WORKSPACE-enabled Skill tool whose CheckEffect Asks (gate) for a
-// non-embedded name; operator's Skill stays embedded-only (its code-style name still
-// auto-approves), proving the mode never workspace-enables an ineligible agent.
+// TestRuntimeSkillsOnWorkspaceTool proves the mode ON: the eligible operator gains a
+// WORKSPACE-enabled Skill tool whose combined behaviour is (a) its embedded code-style
+// name still AUTO-APPROVES (embedded-wins — CheckEffect falls through to HardApprove),
+// and (b) a NON-embedded name is human-gated (CheckEffect returns (EffectAsk, true)).
+// The ineligible reviewer still gets NO Skill tool even with the mode on — proving the
+// mode never workspace-enables an ineligible agent.
 func TestRuntimeSkillsOnWorkspaceTool(t *testing.T) {
 	t.Parallel()
 
@@ -122,38 +120,41 @@ func TestRuntimeSkillsOnWorkspaceTool(t *testing.T) {
 		t.Fatalf("leafRegistry() error = %v", err)
 	}
 
-	// explorer + researcher gain a workspace-enabled Skill tool: a NON-embedded name
-	// returns (EffectAsk, handled=true) from CheckEffect — the workspace gate.
-	for _, agent := range []identity.AgentName{explorer.Name, researcher.Name} {
-		ts := skillToolFromRegistry(t, reg, deps, agent)
-		skillTool := mustTool(t, ts, "Skill")
-		ec, ok := skillTool.(interface {
-			CheckEffect(string) (loop.Effect, bool)
-		})
-		if !ok {
-			t.Fatalf("%q Skill tool does not implement EffectChecker", agent)
-		}
-		eff, handled := ec.CheckEffect(`{"name":"project-local"}`)
-		if !handled || eff != loop.EffectAsk {
-			t.Errorf("%q Skill CheckEffect(non-embedded) = (%v, %v), want (EffectAsk, true) — workspace gate", agent, eff, handled)
-		}
-	}
-
-	// operator's Skill stays embedded-only even with the mode on (operator is not
-	// AllowsRuntimeSkills): its code-style name still auto-approves.
+	// operator gains a workspace-enabled Skill tool. embedded-wins: code-style still
+	// auto-approves even though the tool is workspace-enabled.
 	opTS := skillToolFromRegistry(t, reg, deps, operator.Name)
 	skillTool := mustTool(t, opTS, "Skill")
-	eff := opTS.Permission.Check(t.Context(), skillTool, "Skill", `{"name":"code-style"}`)
-	if eff != loop.EffectAutoApprove {
-		t.Errorf("operator Skill effect = %v, want EffectAutoApprove (operator stays embedded-only even when mode on)", eff)
+	if eff := opTS.Permission.Check(t.Context(), skillTool, "Skill", `{"name":"code-style"}`); eff != loop.EffectAutoApprove {
+		t.Errorf("operator Skill(code-style) effect = %v, want EffectAutoApprove (embedded-wins)", eff)
+	}
+
+	// A NON-embedded (workspace) name returns (EffectAsk, true) from CheckEffect — the
+	// human-gated workspace load. This is the §7a gate now extended to the operator.
+	ec, ok := skillTool.(interface {
+		CheckEffect(string) (loop.Effect, bool)
+	})
+	if !ok {
+		t.Fatal("operator Skill tool does not implement EffectChecker")
+	}
+	eff, handled := ec.CheckEffect(`{"name":"project-local"}`)
+	if !handled || eff != loop.EffectAsk {
+		t.Errorf("operator Skill CheckEffect(non-embedded) = (%v, %v), want (EffectAsk, true) — workspace gate", eff, handled)
+	}
+
+	// reviewer stays INELIGIBLE even with the mode on: it has no embedded skills and is
+	// not workspace-eligible, so it gets no Skill tool at all.
+	revTS := skillToolFromRegistry(t, reg, deps, reviewer.Name)
+	if containsName(toolNames(t, revTS), "Skill") {
+		t.Errorf("reviewer toolset has a Skill tool with RuntimeSkills ON, want none (ineligible)")
 	}
 }
 
 // TestRuntimeSkillsPrimaryHasEmbeddedSkillTool proves the PRIMARY operator's toolset
-// carries its embedded code-style Skill tool under EITHER mode, and that the tool stays
-// embedded-only (auto-approves the embedded name) — the operator is not AllowsRuntimeSkills
-// in this cut (Task 4 flips that), so the runtime-skills mode never workspace-enables the
-// primary's Skill.
+// carries its embedded code-style Skill tool under EITHER mode, and that the embedded
+// code-style name AUTO-APPROVES under both (embedded-wins). With the mode ON the
+// operator is now AllowsRuntimeSkills, so the primary's Skill is workspace-enabled — but
+// embedded-wins keeps code-style auto-approving while a non-embedded name is gated
+// (asserted on the leaf in TestRuntimeSkillsOnWorkspaceTool).
 func TestRuntimeSkillsPrimaryHasEmbeddedSkillTool(t *testing.T) {
 	t.Parallel()
 
@@ -173,7 +174,7 @@ func TestRuntimeSkillsPrimaryHasEmbeddedSkillTool(t *testing.T) {
 			skillTool := mustTool(t, ts, "Skill")
 			eff := ts.Permission.Check(t.Context(), skillTool, "Skill", `{"name":"code-style"}`)
 			if eff != loop.EffectAutoApprove {
-				t.Errorf("primary operator Skill effect = %v (mode=%v), want EffectAutoApprove (embedded-only)", eff, mode)
+				t.Errorf("primary operator Skill effect = %v (mode=%v), want EffectAutoApprove (embedded-wins)", eff, mode)
 			}
 		})
 	}
