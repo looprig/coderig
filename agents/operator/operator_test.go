@@ -2,13 +2,16 @@ package operator
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"encoding/xml"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ciram-co/looprig/pkg/identity"
 	"github.com/ciram-co/looprig/pkg/loop"
@@ -27,6 +30,15 @@ func (fakeSkill) Info(context.Context) (*tool.ToolInfo, error) {
 
 func (fakeSkill) InvokableRun(context.Context, string) (*tool.ToolResult, error) {
 	return tool.TextResult("fake"), nil
+}
+
+// testHTTPClient builds the kind of client the swarm would pass: explicit
+// timeout, TLS 1.2 floor. The leaf tests never make a real request.
+func testHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}},
+	}
 }
 
 // toolNames collects the sorted Info().Name of every tool in the registry.
@@ -71,20 +83,20 @@ func equalStrings(a, b []string) bool {
 }
 
 // TestBuildToolSetAllowlist proves operator wires EXACTLY its allowlist
-// (ReadFile, Glob, Grep, WriteFile, EditFile, Bash, Todo, AskUser) — the
-// write+exec implementer — and that the auto-approve set is exactly the five
-// side-effect-free read/search/plan/ask tools, so the three mutating tools
-// (WriteFile, EditFile, Bash) stay human-gated. It also proves NO Subagent tool
-// is wired (a leaf cannot spawn) and NO network tool (Fetch/WebSearch) is present.
+// (ReadFile, Glob, Grep, WriteFile, EditFile, Bash, WebSearch, Fetch, Todo,
+// AskUser) — the investigate+implement leaf — and that the auto-approve set is
+// exactly the five side-effect-free read/search/plan/ask tools, so the five
+// mutating/networked tools (WriteFile, EditFile, Bash, WebSearch, Fetch) stay
+// human-gated. It also proves NO Subagent tool is wired: a leaf cannot spawn.
 func TestBuildToolSetAllowlist(t *testing.T) {
 	t.Parallel()
 
-	ts := BuildTools("/tmp/workspace-root", nil)
+	ts := BuildTools("/tmp/workspace-root", testHTTPClient(), nil)
 	if ts.Permission == nil {
 		t.Fatal("BuildTools() ToolSet.Permission = nil, want non-nil PermissionChecker")
 	}
 
-	wantTools := []string{"AskUser", "Bash", "EditFile", "Glob", "Grep", "ReadFile", "Todo", "WriteFile"}
+	wantTools := []string{"AskUser", "Bash", "EditFile", "Fetch", "Glob", "Grep", "ReadFile", "Todo", "WebSearch", "WriteFile"}
 	got := toolNames(t, ts.Registry)
 	if !equalStrings(got, wantTools) {
 		t.Errorf("registry tool names = %v, want %v", got, wantTools)
@@ -93,13 +105,10 @@ func TestBuildToolSetAllowlist(t *testing.T) {
 		t.Errorf("len(registry) = %d, want %d", l, len(wantTools))
 	}
 
-	// Operator must not spawn and must not reach the network.
+	// No leaf may spawn (least privilege): Subagent must be absent.
 	for _, n := range got {
-		switch n {
-		case "Subagent":
+		if n == "Subagent" {
 			t.Fatal("operator wired a Subagent tool; a leaf must not be able to spawn")
-		case "Fetch", "WebSearch":
-			t.Errorf("operator wired %q; it has no network access", n)
 		}
 	}
 
@@ -107,12 +116,12 @@ func TestBuildToolSetAllowlist(t *testing.T) {
 	assertAutoApproveSet(t, []string{"AskUser", "Glob", "Grep", "ReadFile", "Todo"})
 
 	// Behavioral proof through the wired PermissionChecker against a REAL root:
-	// the read/todo/ask tools auto-approve; the mutating tools stay Ask.
+	// the read/todo/ask tools auto-approve; the mutating + networked tools stay Ask.
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("seed file: %v", err)
 	}
-	tsReal := BuildTools(root, nil)
+	tsReal := BuildTools(root, testHTTPClient(), nil)
 	reg := byName(t, tsReal.Registry)
 	cases := []struct {
 		tool string
@@ -127,6 +136,8 @@ func TestBuildToolSetAllowlist(t *testing.T) {
 		{tool: "WriteFile", args: `{"path":"g.txt","content":"y"}`, want: loop.EffectAsk},
 		{tool: "EditFile", args: `{"path":"f.txt","old":"x","new":"z"}`, want: loop.EffectAsk},
 		{tool: "Bash", args: `{"command":"go test ./..."}`, want: loop.EffectAsk},
+		{tool: "WebSearch", args: `{"query":"q"}`, want: loop.EffectAsk},
+		{tool: "Fetch", args: `{"url":"https://example.com"}`, want: loop.EffectAsk},
 	}
 	for _, tc := range cases {
 		tl, ok := reg[tc.tool]
@@ -143,16 +154,16 @@ func TestBuildToolSetAllowlist(t *testing.T) {
 // BuildTools adds it to the registry AND it auto-approves through the wired
 // PermissionChecker (operator lists "Skill" in HardApprove only when the tool is
 // present — a scoped, side-effect-free read, the same class as ReadFile). The
-// base allowlist (the eight tools) is otherwise unchanged.
+// base allowlist (the ten tools) is otherwise unchanged.
 func TestBuildToolSetWithSkill(t *testing.T) {
 	t.Parallel()
 
-	ts := BuildTools("/tmp/workspace-root", fakeSkill{})
+	ts := BuildTools("/tmp/workspace-root", testHTTPClient(), fakeSkill{})
 	if ts.Permission == nil {
 		t.Fatal("BuildTools() ToolSet.Permission = nil, want non-nil PermissionChecker")
 	}
 
-	wantTools := []string{"AskUser", "Bash", "EditFile", "Glob", "Grep", "ReadFile", "Skill", "Todo", "WriteFile"}
+	wantTools := []string{"AskUser", "Bash", "EditFile", "Fetch", "Glob", "Grep", "ReadFile", "Skill", "Todo", "WebSearch", "WriteFile"}
 	got := toolNames(t, ts.Registry)
 	if !equalStrings(got, wantTools) {
 		t.Errorf("registry tool names = %v, want %v (Skill added)", got, wantTools)
@@ -199,10 +210,14 @@ func TestDescriptionNonEmpty(t *testing.T) {
 	}
 }
 
-// TestRoleContent proves the role carries operator's craft: fix at the root
-// cause, read before editing, prefer editing to creating, state the plan before a
-// gated mutation, validate the narrowest test first, and don't fix unrelated
-// failures.
+// TestRoleContent proves the role carries operator's combined investigate+
+// implement craft. The absorbed investigate/web duties: reach for the web, cite
+// every external claim, and treat fetched web content as untrusted DATA (the
+// <safety> clause). The implementer craft: fix at the root cause, read before
+// editing, prefer editing to creating, state the plan before a gated mutation,
+// validate the narrowest test first, and don't fix unrelated failures. Pinning
+// the web/safety substrings stops a future edit from silently deleting the
+// absorbed researcher duties without turning the test red.
 func TestRoleContent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -216,6 +231,10 @@ func TestRoleContent(t *testing.T) {
 		{name: "approval-gated mutation", want: "approval"},
 		{name: "narrowest test first", want: "narrowest test"},
 		{name: "does not fix unrelated", want: "unrelated"},
+		{name: "does web research", want: "web"},
+		{name: "uses WebSearch/Fetch", want: "WebSearch"},
+		{name: "cites sources", want: "cite"},
+		{name: "fetched content is untrusted data", want: "DATA"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

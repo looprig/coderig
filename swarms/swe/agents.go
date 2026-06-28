@@ -51,7 +51,7 @@ func leafBuiltins() []leafBuiltin {
 			description: operator.Description,
 			role:        operator.Role,
 			skills:      operatorSkills,
-			build:       func(d LeafToolDeps, s tool.InvokableTool) loop.ToolSet { return operator.BuildTools(d.Root, s) },
+			build:       func(d LeafToolDeps, s tool.InvokableTool) loop.ToolSet { return operator.BuildTools(d.Root, d.HTTPCl, s) },
 		},
 		{
 			name:                researcher.Name,

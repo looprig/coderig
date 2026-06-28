@@ -101,7 +101,7 @@ func TestLeafRegistryLookupCarriesLeafData(t *testing.T) {
 			agent:      operator.Name,
 			wantDesc:   operator.Description,
 			wantRole:   operator.Role,
-			wantTools:  []string{"AskUser", "Bash", "EditFile", "Glob", "Grep", "ReadFile", "Skill", "Todo", "WriteFile"},
+			wantTools:  []string{"AskUser", "Bash", "EditFile", "Fetch", "Glob", "Grep", "ReadFile", "Skill", "Todo", "WebSearch", "WriteFile"},
 			wantSkills: []string{"code-style"},
 		},
 		{
