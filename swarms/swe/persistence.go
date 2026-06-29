@@ -362,6 +362,11 @@ func (p *Persistence) openNew(ctx context.Context, wiring operatorWiring, sessio
 		releaseLeaseBestEffort(lease)
 		return nil, err
 	}
+	objects, err := p.js.ObjectStore(journal.SessionObjectBucket(sessionID))
+	if err != nil {
+		releaseLeaseBestEffort(lease)
+		return nil, err
+	}
 
 	// (3) Build the appenders: the REQUIRED event tap (catalog-backed so the listing index
 	// stays current) and the AUDIT-ONLY command appender.
@@ -392,6 +397,11 @@ func (p *Persistence) openNew(ctx context.Context, wiring operatorWiring, sessio
 		return nil, err
 	}
 	wiring.spawner.bind(agent.session) // late-bind before any turn runs
+
+	agent.recordReplayer = journal.NewRecordReplayer(p.js, objects)
+	agent.exportSessionID = sessionID
+	agent.primarySystemPrompt = wiring.cfg.Model.System
+	agent.primaryLoopID = agent.session.PrimaryLoopID()
 
 	// A NEW session has no backlog to repaint: the replayer stays nil → ReplayBacklog nil.
 	agent.teardown = stopGCTeardown(scheduleGC(agent.rootCtx, p.js, sessionID, lease))
@@ -437,6 +447,10 @@ func (p *Persistence) openResume(ctx context.Context, wiring operatorWiring, sel
 	agent.replayer = journal.NewEventReplayer(p.js, objects)
 	agent.restoredSessionID = sel.Resume
 	agent.restoredPrimaryLoopID = agent.session.PrimaryLoopID()
+	agent.recordReplayer = journal.NewRecordReplayer(p.js, objects)
+	agent.exportSessionID = sel.Resume
+	agent.primarySystemPrompt = wiring.cfg.Model.System
+	agent.primaryLoopID = agent.session.PrimaryLoopID()
 	return agent, nil
 }
 

@@ -5,6 +5,7 @@ package swe
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/ciram-co/looprig/pkg/identity"
 	"github.com/ciram-co/looprig/pkg/llm"
 	"github.com/ciram-co/looprig/pkg/persistence"
+	"github.com/ciram-co/looprig/pkg/transcript"
 	"github.com/ciram-co/looprig/pkg/uuid"
 	"github.com/ciram-co/swe/agents/operator"
 )
@@ -159,6 +161,88 @@ func TestSessionStoreRoundTrip(t *testing.T) {
 	}
 
 	drainTurn(t, a2, "continue")
+}
+
+func TestSessionStoreExportSource(t *testing.T) {
+	f := newIntegrationFactory(t)
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) *sessionAgent
+	}{
+		{
+			name: "new persisted session exports full journal stream",
+			setup: func(t *testing.T) *sessionAgent {
+				t.Helper()
+				a, err := f.openWithClient(context.Background(),
+					&fakeLLM{chunks: []content.Chunk{textChunk("new reply")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
+				if err != nil {
+					t.Fatalf("openWithClient (new): %v", err)
+				}
+				return a
+			},
+		},
+		{
+			name: "resumed persisted session exports full journal stream",
+			setup: func(t *testing.T) *sessionAgent {
+				t.Helper()
+				a, err := f.openWithClient(context.Background(),
+					&fakeLLM{chunks: []content.Chunk{textChunk("before resume")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
+				if err != nil {
+					t.Fatalf("openWithClient (new): %v", err)
+				}
+				drainTurn(t, a, "seed")
+				sessionID := a.SessionID()
+				if err := a.Close(context.Background()); err != nil {
+					t.Fatalf("Close (original): %v", err)
+				}
+
+				resumed, err := f.openWithClient(context.Background(),
+					&fakeLLM{chunks: []content.Chunk{textChunk("after resume")}}, newModelFactory("test-key"), SessionSelector{Resume: sessionID}, Config{})
+				if err != nil {
+					t.Fatalf("openWithClient (resume): %v", err)
+				}
+				return resumed
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := tt.setup(t)
+			t.Cleanup(func() { _ = a.Close(context.Background()) })
+
+			src, resolver, err := a.ExportSource(context.Background())
+			if err != nil {
+				t.Fatalf("ExportSource() error = %v", err)
+			}
+			if src == nil {
+				t.Fatal("ExportSource() source is nil")
+			}
+			if resolver == nil {
+				t.Fatal("ExportSource() resolver is nil")
+			}
+			prompt, ok := resolver.SystemPrompt(a.PrimaryLoopID())
+			if !ok {
+				t.Fatal("SystemPrompt(primary) ok = false, want true")
+			}
+			if !strings.Contains(prompt, "<identity product=\"SWE\">") {
+				t.Errorf("SystemPrompt(primary) = %q, want SWE identity prompt", prompt)
+			}
+			if otherPrompt, otherOK := resolver.SystemPrompt(mustUUID(t)); otherPrompt != "" || otherOK {
+				t.Errorf("SystemPrompt(other) = (%q, %v), want (\"\", false)", otherPrompt, otherOK)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			rec, err := src.Next(ctx)
+			if err != nil {
+				t.Fatalf("source Next() error = %v", err)
+			}
+			if _, ok := rec.(transcript.EventRecord); !ok {
+				t.Fatalf("source Next() record = %T, want transcript.EventRecord", rec)
+			}
+		})
+	}
 }
 
 // TestSessionStoreDistinctSessionsCoexist proves two sessions can be active simultaneously,

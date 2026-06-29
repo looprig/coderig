@@ -76,6 +76,9 @@ The current, post-consolidation shape (verified against `swarms/swe/swarm.go`,
   in `go.mod`): `charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`,
   `charm.land/glamour/v2`. These use the `charm.land/...` vanity import paths, **not**
   `github.com/charmbracelet/...`.
+- `github.com/yuin/goldmark` and `github.com/yuin/goldmark-emoji` — Markdown rendering
+  dependencies inherited **transitively via looprig's transcript HTML export**. These are
+  shipped in the SWE binary through looprig and remain `// indirect` in `go.mod`.
 - **Bubble Tea fork pin.** swe replaces the upstream v2 module with a fork (the "strand-fix"
   fork) via this `go.mod` `replace` directive:
 

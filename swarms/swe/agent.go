@@ -12,6 +12,8 @@ import (
 	"github.com/ciram-co/looprig/pkg/loop"
 	"github.com/ciram-co/looprig/pkg/session"
 	"github.com/ciram-co/looprig/pkg/tool"
+	"github.com/ciram-co/looprig/pkg/transcript"
+	"github.com/ciram-co/looprig/pkg/transcript/journalsource"
 	"github.com/ciram-co/looprig/pkg/uuid"
 	"github.com/nats-io/nats.go"
 )
@@ -49,6 +51,14 @@ type sessionAgent struct {
 	replayer              journal.EventReplayer
 	restoredSessionID     uuid.UUID
 	restoredPrimaryLoopID uuid.UUID
+
+	// recordReplayer is the full journal stream read side for transcript export. Unlike
+	// ReplayBacklog's EventReplayer, it includes command records so user gate decisions
+	// survive export. It is nil for headless/in-memory sessions.
+	recordReplayer      journal.RecordReplayer
+	exportSessionID     uuid.UUID
+	primarySystemPrompt string
+	primaryLoopID       uuid.UUID
 }
 
 // newSessionAgent constructs a sessionAgent from a finished primary loop.Config and
@@ -171,6 +181,34 @@ func (a *sessionAgent) ReplayBacklog(ctx context.Context) ([]event.Event, error)
 		}
 		out = append(out, ev)
 	}
+}
+
+// ExportSource returns the full journal stream and the live primary system prompt for
+// transcript export. Subagent prompts are built transiently at spawn time and are not
+// retained here, so the resolver intentionally degrades non-primary loops.
+func (a *sessionAgent) ExportSource(context.Context) (transcript.RecordSource, transcript.SystemPromptResolver, error) {
+	if a.recordReplayer == nil {
+		return nil, nil, &journalsource.ExportUnavailableError{}
+	}
+	src := journalsource.Open(a.recordReplayer, journal.ReplayRequest{
+		SessionID: a.exportSessionID,
+		LoopID:    uuid.UUID{},
+		From:      journal.Beginning(),
+		Follow:    false,
+	})
+	return src, primaryPromptResolver{loopID: a.primaryLoopID, prompt: a.primarySystemPrompt}, nil
+}
+
+type primaryPromptResolver struct {
+	loopID uuid.UUID
+	prompt string
+}
+
+func (r primaryPromptResolver) SystemPrompt(loopID uuid.UUID) (string, bool) {
+	if loopID == r.loopID {
+		return r.prompt, true
+	}
+	return "", false
 }
 
 // SessionID returns the underlying session's id — the composition root reads it to print
