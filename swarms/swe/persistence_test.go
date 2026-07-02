@@ -49,12 +49,12 @@ func newFakeFactory(opener *fakeEngineOpener) (*SessionStoreFactory, *buildRecor
 	rec := &buildRecord{}
 	f := &SessionStoreFactory{
 		opener:      opener,
-		buildClient: func(ModelCatalog) (llm.LLM, ModelFactory, error) { return &fakeLLM{}, newModelFactory("k"), nil },
+		buildClient: func(ModelCatalog) (llm.LLM, ModelFactory, error) { return &fakeLLM{}, newModelFactory(), nil },
 		build: func(ctx context.Context, js nats.JetStreamContext, client llm.LLM, factory ModelFactory, id uuid.UUID, isNew bool, sel SessionSelector, cfg Config) (*sessionAgent, error) {
 			rec.calls++
 			rec.id = id
 			rec.isNew = isNew
-			return newSessionAgent(ctx, testPrimaryCfg(testSpec()))
+			return newSessionAgent(ctx, testPrimaryCfg(testModel(), ""))
 		},
 	}
 	return f, rec
@@ -170,7 +170,7 @@ func TestSessionStoreFactoryBuildFailureClosesEngine(t *testing.T) {
 	opener := &fakeEngineOpener{}
 	f := &SessionStoreFactory{
 		opener:      opener,
-		buildClient: func(ModelCatalog) (llm.LLM, ModelFactory, error) { return &fakeLLM{}, newModelFactory("k"), nil },
+		buildClient: func(ModelCatalog) (llm.LLM, ModelFactory, error) { return &fakeLLM{}, newModelFactory(), nil },
 		build: func(ctx context.Context, js nats.JetStreamContext, client llm.LLM, factory ModelFactory, id uuid.UUID, isNew bool, sel SessionSelector, cfg Config) (*sessionAgent, error) {
 			return nil, errors.New("build failed")
 		},

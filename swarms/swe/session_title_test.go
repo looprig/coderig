@@ -93,15 +93,12 @@ func newTitleTestCoordinator(t *testing.T, client llm.LLM, withEconomy bool) (*t
 		t.Fatalf("Init: %v", err)
 	}
 
-	var titleSpec func(string) llm.ModelSpec
+	var titleModel *llm.Model
 	if withEconomy {
-		titleSpec = func(system string) llm.ModelSpec {
-			s := testSpec() // lmstudio, no key
-			s.System = system
-			return s
-		}
+		m := testModel() // lmstudio, no key
+		titleModel = &m
 	}
-	coord := newTitleCoordinator(store, client, titleSpec, func() time.Time { return titleClock })
+	coord := newTitleCoordinator(store, client, titleModel, func() time.Time { return titleClock })
 	return coord, store
 }
 

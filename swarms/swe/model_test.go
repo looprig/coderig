@@ -7,40 +7,27 @@ import (
 	"github.com/ciram-co/looprig/pkg/llm"
 )
 
-// TestModelFactorySystemPrompt proves the ModelFactory bakes the caller's system
-// prompt verbatim into the returned spec's System field (and carries the model's
-// provider/model identity), so each agent's full prompt reaches its loop unchanged.
-func TestModelFactorySystemPrompt(t *testing.T) {
+// TestModelFactoryYieldsSharedModel proves the ModelFactory yields the swarm's shared,
+// secret-free llm.Model identity (the package default) verbatim: same provider, API format,
+// endpoint, and model name — and, being secret-free, no API key field to carry. Post-split
+// the factory takes no system prompt (each agent's prompt rides loop.Config.System) and no
+// key (the secret binds to the Client at auto.New).
+func TestModelFactoryYieldsSharedModel(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name   string
-		system string
-	}{
-		{name: "non-empty role prompt", system: "<identity/><role name=\"x\"/>"},
-		{name: "empty prompt", system: ""},
-		{name: "whitespace prompt", system: "   "},
+	got := newModelFactory()()
+
+	if got.Provider != model.Provider {
+		t.Errorf("factory().Provider = %q, want %q", got.Provider, model.Provider)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			factory := newModelFactory("test-key")
-			spec := factory(tt.system)
-
-			if spec.System != tt.system {
-				t.Errorf("spec.System = %q, want %q", spec.System, tt.system)
-			}
-			if spec.Provider != model.Provider {
-				t.Errorf("spec.Provider = %q, want %q", spec.Provider, model.Provider)
-			}
-			if spec.Model != model.Name {
-				t.Errorf("spec.Model = %q, want %q", spec.Model, model.Name)
-			}
-			if spec.APIKey != "test-key" {
-				t.Errorf("spec.APIKey = %q, want %q", spec.APIKey, "test-key")
-			}
-		})
+	if got.APIFormat != model.APIFormat {
+		t.Errorf("factory().APIFormat = %q, want %q", got.APIFormat, model.APIFormat)
+	}
+	if got.BaseURL != model.BaseURL {
+		t.Errorf("factory().BaseURL = %q, want %q", got.BaseURL, model.BaseURL)
+	}
+	if got.Name != model.Name {
+		t.Errorf("factory().Name = %q, want %q", got.Name, model.Name)
 	}
 }
 
@@ -111,7 +98,7 @@ func TestBuildClientFailsLoudOnMissingKey(t *testing.T) {
 }
 
 // TestBuildClientHappy proves buildClient builds a non-nil client + factory when
-// the key is present, and that the factory it returns bakes a system prompt in.
+// the key is present, and that the factory it returns yields the shared model identity.
 func TestBuildClientHappy(t *testing.T) {
 	t.Setenv(envAPIKey, "secret-key")
 
@@ -125,9 +112,8 @@ func TestBuildClientHappy(t *testing.T) {
 	if factory == nil {
 		t.Fatal("buildClient(ModelCatalog{}) returned nil factory")
 	}
-	const sys = "<role/>"
-	if spec := factory(sys); spec.System != sys {
-		t.Errorf("factory(%q).System = %q, want %q", sys, spec.System, sys)
+	if got := factory(); got.Name != model.Name {
+		t.Errorf("factory().Name = %q, want the shared model %q", got.Name, model.Name)
 	}
 }
 

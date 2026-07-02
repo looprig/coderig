@@ -46,7 +46,7 @@ type scriptedReply struct {
 }
 
 // route classifies a request by the agent driving it, read from the system prompt the
-// swarm bakes into each loop's ModelSpec (Identity + the agent's Role [+ delegation]). It
+// swarm bakes into each loop's System prompt (Identity + the agent's Role [+ delegation]). It
 // is the stable join key between a Stream() call and the script the test wants that agent
 // to follow — far more robust than a global call-ordinal, since the primary and a spawned
 // leaf interleave their Stream() calls.
@@ -119,7 +119,7 @@ func (c *scriptedSwarmLLM) classify(system string) route {
 
 func (c *scriptedSwarmLLM) Stream(ctx context.Context, req llm.Request) (*llm.StreamReader[content.Chunk], error) {
 	c.mu.Lock()
-	r := c.classify(req.Model.System)
+	r := c.classify(req.System)
 	i := c.calls[r]
 	c.calls[r]++
 	var chunks []content.Chunk
@@ -213,7 +213,7 @@ const acceptanceDeadline = 5 * time.Second
 // network). The agent is Closed on cleanup.
 func newAcceptanceSwarm(t *testing.T, client *scriptedSwarmLLM) *sessionAgent {
 	t.Helper()
-	agent, err := newWithClient(context.Background(), client, newModelFactory("test-key"), Config{})
+	agent, err := newWithClient(context.Background(), client, newModelFactory(), Config{})
 	if err != nil {
 		t.Fatalf("newWithClient() error = %v", err)
 	}
@@ -327,9 +327,12 @@ func TestAcceptanceLeavesCannotSpawn(t *testing.T) {
 
 	// Primary operator: Subagent present (only the primary may spawn). It is the operator
 	// leaf union PLUS Subagent (the per-tool permission assertions live in swarm_test.go).
-	primarySpawner := newSwarmSpawner(reg, deps, newScriptedSwarmLLM(), newModelFactory("k"), loader, NewRuntimeContextProvider())
+	primarySpawner := newSwarmSpawner(reg, deps, newScriptedSwarmLLM(), newModelFactory(), loader, NewRuntimeContextProvider())
 	primarySkill := buildLeafSkill(loader, operatorBuiltin(), deps, Config{})
-	primaryTS := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, primarySpawner, toolCatalog(reg), primarySkill)
+	primaryTS, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, primarySpawner, toolCatalog(reg), primarySkill)
+	if err != nil {
+		t.Fatalf("operatorPrimaryToolSet() error = %v", err)
+	}
 	if names := toolNames(t, primaryTS); !containsName(names, "Subagent") {
 		t.Errorf("primary operator toolset = %v, want it to contain Subagent (only the primary may spawn)", names)
 	}
@@ -343,7 +346,11 @@ func TestAcceptanceLeavesCannotSpawn(t *testing.T) {
 			if !ok {
 				t.Fatalf("registry lost agent %q", entry.Name)
 			}
-			names := toolNames(t, a.BuildTools(deps))
+			ts, err := a.BuildTools(deps)
+			if err != nil {
+				t.Fatalf("BuildTools() error = %v", err)
+			}
+			names := toolNames(t, ts)
 			if containsName(names, "Subagent") {
 				t.Errorf("leaf %q toolset = %v, must NOT contain Subagent (a leaf cannot spawn)", entry.Name, names)
 			}
@@ -517,7 +524,7 @@ func TestAcceptanceQuotaCapRejectsSpawn(t *testing.T) {
 func newCappedAcceptanceSwarm(t *testing.T, client *scriptedSwarmLLM, limits session.Limits) *sessionAgent {
 	t.Helper()
 	root := t.TempDir()
-	wiring, err := buildOperatorWiring(client, newModelFactory("test-key"), root, Config{})
+	wiring, err := buildOperatorWiring(client, newModelFactory(), root, Config{})
 	if err != nil {
 		t.Fatalf("buildOperatorWiring() error = %v", err)
 	}

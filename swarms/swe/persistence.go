@@ -207,13 +207,17 @@ func (f *SessionStoreFactory) installTitleCoordinator(agent *sessionAgent, clien
 		return
 	}
 
-	titleSpec, err := economyTitleModel(cfg.ModelCatalog)
+	titleModel, err := economyTitleModel(cfg.ModelCatalog)
 	if err != nil {
 		slog.Warn("swe: economy title model unavailable; fallback-only titling", "session", id, "err", err)
-		titleSpec = nil
+		titleModel = nil
 	}
 
-	coord := newTitleCoordinator(metaStore, client, titleSpec, time.Now)
+	// The coordinator sends the economy title model on the SHARED provider client (bound to
+	// the standard provider/endpoint/key). When the economy model names a different provider,
+	// the client's connection-binding guard fail-secures the title call to fallback-only
+	// titling rather than misrouting it — so passing the shared client here is safe.
+	coord := newTitleCoordinator(metaStore, client, titleModel, time.Now)
 	watchTitleEvents(agent, coord)
 }
 
@@ -400,7 +404,7 @@ func (p *Persistence) openNew(ctx context.Context, wiring operatorWiring, sessio
 
 	agent.recordReplayer = journal.NewRecordReplayer(p.js, objects)
 	agent.exportSessionID = sessionID
-	agent.primarySystemPrompt = wiring.cfg.Model.System
+	agent.primarySystemPrompt = wiring.cfg.System
 	agent.primaryLoopID = agent.session.PrimaryLoopID()
 
 	// A NEW session has no backlog to repaint: the replayer stays nil → ReplayBacklog nil.
@@ -449,7 +453,7 @@ func (p *Persistence) openResume(ctx context.Context, wiring operatorWiring, sel
 	agent.restoredPrimaryLoopID = agent.session.PrimaryLoopID()
 	agent.recordReplayer = journal.NewRecordReplayer(p.js, objects)
 	agent.exportSessionID = sel.Resume
-	agent.primarySystemPrompt = wiring.cfg.Model.System
+	agent.primarySystemPrompt = wiring.cfg.System
 	agent.primaryLoopID = agent.session.PrimaryLoopID()
 	return agent, nil
 }

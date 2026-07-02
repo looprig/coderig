@@ -98,7 +98,9 @@ const operatorDelegation = `<delegation>
 // operatorPrimaryToolSet assembles the PRIMARY operator's toolset: the operator leaf
 // union PLUS Subagent (and the optional code-style Skill), behind a FRESH PermissionChecker.
 // Drift from the leaf is guarded by a test asserting primary-minus-Subagent == leaf tools.
-func operatorPrimaryToolSet(root string, httpCl *http.Client, spawner *swarmSpawner, catalog []tools.SubagentCatalogEntry, skill tool.InvokableTool) loop.ToolSet {
+// It returns a typed *PrimaryToolSetError (never a nil, checker-less tool set) when the
+// fail-secure PermissionChecker cannot be built, so the primary never runs unguarded.
+func operatorPrimaryToolSet(root string, httpCl *http.Client, spawner *swarmSpawner, catalog []tools.SubagentCatalogEntry, skill tool.InvokableTool) (loop.ToolSet, error) {
 	approved := []string{"ReadFile", "Glob", "Grep", "Todo", "AskUser", "Subagent"}
 	if skill != nil {
 		approved = append(approved, "Skill")
@@ -108,7 +110,10 @@ func operatorPrimaryToolSet(root string, httpCl *http.Client, spawner *swarmSpaw
 		HardDeny:      tools.DefaultHardDeny(),
 		HardApprove:   tools.HardApproveRules{Tools: approved},
 	}
-	pc := tools.NewPermissionChecker(policy)
+	pc, err := tools.NewPermissionChecker(policy)
+	if err != nil {
+		return loop.ToolSet{}, &PrimaryToolSetError{Cause: err}
+	}
 	registry := []tool.InvokableTool{
 		tools.NewReadFile(root, pc),
 		tools.NewGlob(root, pc),
@@ -125,7 +130,7 @@ func operatorPrimaryToolSet(root string, httpCl *http.Client, spawner *swarmSpaw
 	if skill != nil {
 		registry = append(registry, skill)
 	}
-	return loop.ToolSet{Permission: pc, Registry: registry}
+	return loop.ToolSet{Permission: pc, Registry: registry}, nil
 }
 
 // toolCatalog projects the swarm's registry catalog (swe.AgentCatalogEntry) onto the
@@ -153,16 +158,21 @@ func toolCatalog(reg *Registry) []tools.SubagentCatalogEntry {
 // = OFF); the SAME provider is shared with the spawner so leaves get identical runtime
 // context. describer + skill are the SAME code-style loader/Skill tool the operator leaf
 // gets, so the primary's skill catalog and the leaf's cannot drift.
-func operatorPrimaryConfig(client llm.LLM, factory ModelFactory, deps LeafToolDeps, spawner *swarmSpawner, catalog []tools.SubagentCatalogEntry, rc loop.RuntimeContextProvider, describer tools.SkillDescriber, skill tool.InvokableTool) loop.Config {
+func operatorPrimaryConfig(client llm.LLM, factory ModelFactory, deps LeafToolDeps, spawner *swarmSpawner, catalog []tools.SubagentCatalogEntry, rc loop.RuntimeContextProvider, describer tools.SkillDescriber, skill tool.InvokableTool) (loop.Config, error) {
 	system := Identity + operator.Role + operatorDelegation +
 		availableSkillsCatalog(context.Background(), describer, operator.Name, operatorSkills)
+	toolSet, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, spawner, catalog, skill)
+	if err != nil {
+		return loop.Config{}, err
+	}
 	return loop.Config{
 		Client:         client,
-		Model:          factory(system),
-		Tools:          operatorPrimaryToolSet(deps.Root, deps.HTTPCl, spawner, catalog, skill),
+		Model:          factory(),
+		System:         system,
+		Tools:          toolSet,
 		AgentName:      operator.Name,
 		RuntimeContext: rc,
-	}
+	}, nil
 }
 
 // httpClientTimeout bounds every web request a spawned leaf's Fetch/WebSearch tools
@@ -203,7 +213,7 @@ func operatorBuiltin() leafBuiltin {
 		role:                operator.Role,
 		skills:              operatorSkills,
 		allowsRuntimeSkills: true, // §7a: runtime-skills (workspace .skills/) eligibility extended to operator (approved); bounded — a non-embedded workspace load is human-gated (Ask) with no prompt-injected description and no new auto-execution.
-		build: func(d LeafToolDeps, s tool.InvokableTool) loop.ToolSet {
+		build: func(d LeafToolDeps, s tool.InvokableTool) (loop.ToolSet, error) {
 			return operator.BuildTools(d.Root, d.HTTPCl, s)
 		},
 	}
@@ -231,7 +241,10 @@ func buildOperatorWiring(client llm.LLM, factory ModelFactory, root string, cfg 
 	rc := NewRuntimeContextProvider()
 	spawner := newSwarmSpawner(registry, deps, client, factory, loader, rc)
 	primarySkill := buildLeafSkill(loader, operatorBuiltin(), deps, cfg) // same code-style Skill the operator leaf gets
-	primaryCfg := operatorPrimaryConfig(client, factory, deps, spawner, toolCatalog(registry), rc, loader, primarySkill)
+	primaryCfg, err := operatorPrimaryConfig(client, factory, deps, spawner, toolCatalog(registry), rc, loader, primarySkill)
+	if err != nil {
+		return operatorWiring{}, err
+	}
 	return operatorWiring{cfg: primaryCfg, spawner: spawner}, nil
 }
 

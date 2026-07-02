@@ -134,7 +134,10 @@ func TestLeafRegistryLookupCarriesLeafData(t *testing.T) {
 			if a.BuildTools == nil {
 				t.Fatal("BuildTools = nil, want non-nil")
 			}
-			ts := a.BuildTools(deps)
+			ts, err := a.BuildTools(deps)
+			if err != nil {
+				t.Fatalf("BuildTools() error = %v", err)
+			}
 			if ts.Permission == nil {
 				t.Error("BuildTools().Permission = nil, want non-nil PermissionChecker")
 			}

@@ -28,7 +28,7 @@ func operatorPrimaryArgs(t *testing.T, root string) (LeafToolDeps, *swarmSpawner
 	if err != nil {
 		t.Fatalf("leafRegistry() error = %v", err)
 	}
-	spawner := newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory("test-key"), loader, NewRuntimeContextProvider())
+	spawner := newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory(), loader, NewRuntimeContextProvider())
 	skill := buildLeafSkill(loader, operatorBuiltin(), deps, Config{})
 	return deps, spawner, toolCatalog(reg), loader, skill
 }
@@ -38,7 +38,7 @@ func operatorPrimaryArgs(t *testing.T, root string) (LeafToolDeps, *swarmSpawner
 func TestNewWithClientHappy(t *testing.T) {
 	t.Parallel()
 
-	agent, err := newWithClient(context.Background(), &fakeLLM{}, newModelFactory("test-key"), Config{})
+	agent, err := newWithClient(context.Background(), &fakeLLM{}, newModelFactory(), Config{})
 	if err != nil {
 		t.Fatalf("newWithClient() error = %v", err)
 	}
@@ -59,7 +59,7 @@ func TestNewWithClientHappy(t *testing.T) {
 func TestOperatorPrimaryConfigIsPrimaryWithIdentityRoleAndDelegation(t *testing.T) {
 	t.Parallel()
 
-	wiring, err := buildOperatorWiring(&fakeLLM{}, newModelFactory("test-key"), "/tmp/workspace-root", Config{})
+	wiring, err := buildOperatorWiring(&fakeLLM{}, newModelFactory(), "/tmp/workspace-root", Config{})
 	if err != nil {
 		t.Fatalf("buildOperatorWiring() error = %v", err)
 	}
@@ -74,22 +74,22 @@ func TestOperatorPrimaryConfigIsPrimaryWithIdentityRoleAndDelegation(t *testing.
 	// The system prompt begins with Identity + operator.Role + operatorDelegation; the
 	// trusted code-style <available_skills> catalog follows.
 	wantPrefix := Identity + operator.Role + operatorDelegation
-	if !strings.HasPrefix(cfg.Model.System, wantPrefix) {
-		t.Errorf("cfg.Model.System does not start with Identity+operator.Role+operatorDelegation:\n%s", cfg.Model.System)
+	if !strings.HasPrefix(cfg.System, wantPrefix) {
+		t.Errorf("cfg.System does not start with Identity+operator.Role+operatorDelegation:\n%s", cfg.System)
 	}
-	if !strings.Contains(cfg.Model.System, "<identity product=\"SWE\">") {
+	if !strings.Contains(cfg.System, "<identity product=\"SWE\">") {
 		t.Error("system prompt missing the shared identity block")
 	}
-	if !strings.Contains(cfg.Model.System, "<role name=\"operator\">") {
+	if !strings.Contains(cfg.System, "<role name=\"operator\">") {
 		t.Error("system prompt missing the operator role block")
 	}
-	if !strings.Contains(cfg.Model.System, "<delegation>") {
+	if !strings.Contains(cfg.System, "<delegation>") {
 		t.Error("system prompt missing the primary-only delegation block")
 	}
 	// The primary carries the trusted code-style catalog (proving the skill-catalog
 	// wiring on the primary): an <available_skills> block listing code-style.
-	if !strings.Contains(cfg.Model.System, "<available_skills>") || !strings.Contains(cfg.Model.System, "code-style") {
-		t.Errorf("system prompt missing the code-style <available_skills> catalog:\n%s", cfg.Model.System)
+	if !strings.Contains(cfg.System, "<available_skills>") || !strings.Contains(cfg.System, "code-style") {
+		t.Errorf("system prompt missing the code-style <available_skills> catalog:\n%s", cfg.System)
 	}
 }
 
@@ -103,7 +103,10 @@ func TestOperatorPrimaryConfigCarriesRuntimeContext(t *testing.T) {
 		t.Parallel()
 		deps, spawner, catalog, loader, skill := operatorPrimaryArgs(t, "/tmp/workspace-root")
 		rc := NewRuntimeContextProvider()
-		cfg := operatorPrimaryConfig(&fakeLLM{}, newModelFactory("test-key"), deps, spawner, catalog, rc, loader, skill)
+		cfg, err := operatorPrimaryConfig(&fakeLLM{}, newModelFactory(), deps, spawner, catalog, rc, loader, skill)
+		if err != nil {
+			t.Fatalf("operatorPrimaryConfig() error = %v", err)
+		}
 		if cfg.RuntimeContext == nil {
 			t.Error("operator cfg.RuntimeContext = nil, want the wired provider")
 		}
@@ -112,7 +115,10 @@ func TestOperatorPrimaryConfigCarriesRuntimeContext(t *testing.T) {
 	t.Run("nil provider -> RuntimeContext stays nil (OFF)", func(t *testing.T) {
 		t.Parallel()
 		deps, spawner, catalog, loader, skill := operatorPrimaryArgs(t, "/tmp/workspace-root")
-		cfg := operatorPrimaryConfig(&fakeLLM{}, newModelFactory("test-key"), deps, spawner, catalog, nil, loader, skill)
+		cfg, err := operatorPrimaryConfig(&fakeLLM{}, newModelFactory(), deps, spawner, catalog, nil, loader, skill)
+		if err != nil {
+			t.Fatalf("operatorPrimaryConfig() error = %v", err)
+		}
 		if cfg.RuntimeContext != nil {
 			t.Error("operator cfg.RuntimeContext != nil with a nil provider, want OFF")
 		}
@@ -124,7 +130,7 @@ func TestOperatorPrimaryConfigCarriesRuntimeContext(t *testing.T) {
 // cfg, so every construction path inherits runtime-context injection.
 func TestBuildOperatorWiringEnablesRuntimeContext(t *testing.T) {
 	t.Parallel()
-	wiring, err := buildOperatorWiring(&fakeLLM{}, newModelFactory("test-key"), "/tmp/workspace-root", Config{})
+	wiring, err := buildOperatorWiring(&fakeLLM{}, newModelFactory(), "/tmp/workspace-root", Config{})
 	if err != nil {
 		t.Fatalf("buildOperatorWiring() error = %v", err)
 	}
@@ -143,11 +149,17 @@ func TestOperatorPrimaryToolSetIsLeafUnionPlusSubagent(t *testing.T) {
 	t.Parallel()
 
 	deps, spawner, catalog, _, skill := operatorPrimaryArgs(t, "/tmp/workspace-root")
-	primary := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, spawner, catalog, skill)
+	primary, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, spawner, catalog, skill)
+	if err != nil {
+		t.Fatalf("operatorPrimaryToolSet() error = %v", err)
+	}
 	if primary.Permission == nil {
 		t.Fatal("operatorPrimaryToolSet() Permission = nil, want non-nil PermissionChecker")
 	}
-	leaf := operator.BuildTools(deps.Root, deps.HTTPCl, skill)
+	leaf, err := operator.BuildTools(deps.Root, deps.HTTPCl, skill)
+	if err != nil {
+		t.Fatalf("operator.BuildTools() error = %v", err)
+	}
 
 	primaryNames := sortedNames(t, primary)
 	leafNames := sortedNames(t, leaf)
@@ -191,7 +203,10 @@ func TestOperatorPrimaryToolSetPermissions(t *testing.T) {
 	// root) clears for the read/search tools.
 	root := t.TempDir()
 	deps, spawner, catalog, _, skill := operatorPrimaryArgs(t, root)
-	ts := operatorPrimaryToolSet(root, deps.HTTPCl, spawner, catalog, skill)
+	ts, err := operatorPrimaryToolSet(root, deps.HTTPCl, spawner, catalog, skill)
+	if err != nil {
+		t.Fatalf("operatorPrimaryToolSet() error = %v", err)
+	}
 
 	// Per-tool valid args: the auto-approve tools carry args that clear Stage-1
 	// containment; the gated tools carry empty args (a gated tool is never auto-approved
@@ -258,8 +273,14 @@ func TestOperatorPrimaryToolSetPermissionParity(t *testing.T) {
 	// tools on both checkers.
 	root := t.TempDir()
 	deps, spawner, catalog, _, skill := operatorPrimaryArgs(t, root)
-	leaf := operatorBuiltin().build(deps, skill) // == operator.BuildTools(root, http, skill)
-	primary := operatorPrimaryToolSet(root, deps.HTTPCl, spawner, catalog, skill)
+	leaf, err := operatorBuiltin().build(deps, skill) // == operator.BuildTools(root, http, skill)
+	if err != nil {
+		t.Fatalf("operatorBuiltin().build() error = %v", err)
+	}
+	primary, err := operatorPrimaryToolSet(root, deps.HTTPCl, spawner, catalog, skill)
+	if err != nil {
+		t.Fatalf("operatorPrimaryToolSet() error = %v", err)
+	}
 
 	// Representative args per leaf tool. The SAME args go to BOTH checkers, so divergence is
 	// a real per-side drift (never an args artifact). Auto-approve tools carry in-root/embedded

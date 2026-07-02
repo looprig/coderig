@@ -27,18 +27,18 @@ var errEmptyModelName = errors.New("model name is empty")
 // tier is an ordered list whose FIRST entry is the one selected for that tier. Empty tiers
 // mean "no override": an empty Standard preserves the swarm's existing default model, an
 // empty Economy disables title-model generation, and Premium is catalog-only in this change
-// (stored, never implicitly selected). Configured specs may carry secrets and live in memory
-// only — the resolver returns secret-free model identities and never logs or serializes a
-// spec.
+// (stored, never implicitly selected). Post-split each tier is a list of secret-free
+// llm.Model identities: the connection secret is bound to the Client at auto.New, not carried
+// on any catalog entry, so a resolved or logged model never holds an API key.
 type ModelCatalog struct {
-	Economy  []llm.ModelSpec
-	Standard []llm.ModelSpec
-	Premium  []llm.ModelSpec
+	Economy  []llm.Model
+	Standard []llm.Model
+	Premium  []llm.Model
 }
 
-// ModelCatalogError reports an invalid configured spec found at construction. It carries the
-// tier, the index within that tier, and a sanitized reason — never the spec's API key or
-// other secret material.
+// ModelCatalogError reports an invalid configured model found at construction. It carries the
+// tier, the index within that tier, and a sanitized, field-based reason. A secret-free
+// llm.Model carries no API key, so the error cannot expose one.
 type ModelCatalogError struct {
 	Tier   ModelTier
 	Index  int
@@ -58,8 +58,9 @@ func (e *ModelCatalogError) Unwrap() error { return e.Cause }
 
 // modelResolver is the narrow seam the swarm depends on to choose a model per use, instead
 // of threading the whole catalog through session logic. Its accessors return secret-free
-// llm.Model identities (the per-use API key + system prompt are injected later by the
-// ModelFactory), so a resolved or logged value never carries an API key.
+// llm.Model identities (the connection secret is bound to the Client at auto.New; each
+// agent's system prompt rides loop.Config.System), so a resolved or logged value never
+// carries an API key.
 type modelResolver interface {
 	// standardModel returns the identity for normal operator/subagent turns. ok is false
 	// when no Standard tier is configured (the caller uses the swarm's default model).
@@ -79,11 +80,11 @@ type catalogResolver struct {
 	premium  bool
 }
 
-// newModelResolver validates EVERY supplied spec in every tier (a non-empty model name, a
-// classified provider, and a self-consistent sampling config) and returns a resolver that
-// selects the first entry of each tier. An empty catalog yields a resolver with no
-// overrides. The first invalid spec returns a typed *ModelCatalogError that never includes
-// the spec's secrets.
+// newModelResolver validates EVERY supplied model in every tier (a non-empty model name, a
+// classified provider, and a valid APIFormat/BaseURL per llm.Model.Validate) and returns a
+// resolver that selects the first entry of each tier. An empty catalog yields a resolver with
+// no overrides. The first invalid model returns a typed *ModelCatalogError naming the tier +
+// index.
 func newModelResolver(catalog ModelCatalog) (modelResolver, error) {
 	standard, err := firstValidModel(TierStandard, catalog.Standard)
 	if err != nil {
@@ -93,7 +94,7 @@ func newModelResolver(catalog ModelCatalog) (modelResolver, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Premium is validated too — it is catalog-only, but a misconfigured Premium spec must
+	// Premium is validated too — it is catalog-only, but a misconfigured Premium model must
 	// still fail loud at construction rather than lurk until a future tier-selection feature.
 	premium, err := firstValidModel(TierPremium, catalog.Premium)
 	if err != nil {
@@ -114,45 +115,33 @@ func derefModel(m *llm.Model) (llm.Model, bool) {
 	return *m, true
 }
 
-// firstValidModel validates every spec in tier (so a misconfiguration anywhere fails loud)
-// and returns the secret-free identity of the FIRST entry, or nil for an empty tier.
-func firstValidModel(tier ModelTier, specs []llm.ModelSpec) (*llm.Model, error) {
+// firstValidModel validates every model in tier (so a misconfiguration anywhere fails loud)
+// and returns a copy of the FIRST entry, or nil for an empty tier. The entries are already
+// secret-free llm.Model values (the connection secret binds to the Client at auto.New).
+func firstValidModel(tier ModelTier, models []llm.Model) (*llm.Model, error) {
 	var first *llm.Model
-	for i, spec := range specs {
-		if err := validateCatalogSpec(spec); err != nil {
+	for i, m := range models {
+		if err := validateCatalogModel(m); err != nil {
 			return nil, &ModelCatalogError{Tier: tier, Index: i, Reason: err.Error(), Cause: err}
 		}
 		if first == nil {
-			identity := modelFromSpec(spec)
-			first = &identity
+			m := m
+			first = &m
 		}
 	}
 	return first, nil
 }
 
-// validateCatalogSpec checks a spec is self-consistent and its provider is classified
-// (RequiresKey resolves). The errors it surfaces (empty-name, unknown provider, validation)
-// are field-based and never contain the spec's API key.
-func validateCatalogSpec(spec llm.ModelSpec) error {
-	if strings.TrimSpace(spec.Model) == "" {
+// validateCatalogModel checks a configured model has a non-empty name, a classified provider
+// (RequiresKey resolves — fail secure on an unknown provider), and passes llm.Model.Validate
+// (provider supports the APIFormat, valid https / loopback-http BaseURL). The errors it
+// surfaces are field-based; a secret-free llm.Model carries no API key to leak.
+func validateCatalogModel(m llm.Model) error {
+	if strings.TrimSpace(m.Name) == "" {
 		return errEmptyModelName
 	}
-	if _, err := spec.Provider.RequiresKey(); err != nil {
+	if _, err := m.Provider.RequiresKey(); err != nil {
 		return err // unclassified provider — fail secure
 	}
-	return spec.Validate()
-}
-
-// modelFromSpec extracts the secret-free llm.Model identity from a spec (dropping APIKey +
-// System). The per-use key + system prompt are injected later by the ModelFactory, so the
-// resolved identity can never carry a secret.
-func modelFromSpec(spec llm.ModelSpec) llm.Model {
-	return llm.Model{
-		Provider:      spec.Provider,
-		BaseURL:       spec.BaseURL,
-		Name:          spec.Model,
-		Temperature:   spec.Temperature,
-		MaxTokens:     spec.MaxTokens,
-		AcceptsImages: spec.AcceptsImages,
-	}
+	return m.Validate()
 }

@@ -91,7 +91,10 @@ func equalStrings(a, b []string) bool {
 func TestBuildToolSetAllowlist(t *testing.T) {
 	t.Parallel()
 
-	ts := BuildTools("/tmp/workspace-root", testHTTPClient(), nil)
+	ts, err := BuildTools("/tmp/workspace-root", testHTTPClient(), nil)
+	if err != nil {
+		t.Fatalf("BuildTools() error = %v", err)
+	}
 	if ts.Permission == nil {
 		t.Fatal("BuildTools() ToolSet.Permission = nil, want non-nil PermissionChecker")
 	}
@@ -121,7 +124,10 @@ func TestBuildToolSetAllowlist(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("seed file: %v", err)
 	}
-	tsReal := BuildTools(root, testHTTPClient(), nil)
+	tsReal, err := BuildTools(root, testHTTPClient(), nil)
+	if err != nil {
+		t.Fatalf("BuildTools() error = %v", err)
+	}
 	reg := byName(t, tsReal.Registry)
 	cases := []struct {
 		tool string
@@ -158,7 +164,10 @@ func TestBuildToolSetAllowlist(t *testing.T) {
 func TestBuildToolSetWithSkill(t *testing.T) {
 	t.Parallel()
 
-	ts := BuildTools("/tmp/workspace-root", testHTTPClient(), fakeSkill{})
+	ts, err := BuildTools("/tmp/workspace-root", testHTTPClient(), fakeSkill{})
+	if err != nil {
+		t.Fatalf("BuildTools() error = %v", err)
+	}
 	if ts.Permission == nil {
 		t.Fatal("BuildTools() ToolSet.Permission = nil, want non-nil PermissionChecker")
 	}

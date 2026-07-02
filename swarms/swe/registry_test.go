@@ -16,7 +16,7 @@ func stubAgent(name identity.AgentName, desc string) Agent {
 		Name:        name,
 		Description: desc,
 		Role:        "role for " + string(name),
-		BuildTools:  func(LeafToolDeps) loop.ToolSet { return loop.ToolSet{} },
+		BuildTools:  func(LeafToolDeps) (loop.ToolSet, error) { return loop.ToolSet{}, nil },
 	}
 }
 
@@ -188,10 +188,10 @@ func TestAgentBuildTools(t *testing.T) {
 		Name:        "coding",
 		Description: "writes code",
 		Role:        "code",
-		BuildTools: func(d LeafToolDeps) loop.ToolSet {
+		BuildTools: func(d LeafToolDeps) (loop.ToolSet, error) {
 			gotRoot = d.Root
 			gotClient = d.HTTPCl
-			return loop.ToolSet{MaxToolIterations: 7}
+			return loop.ToolSet{MaxToolIterations: 7}, nil
 		},
 	}
 	r, err := NewRegistry(a)
@@ -204,7 +204,10 @@ func TestAgentBuildTools(t *testing.T) {
 	}
 
 	client := &http.Client{}
-	ts := got.BuildTools(LeafToolDeps{Root: "/repo", HTTPCl: client})
+	ts, err := got.BuildTools(LeafToolDeps{Root: "/repo", HTTPCl: client})
+	if err != nil {
+		t.Fatalf("BuildTools() error = %v", err)
+	}
 	if gotRoot != "/repo" {
 		t.Errorf("BuildTools got Root = %q, want %q", gotRoot, "/repo")
 	}
@@ -235,7 +238,7 @@ func TestCatalogIsACopy(t *testing.T) {
 }
 
 // ModelFactory is a plain func type; this compile-time assertion documents its shape:
-// it maps a finished system prompt to an llm.ModelSpec.
-var _ ModelFactory = func(systemPrompt string) llm.ModelSpec {
-	return llm.ModelSpec{System: systemPrompt}
+// it yields the swarm's shared, secret-free llm.Model identity (no system, no secret).
+var _ ModelFactory = func() llm.Model {
+	return llm.Model{}
 }

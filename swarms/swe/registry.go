@@ -32,8 +32,10 @@ type Agent struct {
 	// BuildTools constructs the agent's OWN tool allowlist. The swarm calls it
 	// per spawn so each invocation gets a fresh PermissionChecker (no shared
 	// mutable permission state across loops). The optional Skill tool is threaded
-	// in by the leaf adapter when the agent has ≥1 skill.
-	BuildTools func(LeafToolDeps) loop.ToolSet
+	// in by the leaf adapter when the agent has ≥1 skill. It returns a typed error
+	// (never a nil, checker-less tool set) when the fail-secure PermissionChecker
+	// cannot be built, so a leaf never runs unguarded.
+	BuildTools func(LeafToolDeps) (loop.ToolSet, error)
 
 	AllowsRuntimeSkills bool // P2b; false in P1
 }
@@ -77,9 +79,11 @@ type Config struct {
 	ModelCatalog ModelCatalog
 }
 
-// ModelFactory turns a finished system prompt into an llm.ModelSpec. The swarm
-// owns the provider/model/sampling; agents never see it.
-type ModelFactory func(systemPrompt string) llm.ModelSpec
+// ModelFactory yields the swarm's shared, secret-free llm.Model identity (provider/
+// endpoint/model/sampling). Post-split it carries NO secret and NO system prompt: the
+// connection secret is bound to the Client once at auto.New, and each agent's finished
+// system prompt is set on loop.Config.System (and llm.Request.System), never on the model.
+type ModelFactory func() llm.Model
 
 // AgentCatalogEntry is the public, lookup-free view of an agent: just the name
 // and one-line description used to render the Subagent catalog and greeting.

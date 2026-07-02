@@ -114,10 +114,15 @@ func (sp *swarmSpawner) Spawn(ctx context.Context, parent loop.Provenance, agent
 	// (empty for a skill-less leaf, so its prompt is unchanged). The catalog is read
 	// through the per-agent-scoped describer, so it lists only authorized skills.
 	system := Identity + a.Role + availableSkillsCatalog(ctx, sp.describer, a.Name, a.Skills)
+	toolSet, err := a.BuildTools(sp.deps)
+	if err != nil {
+		return "", err // fail secure: a leaf never spawns with an unbuildable (checker-less) tool set
+	}
 	cfg := loop.Config{
 		Client:         sp.client,
-		Model:          sp.factory(system),
-		Tools:          a.BuildTools(sp.deps),
+		Model:          sp.factory(),
+		System:         system,
+		Tools:          toolSet,
 		AgentName:      a.Name,
 		RuntimeContext: sp.runtimeCtx, // swarm-wide volatile per-turn context, shared with the primary operator
 	}

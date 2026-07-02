@@ -77,7 +77,7 @@ func TestSessionStoreNewSessionBasics(t *testing.T) {
 	f := newIntegrationFactory(t)
 
 	a, err := f.openWithClient(context.Background(),
-		&fakeLLM{chunks: []content.Chunk{textChunk("first reply")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
+		&fakeLLM{chunks: []content.Chunk{textChunk("first reply")}}, newModelFactory(), SessionSelector{}, Config{})
 	if err != nil {
 		t.Fatalf("openWithClient (new): %v", err)
 	}
@@ -118,7 +118,7 @@ func TestSessionStoreRoundTrip(t *testing.T) {
 	f := newIntegrationFactory(t)
 
 	a, err := f.openWithClient(context.Background(),
-		&fakeLLM{chunks: []content.Chunk{textChunk("first reply")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
+		&fakeLLM{chunks: []content.Chunk{textChunk("first reply")}}, newModelFactory(), SessionSelector{}, Config{})
 	if err != nil {
 		t.Fatalf("openWithClient (new): %v", err)
 	}
@@ -136,7 +136,7 @@ func TestSessionStoreRoundTrip(t *testing.T) {
 	}
 
 	a2, err := f.openWithClient(context.Background(),
-		&fakeLLM{chunks: []content.Chunk{textChunk("after restore")}}, newModelFactory("test-key"), SessionSelector{Resume: sessionID}, Config{})
+		&fakeLLM{chunks: []content.Chunk{textChunk("after restore")}}, newModelFactory(), SessionSelector{Resume: sessionID}, Config{})
 	if err != nil {
 		t.Fatalf("openWithClient (resume): %v", err)
 	}
@@ -175,7 +175,7 @@ func TestSessionStoreExportSource(t *testing.T) {
 			setup: func(t *testing.T) *sessionAgent {
 				t.Helper()
 				a, err := f.openWithClient(context.Background(),
-					&fakeLLM{chunks: []content.Chunk{textChunk("new reply")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
+					&fakeLLM{chunks: []content.Chunk{textChunk("new reply")}}, newModelFactory(), SessionSelector{}, Config{})
 				if err != nil {
 					t.Fatalf("openWithClient (new): %v", err)
 				}
@@ -187,7 +187,7 @@ func TestSessionStoreExportSource(t *testing.T) {
 			setup: func(t *testing.T) *sessionAgent {
 				t.Helper()
 				a, err := f.openWithClient(context.Background(),
-					&fakeLLM{chunks: []content.Chunk{textChunk("before resume")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
+					&fakeLLM{chunks: []content.Chunk{textChunk("before resume")}}, newModelFactory(), SessionSelector{}, Config{})
 				if err != nil {
 					t.Fatalf("openWithClient (new): %v", err)
 				}
@@ -198,7 +198,7 @@ func TestSessionStoreExportSource(t *testing.T) {
 				}
 
 				resumed, err := f.openWithClient(context.Background(),
-					&fakeLLM{chunks: []content.Chunk{textChunk("after resume")}}, newModelFactory("test-key"), SessionSelector{Resume: sessionID}, Config{})
+					&fakeLLM{chunks: []content.Chunk{textChunk("after resume")}}, newModelFactory(), SessionSelector{Resume: sessionID}, Config{})
 				if err != nil {
 					t.Fatalf("openWithClient (resume): %v", err)
 				}
@@ -252,14 +252,14 @@ func TestSessionStoreDistinctSessionsCoexist(t *testing.T) {
 	f := newIntegrationFactory(t)
 
 	a, err := f.openWithClient(context.Background(),
-		&fakeLLM{chunks: []content.Chunk{textChunk("a reply")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
+		&fakeLLM{chunks: []content.Chunk{textChunk("a reply")}}, newModelFactory(), SessionSelector{}, Config{})
 	if err != nil {
 		t.Fatalf("openWithClient (a): %v", err)
 	}
 	t.Cleanup(func() { _ = a.Close(context.Background()) })
 
 	b, err := f.openWithClient(context.Background(),
-		&fakeLLM{chunks: []content.Chunk{textChunk("b reply")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
+		&fakeLLM{chunks: []content.Chunk{textChunk("b reply")}}, newModelFactory(), SessionSelector{}, Config{})
 	if err != nil {
 		t.Fatalf("openWithClient (b): %v", err)
 	}
@@ -287,7 +287,7 @@ func TestSessionStoreListFindsSession(t *testing.T) {
 	}
 
 	a, err := f.openWithClient(context.Background(),
-		&fakeLLM{chunks: []content.Chunk{textChunk("reply")}}, newModelFactory("test-key"), SessionSelector{}, Config{})
+		&fakeLLM{chunks: []content.Chunk{textChunk("reply")}}, newModelFactory(), SessionSelector{}, Config{})
 	if err != nil {
 		t.Fatalf("openWithClient: %v", err)
 	}
@@ -316,11 +316,11 @@ func TestSessionStoreListFindsSession(t *testing.T) {
 func TestPersistentTitleGenerated(t *testing.T) {
 	f := newIntegrationFactory(t)
 	cfg := Config{ModelCatalog: ModelCatalog{
-		Economy: []llm.ModelSpec{{Provider: llm.ProviderLMStudio, Model: "title-model"}},
+		Economy: []llm.Model{llm.LMStudioLocal("title-model")},
 	}}
 
 	a, err := f.openWithClient(context.Background(),
-		&fakeLLM{chunks: []content.Chunk{textChunk("Add upload retries")}}, newModelFactory("test-key"),
+		&fakeLLM{chunks: []content.Chunk{textChunk("Add upload retries")}}, newModelFactory(),
 		SessionSelector{}, cfg)
 	if err != nil {
 		t.Fatalf("openWithClient: %v", err)

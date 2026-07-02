@@ -35,7 +35,11 @@ func skillToolFromRegistry(t *testing.T, reg *Registry, deps LeafToolDeps, agent
 	if !ok {
 		t.Fatalf("Lookup(%q) not found", agent)
 	}
-	return a.BuildTools(deps)
+	ts, err := a.BuildTools(deps)
+	if err != nil {
+		t.Fatalf("BuildTools(%q) error = %v", agent, err)
+	}
+	return ts
 }
 
 // TestAllowsRuntimeSkillsEligibility proves the per-agent eligibility flag is set on
@@ -168,9 +172,12 @@ func TestRuntimeSkillsPrimaryHasEmbeddedSkillTool(t *testing.T) {
 			if err != nil {
 				t.Fatalf("leafRegistry() error = %v", err)
 			}
-			sp := newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory("k"), loader, NewRuntimeContextProvider())
+			sp := newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory(), loader, NewRuntimeContextProvider())
 			skill := buildLeafSkill(loader, operatorBuiltin(), deps, Config{RuntimeSkills: mode})
-			ts := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, sp, toolCatalog(reg), skill)
+			ts, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, sp, toolCatalog(reg), skill)
+			if err != nil {
+				t.Fatalf("operatorPrimaryToolSet() error = %v", err)
+			}
 			skillTool := mustTool(t, ts, "Skill")
 			eff := ts.Permission.Check(t.Context(), skillTool, "Skill", `{"name":"code-style"}`)
 			if eff != loop.EffectAutoApprove {

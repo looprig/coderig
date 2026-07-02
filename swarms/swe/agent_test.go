@@ -24,9 +24,10 @@ import (
 var _ tui.Agent = (*sessionAgent)(nil)
 
 // testPrimaryCfg builds a minimal valid primary loop.Config over a fake client for
-// wrapper construction tests.
-func testPrimaryCfg(spec llm.ModelSpec) loop.Config {
-	return loop.Config{Client: &fakeLLM{}, Model: spec, Tools: loop.ToolSet{}}
+// wrapper construction tests: a secret-free model plus a (possibly empty) system prompt,
+// mirroring the post-split loop.Config shape.
+func testPrimaryCfg(m llm.Model, system string) loop.Config {
+	return loop.Config{Client: &fakeLLM{}, Model: m, System: system, Tools: loop.ToolSet{}}
 }
 
 // TestNewSessionAgentHappy proves construction over a fake client succeeds and
@@ -34,7 +35,7 @@ func testPrimaryCfg(spec llm.ModelSpec) loop.Config {
 func TestNewSessionAgentHappy(t *testing.T) {
 	t.Parallel()
 
-	a, err := newSessionAgent(context.Background(), testPrimaryCfg(testSpec()))
+	a, err := newSessionAgent(context.Background(), testPrimaryCfg(testModel(), ""))
 	if err != nil {
 		t.Fatalf("newSessionAgent() error = %v", err)
 	}
@@ -58,7 +59,7 @@ func TestNewSessionAgentPreCancelledCtx(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	a, err := newSessionAgent(ctx, testPrimaryCfg(testSpec()))
+	a, err := newSessionAgent(ctx, testPrimaryCfg(testModel(), ""))
 	if a != nil {
 		t.Errorf("expected nil agent, got %v", a)
 		_ = a.Close(context.Background())
@@ -75,7 +76,7 @@ func TestNewSessionAgentPreCancelledCtx(t *testing.T) {
 func TestSessionAgentCloseIdempotent(t *testing.T) {
 	t.Parallel()
 
-	a, err := newSessionAgent(context.Background(), testPrimaryCfg(testSpec()))
+	a, err := newSessionAgent(context.Background(), testPrimaryCfg(testModel(), ""))
 	if err != nil {
 		t.Fatalf("newSessionAgent() error = %v", err)
 	}
@@ -103,8 +104,14 @@ func TestSessionAgentAcceptsImages(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			spec := llm.ModelSpec{Provider: llm.ProviderLMStudio, Model: "fake-model", AcceptsImages: tt.want}
-			a, err := newSessionAgent(context.Background(), testPrimaryCfg(spec))
+			m := llm.Model{
+				Provider:  llm.ProviderLMStudio,
+				APIFormat: llm.APIFormatOpenAI,
+				BaseURL:   "http://localhost:1234/v1",
+				Name:      "fake-model",
+				Caps:      llm.Capabilities{AcceptsImages: tt.want},
+			}
+			a, err := newSessionAgent(context.Background(), testPrimaryCfg(m, ""))
 			if err != nil {
 				t.Fatalf("newSessionAgent() error = %v", err)
 			}
@@ -123,7 +130,7 @@ func TestSessionAgentAcceptsImages(t *testing.T) {
 func TestSessionAgentReplayBacklogNilForNewSession(t *testing.T) {
 	t.Parallel()
 
-	a, err := newSessionAgent(context.Background(), testPrimaryCfg(testSpec()))
+	a, err := newSessionAgent(context.Background(), testPrimaryCfg(testModel(), ""))
 	if err != nil {
 		t.Fatalf("newSessionAgent() error = %v", err)
 	}
@@ -293,7 +300,7 @@ func TestSessionAgentGateTrioDelegatesToSession(t *testing.T) {
 // a safe no-op.
 func newClosedSessionAgentForGateTest(t *testing.T) *sessionAgent {
 	t.Helper()
-	a, err := newSessionAgent(context.Background(), testPrimaryCfg(testSpec()))
+	a, err := newSessionAgent(context.Background(), testPrimaryCfg(testModel(), ""))
 	if err != nil {
 		t.Fatalf("newSessionAgent: %v", err)
 	}

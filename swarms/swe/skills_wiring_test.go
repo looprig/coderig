@@ -45,7 +45,7 @@ func spawnCfgRuntimeSkillsOn(t *testing.T, agent identity.AgentName) loop.Config
 	if err != nil {
 		t.Fatalf("leafRegistry(RuntimeSkills=true) error = %v", err)
 	}
-	sp := newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory("test-key"), loader, NewRuntimeContextProvider())
+	sp := newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory(), loader, NewRuntimeContextProvider())
 	runner := &fakeRunner{reply: "subagent done"}
 	sp.session = runner // late-bind a fake, exactly where bind sets the live session
 	if _, err := sp.Spawn(context.Background(), loop.Provenance{}, agent, "do the thing", "toolu_skills_on"); err != nil {
@@ -79,7 +79,7 @@ func TestSkilledAgentGetsToolAndCatalog(t *testing.T) {
 
 	// The system prompt carries the <available_skills> catalog naming code-style and
 	// its description (read from the trusted embedded SKILL.md), AFTER Identity+Role.
-	sys := cfg.Model.System
+	sys := cfg.System
 	if !strings.HasPrefix(sys, Identity+operator.Role) {
 		t.Error("operator system prompt does not begin with Identity+Role")
 	}
@@ -124,7 +124,7 @@ func TestWorkspaceEnabledOperatorKeepsEmbeddedCatalog(t *testing.T) {
 
 	// Despite being workspace-enabled, the prompt STILL carries the embedded code-style
 	// catalog (embedded-wins): this is the property the §7a comment now asserts.
-	sys := cfg.Model.System
+	sys := cfg.System
 	if !strings.HasPrefix(sys, Identity+operator.Role) {
 		t.Error("operator system prompt does not begin with Identity+Role")
 	}
@@ -150,7 +150,7 @@ func TestSkillLessAgentGetsNeither(t *testing.T) {
 	if containsName(names, "Skill") {
 		t.Errorf("reviewer toolset = %v, must NOT contain a Skill tool (no skills)", names)
 	}
-	sys := cfg.Model.System
+	sys := cfg.System
 	if strings.Contains(sys, "available_skills") {
 		t.Errorf("reviewer system prompt must NOT carry an <available_skills> block:\n%s", sys)
 	}

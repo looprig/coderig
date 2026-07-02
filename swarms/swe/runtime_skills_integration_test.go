@@ -57,7 +57,7 @@ func writeWorkspaceSkill(t *testing.T, root, name string) string {
 // test planted is the one the Skill tool reads).
 func newRuntimeSkillsSwarm(t *testing.T, client *scriptedSwarmLLM, root string) *sessionAgent {
 	t.Helper()
-	wiring, err := buildOperatorWiring(client, newModelFactory("test-key"), root, Config{RuntimeSkills: true})
+	wiring, err := buildOperatorWiring(client, newModelFactory(), root, Config{RuntimeSkills: true})
 	if err != nil {
 		t.Fatalf("buildOperatorWiring() error = %v", err)
 	}

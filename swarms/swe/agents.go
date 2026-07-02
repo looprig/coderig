@@ -40,8 +40,9 @@ type leafBuiltin struct {
 	allowsRuntimeSkills bool
 	// build adapts the leaf's raw BuildTools, threading the OPTIONAL per-agent Skill
 	// tool (nil when the agent has neither embedded skills nor a wired workspace
-	// source) into the leaf's allowlist.
-	build func(d LeafToolDeps, skill tool.InvokableTool) loop.ToolSet
+	// source) into the leaf's allowlist. It returns a typed error (never a nil,
+	// checker-less tool set) when the fail-secure PermissionChecker cannot be built.
+	build func(d LeafToolDeps, skill tool.InvokableTool) (loop.ToolSet, error)
 }
 
 // leafBuiltins is the fixed roster of spawnable leaves, in deterministic catalog
@@ -57,7 +58,9 @@ func leafBuiltins() []leafBuiltin {
 			name:        reviewer.Name,
 			description: reviewer.Description,
 			role:        reviewer.Role,
-			build:       func(d LeafToolDeps, s tool.InvokableTool) loop.ToolSet { return reviewer.BuildTools(d.Root, s) },
+			build: func(d LeafToolDeps, s tool.InvokableTool) (loop.ToolSet, error) {
+				return reviewer.BuildTools(d.Root, s)
+			},
 		},
 	}
 }
@@ -122,7 +125,7 @@ func leafRegistry(deps LeafToolDeps, cfg Config) (*Registry, skillLoaderDescribe
 			Role:                b.role,
 			Skills:              b.skills,
 			AllowsRuntimeSkills: b.allowsRuntimeSkills,
-			BuildTools:          func(d LeafToolDeps) loop.ToolSet { return b.build(d, skill) },
+			BuildTools:          func(d LeafToolDeps) (loop.ToolSet, error) { return b.build(d, skill) },
 		})
 	}
 

@@ -14,6 +14,7 @@ import (
 	"github.com/ciram-co/looprig/pkg/eval"
 	"github.com/ciram-co/looprig/pkg/event"
 	"github.com/ciram-co/looprig/pkg/llm"
+	"github.com/ciram-co/looprig/pkg/llm/auth"
 	"github.com/ciram-co/looprig/pkg/llm/auto"
 	"github.com/ciram-co/looprig/pkg/loop"
 	"github.com/ciram-co/looprig/pkg/session"
@@ -83,11 +84,13 @@ func (r operatorRunner) Run(ctx context.Context, input string) (string, error) {
 	}
 }
 
-// modelCompleter adapts an llm.LLM to eval.Completer for the Judge metric. It
-// holds the provider client and the model spec built from the judge factory.
+// modelCompleter adapts an llm.LLM to eval.Completer for the Judge metric. It holds the
+// provider client, the secret-free model built from the judge factory, and the judge's system
+// prompt (post-split the system prompt rides llm.Request.System, not the model).
 type modelCompleter struct {
 	client llm.LLM
-	spec   llm.ModelSpec
+	model  llm.Model
+	system string
 }
 
 // Complete builds a single user-message request and projects the response to
@@ -102,7 +105,7 @@ func (m modelCompleter) Complete(ctx context.Context, prompt string) (string, er
 			Blocks: []content.Block{&content.TextBlock{Text: prompt}},
 		}},
 	}
-	resp, err := m.client.Invoke(ctx, llm.Request{Model: m.spec, Messages: msgs})
+	resp, err := m.client.Invoke(ctx, llm.Request{Model: m.model, System: m.system, Messages: msgs})
 	if err != nil {
 		return "", err
 	}
@@ -119,10 +122,15 @@ func (m modelCompleter) Complete(ctx context.Context, prompt string) (string, er
 // isolation, not its delegation behaviour (the production primary built by
 // operatorPrimaryConfig additionally carries Subagent + the delegation guidance).
 func newOperatorPrimary(ctx context.Context, client llm.LLM, factory ModelFactory, root string) (*sessionAgent, error) {
+	toolSet, err := operator.BuildTools(root, newHTTPClient(), nil)
+	if err != nil {
+		return nil, err
+	}
 	cfg := loop.Config{
 		Client:    client,
-		Model:     factory(Identity + operator.Role),
-		Tools:     operator.BuildTools(root, newHTTPClient(), nil),
+		Model:     factory(),
+		System:    Identity + operator.Role,
+		Tools:     toolSet,
 		AgentName: operator.Name,
 	}
 	return newSessionAgent(ctx, cfg, session.WithLimits(session.Limits{
@@ -172,10 +180,17 @@ func TestOperatorEvalIntegration(t *testing.T) {
 		t.Fatalf("RunCases: %v", err)
 	}
 
-	// The judge reuses the same production model + key (package-level model var via
-	// the factory), with a strict-evaluator system prompt.
-	judgeSpec := factory("You are a strict, impartial evaluator.")
-	judgeClient, err := auto.New(judgeSpec)
+	// The judge reuses the same production model + key (package-level model var via the
+	// factory), with a strict-evaluator system prompt. Post-split the secret binds to the
+	// client at auto.New (2-arg), the model stays secret-free, and the system prompt rides
+	// the request. readAPIKey resolves the same LLM_API_KEY buildClient used above.
+	apiKey, err := readAPIKey()
+	if err != nil {
+		t.Fatalf("readAPIKey: %v", err)
+	}
+	const judgeSystem = "You are a strict, impartial evaluator."
+	judgeModel := factory()
+	judgeClient, err := auto.New(judgeModel, auth.APIKey(apiKey))
 	if err != nil {
 		t.Fatalf("auto.New: %v", err)
 	}
@@ -185,7 +200,7 @@ func TestOperatorEvalIntegration(t *testing.T) {
 		eval.Judge{
 			Criteria:  "The response directly and correctly answers the input.",
 			Threshold: 0.6,
-			Model:     modelCompleter{client: judgeClient, spec: judgeSpec},
+			Model:     modelCompleter{client: judgeClient, model: judgeModel, system: judgeSystem},
 		},
 	})
 	if err != nil {

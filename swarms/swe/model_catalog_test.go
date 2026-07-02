@@ -2,17 +2,17 @@ package swe
 
 import (
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/ciram-co/looprig/pkg/llm"
 )
 
-// catalogSpec builds a valid Chutes ModelSpec named name carrying apiKey, for catalog tests.
-func catalogSpec(name, apiKey string) llm.ModelSpec {
-	spec := llm.ChutesKimiK2().Spec(apiKey, "")
-	spec.Model = name
-	return spec
+// catalogModel builds a valid, secret-free Chutes llm.Model named name, for catalog tests.
+// The connection secret is bound to the Client at auto.New, never on a catalog entry.
+func catalogModel(name string) llm.Model {
+	m := llm.ChutesKimiK2()
+	m.Name = name
+	return m
 }
 
 // TestModelCatalogEmptyPreservesDefault proves an empty catalog yields a resolver with no
@@ -41,7 +41,7 @@ func TestModelCatalogStandardChoosesFirst(t *testing.T) {
 	t.Parallel()
 
 	r, err := newModelResolver(ModelCatalog{
-		Standard: []llm.ModelSpec{catalogSpec("standard-first", "k1"), catalogSpec("standard-second", "k2")},
+		Standard: []llm.Model{catalogModel("standard-first"), catalogModel("standard-second")},
 	})
 	if err != nil {
 		t.Fatalf("newModelResolver: %v", err)
@@ -65,7 +65,7 @@ func TestModelCatalogEconomyResolvesLazily(t *testing.T) {
 	t.Parallel()
 
 	r, err := newModelResolver(ModelCatalog{
-		Economy: []llm.ModelSpec{catalogSpec("economy-first", "k")},
+		Economy: []llm.Model{catalogModel("economy-first")},
 	})
 	if err != nil {
 		t.Fatalf("newModelResolver: %v", err)
@@ -88,7 +88,7 @@ func TestModelCatalogPremiumHasNoImplicitSelection(t *testing.T) {
 	t.Parallel()
 
 	r, err := newModelResolver(ModelCatalog{
-		Premium: []llm.ModelSpec{catalogSpec("premium-first", "k")},
+		Premium: []llm.Model{catalogModel("premium-first")},
 	})
 	if err != nil {
 		t.Fatalf("newModelResolver: %v", err)
@@ -104,9 +104,9 @@ func TestModelCatalogPremiumHasNoImplicitSelection(t *testing.T) {
 	}
 }
 
-// TestModelCatalogInvalidSpecIsTyped proves an invalid or unclassified spec fails loud at
-// construction with a typed *ModelCatalogError naming the tier and index.
-func TestModelCatalogInvalidSpecIsTyped(t *testing.T) {
+// TestModelCatalogInvalidModelIsTyped proves an invalid or unclassified catalog model fails
+// loud at construction with a typed *ModelCatalogError naming the tier and index.
+func TestModelCatalogInvalidModelIsTyped(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -117,16 +117,16 @@ func TestModelCatalogInvalidSpecIsTyped(t *testing.T) {
 	}{
 		{
 			name:      "empty model name in standard",
-			catalog:   ModelCatalog{Standard: []llm.ModelSpec{catalogSpec("ok", "k"), catalogSpec("", "k")}},
+			catalog:   ModelCatalog{Standard: []llm.Model{catalogModel("ok"), catalogModel("")}},
 			wantTier:  TierStandard,
 			wantIndex: 1,
 		},
 		{
 			name: "unclassified provider in economy",
-			catalog: ModelCatalog{Economy: []llm.ModelSpec{func() llm.ModelSpec {
-				s := catalogSpec("eco", "k")
-				s.Provider = llm.Provider("bogus")
-				return s
+			catalog: ModelCatalog{Economy: []llm.Model{func() llm.Model {
+				m := catalogModel("eco")
+				m.Provider = llm.Provider("bogus")
+				return m
 			}()}},
 			wantTier:  TierEconomy,
 			wantIndex: 0,
@@ -147,22 +147,5 @@ func TestModelCatalogInvalidSpecIsTyped(t *testing.T) {
 				t.Errorf("Index = %d, want %d", catErr.Index, tt.wantIndex)
 			}
 		})
-	}
-}
-
-// TestModelCatalogErrorHidesAPIKey proves a construction error from an invalid spec never
-// leaks the spec's API key into its message.
-func TestModelCatalogErrorHidesAPIKey(t *testing.T) {
-	t.Parallel()
-
-	const secret = "SUPER-SECRET-KEY-1234"
-	_, err := newModelResolver(ModelCatalog{
-		Standard: []llm.ModelSpec{catalogSpec("", secret)}, // empty name → invalid
-	})
-	if err == nil {
-		t.Fatal("expected an error for an invalid spec")
-	}
-	if strings.Contains(err.Error(), secret) {
-		t.Errorf("error message leaked the API key: %q", err.Error())
 	}
 }

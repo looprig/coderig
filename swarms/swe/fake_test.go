@@ -52,8 +52,9 @@ func (f *fakeLLM) Stream(ctx context.Context, req llm.Request) (*llm.StreamReade
 	return llm.NewStreamReader(next, nil), nil
 }
 
-// testSpec is a minimal valid ModelSpec for fake-client tests. The fake ignores
-// it; loop.New only requires it to pass ModelSpec.Validate (zero ThinkingBudget).
-func testSpec() llm.ModelSpec {
-	return llm.ModelSpec{Provider: llm.ProviderLMStudio, Model: "fake-model"}
+// testModel is a minimal valid llm.Model for fake-client tests. The fake ignores it; loop.New
+// only requires it to pass llm.Model.Validate (valid provider/APIFormat/BaseURL + non-empty
+// name), which the loopback LM Studio catalog row satisfies.
+func testModel() llm.Model {
+	return llm.LMStudioLocal("fake-model")
 }

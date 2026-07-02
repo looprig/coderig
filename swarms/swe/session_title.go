@@ -42,11 +42,11 @@ type titleSink interface {
 // turn, session creation, shutdown, or /clear: generation runs on an independent, bounded
 // background context and the coordinator is never waited on by Close.
 type titleCoordinator struct {
-	meta      titleSink
-	client    llm.LLM
-	titleSpec func(system string) llm.ModelSpec // nil → no Economy model → no generation
-	now       func() time.Time
-	timeout   time.Duration
+	meta       titleSink
+	client     llm.LLM
+	titleModel *llm.Model // nil → no Economy model → no generation
+	now        func() time.Time
+	timeout    time.Duration
 
 	mu        sync.Mutex
 	observed  bool   // first user input handled (only the first matters)
@@ -55,14 +55,15 @@ type titleCoordinator struct {
 	wg        sync.WaitGroup
 }
 
-// newTitleCoordinator builds a coordinator writing through meta, using client + titleSpec for
-// the Economy call. A nil titleSpec disables generation (only the fallback is written). now
-// defaults to time.Now.
-func newTitleCoordinator(meta titleSink, client llm.LLM, titleSpec func(system string) llm.ModelSpec, now func() time.Time) *titleCoordinator {
+// newTitleCoordinator builds a coordinator writing through meta, using client + titleModel for
+// the Economy call. A nil titleModel disables generation (only the fallback is written); the
+// economy model rides client (the shared provider client) via llm.Request.Model. now defaults
+// to time.Now.
+func newTitleCoordinator(meta titleSink, client llm.LLM, titleModel *llm.Model, now func() time.Time) *titleCoordinator {
 	if now == nil {
 		now = time.Now
 	}
-	return &titleCoordinator{meta: meta, client: client, titleSpec: titleSpec, now: now, timeout: titleGenTimeout}
+	return &titleCoordinator{meta: meta, client: client, titleModel: titleModel, now: now, timeout: titleGenTimeout}
 }
 
 // observeUserInput handles the FIRST accepted user input: it extracts the first non-empty
@@ -99,7 +100,7 @@ func (c *titleCoordinator) observeUserInput(blocks []content.Block) {
 // caller.
 func (c *titleCoordinator) observeTerminalResponse(responseText string) {
 	c.mu.Lock()
-	if c.generated || c.titleSpec == nil || c.userText == "" {
+	if c.generated || c.titleModel == nil || c.userText == "" {
 		c.mu.Unlock()
 		return
 	}
@@ -132,7 +133,8 @@ func (c *titleCoordinator) generate(ctx context.Context, userText, responseText 
 		"\n\nAssistant reply:\n" + boundRunes(responseText, titlePromptExcerptRunes)
 
 	req := llm.Request{
-		Model: c.titleSpec(titleSystemPrompt),
+		Model:  *c.titleModel,
+		System: titleSystemPrompt,
 		Messages: content.AgenticMessages{
 			&content.UserMessage{Message: content.Message{
 				Role:   content.RoleUser,

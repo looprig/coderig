@@ -171,12 +171,12 @@ func TestGreetingFromRegistry(t *testing.T) {
 // seam (§5a): even with the greeting toggle ON, the primary operator's assembled system
 // prompt (Identity + operator.Role + delegation + the trusted skill catalog) contains NONE
 // of the greeting text — the greeting flows only to the TUI banner, never into any
-// loop.Config.Model.System. This holds because the greeting and the system prompt are built
+// loop.Config.System. This holds because the greeting and the system prompt are built
 // on entirely separate paths; the assertion makes that structural fact a regression test.
 func TestGreetingNotInModelContext(t *testing.T) {
 	t.Parallel()
 
-	wiring, err := buildOperatorWiring(&fakeLLM{}, newModelFactory("test-key"), "/tmp/workspace-root", Config{})
+	wiring, err := buildOperatorWiring(&fakeLLM{}, newModelFactory(), "/tmp/workspace-root", Config{})
 	if err != nil {
 		t.Fatalf("buildOperatorWiring() error = %v", err)
 	}
@@ -184,19 +184,19 @@ func TestGreetingNotInModelContext(t *testing.T) {
 
 	// The primary's system prompt begins with Identity + operator.Role (the greeting text
 	// is built on a separate path and must not appear anywhere in it).
-	if !strings.HasPrefix(cfg.Model.System, Identity+operator.Role) {
+	if !strings.HasPrefix(cfg.System, Identity+operator.Role) {
 		t.Fatalf("operator system prompt does not start with Identity+operator.Role; greeting must not touch it")
 	}
 	greeting := Greeting(Config{Greeting: true})
 	if greeting == "" {
 		t.Fatal("Greeting(on) empty; cannot assert it is absent from the model context")
 	}
-	if strings.Contains(cfg.Model.System, greetingLead) {
-		t.Errorf("greeting lead leaked into the operator system prompt (model context):\n%s", cfg.Model.System)
+	if strings.Contains(cfg.System, greetingLead) {
+		t.Errorf("greeting lead leaked into the operator system prompt (model context):\n%s", cfg.System)
 	}
 	// No agent's catalog line from the greeting body may appear in the system prompt.
 	for _, b := range leafBuiltins() {
-		if b.description != "" && strings.Contains(cfg.Model.System, "  - "+string(b.name)+": "+b.description) {
+		if b.description != "" && strings.Contains(cfg.System, "  - "+string(b.name)+": "+b.description) {
 			t.Errorf("greeting agent line for %q leaked into the model context", b.name)
 		}
 	}

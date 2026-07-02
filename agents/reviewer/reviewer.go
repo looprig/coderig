@@ -32,6 +32,22 @@ const Role = `<role name="reviewer">
   <boundary>Never edit, write, or otherwise mutate the workspace; you have no write tools. If a fix is needed, describe it precisely for the implementer instead of applying it.</boundary>
 </role>`
 
+// ToolSetError reports that reviewer's tool set could not be constructed. Currently the
+// only failure mode is the fail-secure PermissionChecker refusing to build because $HOME is
+// unresolvable while a home-relative ("~/…") deny pattern is configured. It wraps the
+// underlying cause (e.g. *tools.HomeUnresolvableError) so a caller can errors.As it, and it
+// exists so BuildTools never fails OPEN (returning a checker-less tool set) on that error.
+type ToolSetError struct{ Cause error }
+
+func (e *ToolSetError) Error() string {
+	if e.Cause == nil {
+		return "reviewer: cannot build tool set"
+	}
+	return "reviewer: cannot build tool set: " + e.Cause.Error()
+}
+
+func (e *ToolSetError) Unwrap() error { return e.Cause }
+
 // autoApprovedTools is reviewer's hard-approve set: everything EXCEPT Bash. Bash
 // runs a shell, so it stays Ask — a human reads and approves each command before
 // it runs (the permission gate is the security boundary). The read/todo/ask
@@ -51,7 +67,11 @@ var autoApprovedTools = []string{"ReadFile", "Glob", "Grep", "Todo", "AskUser"}
 // ≥1 allowed skill (nil otherwise). When non-nil it is added to the registry and
 // "Skill" is appended to the hard-approve set so it auto-approves — a scoped,
 // side-effect-free read of trusted in-repo content, the same class as ReadFile.
-func BuildTools(root string, skill tool.InvokableTool) loop.ToolSet {
+//
+// It returns a typed *ToolSetError (never a nil, checker-less tool set) when the
+// fail-secure PermissionChecker cannot be constructed — e.g. $HOME is unresolvable
+// while a home-relative deny pattern is configured — so a leaf never runs unguarded.
+func BuildTools(root string, skill tool.InvokableTool) (loop.ToolSet, error) {
 	approved := autoApprovedTools
 	if skill != nil {
 		approved = append(append([]string(nil), autoApprovedTools...), "Skill")
@@ -61,7 +81,10 @@ func BuildTools(root string, skill tool.InvokableTool) loop.ToolSet {
 		HardDeny:      tools.DefaultHardDeny(),
 		HardApprove:   tools.HardApproveRules{Tools: approved},
 	}
-	pc := tools.NewPermissionChecker(policy)
+	pc, err := tools.NewPermissionChecker(policy)
+	if err != nil {
+		return loop.ToolSet{}, &ToolSetError{Cause: err}
+	}
 
 	registry := []tool.InvokableTool{
 		tools.NewReadFile(root, pc),
@@ -74,5 +97,5 @@ func BuildTools(root string, skill tool.InvokableTool) loop.ToolSet {
 	if skill != nil {
 		registry = append(registry, skill)
 	}
-	return loop.ToolSet{Permission: pc, Registry: registry}
+	return loop.ToolSet{Permission: pc, Registry: registry}, nil
 }

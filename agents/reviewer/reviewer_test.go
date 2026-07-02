@@ -78,7 +78,10 @@ func equalStrings(a, b []string) bool {
 func TestBuildToolSetAllowlist(t *testing.T) {
 	t.Parallel()
 
-	ts := BuildTools("/tmp/workspace-root", nil)
+	ts, err := BuildTools("/tmp/workspace-root", nil)
+	if err != nil {
+		t.Fatalf("BuildTools() error = %v", err)
+	}
 	if ts.Permission == nil {
 		t.Fatal("BuildTools() ToolSet.Permission = nil, want non-nil PermissionChecker")
 	}
@@ -111,7 +114,10 @@ func TestBuildToolSetAllowlist(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("seed file: %v", err)
 	}
-	tsReal := BuildTools(root, nil)
+	tsReal, err := BuildTools(root, nil)
+	if err != nil {
+		t.Fatalf("BuildTools() error = %v", err)
+	}
 	reg := byName(t, tsReal.Registry)
 	cases := []struct {
 		tool string
@@ -143,7 +149,10 @@ func TestBuildToolSetAllowlist(t *testing.T) {
 func TestBuildToolSetWithSkill(t *testing.T) {
 	t.Parallel()
 
-	ts := BuildTools("/tmp/workspace-root", fakeSkill{})
+	ts, err := BuildTools("/tmp/workspace-root", fakeSkill{})
+	if err != nil {
+		t.Fatalf("BuildTools() error = %v", err)
+	}
 	wantTools := []string{"AskUser", "Bash", "Glob", "Grep", "ReadFile", "Skill", "Todo"}
 	got := toolNames(t, ts.Registry)
 	if !equalStrings(got, wantTools) {

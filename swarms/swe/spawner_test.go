@@ -61,7 +61,7 @@ func newTestSwarmSpawner(t *testing.T) (*swarmSpawner, *fakeRunner) {
 	if err != nil {
 		t.Fatalf("leafRegistry() error = %v", err)
 	}
-	sp := newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory("test-key"), loader, NewRuntimeContextProvider())
+	sp := newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory(), loader, NewRuntimeContextProvider())
 	runner := &fakeRunner{reply: "subagent done"}
 	sp.session = runner // late-bind a fake, exactly where bind sets the live session
 	return sp, runner
@@ -128,11 +128,11 @@ func TestSpawnResolvesPermittedAgent(t *testing.T) {
 			if runner.gotCfg.AgentName != tt.name {
 				t.Errorf("cfg.AgentName = %q, want %q", runner.gotCfg.AgentName, tt.name)
 			}
-			if !strings.HasPrefix(runner.gotCfg.Model.System, Identity) {
-				t.Errorf("cfg.Model.System = %q, want it to begin with the swarm Identity", runner.gotCfg.Model.System)
+			if !strings.HasPrefix(runner.gotCfg.System, Identity) {
+				t.Errorf("cfg.System = %q, want it to begin with the swarm Identity", runner.gotCfg.System)
 			}
-			if tt.role != "" && !strings.Contains(runner.gotCfg.Model.System, tt.role) {
-				t.Errorf("cfg.Model.System = %q, want it to contain the leaf Role", runner.gotCfg.Model.System)
+			if tt.role != "" && !strings.Contains(runner.gotCfg.System, tt.role) {
+				t.Errorf("cfg.System = %q, want it to contain the leaf Role", runner.gotCfg.System)
 			}
 			if runner.gotCfg.Client == nil {
 				t.Error("cfg.Client = nil, want the shared client")

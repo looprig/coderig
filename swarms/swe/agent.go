@@ -83,7 +83,7 @@ func newSessionAgent(ctx context.Context, primary loop.Config, opts ...session.O
 		cancel()
 		return nil, err
 	}
-	return &sessionAgent{session: sess, rootCtx: rootCtx, cancel: cancel, acceptsImages: primary.Model.AcceptsImages}, nil
+	return &sessionAgent{session: sess, rootCtx: rootCtx, cancel: cancel, acceptsImages: primary.Model.Caps.AcceptsImages}, nil
 }
 
 // newPersistentSessionAgent constructs a sessionAgent over a NEW persisted session: it is
@@ -103,7 +103,7 @@ func newPersistentSessionAgent(ctx context.Context, primary loop.Config, opts ..
 		cancel()
 		return nil, err
 	}
-	return &sessionAgent{session: sess, rootCtx: rootCtx, cancel: cancel, acceptsImages: primary.Model.AcceptsImages}, nil
+	return &sessionAgent{session: sess, rootCtx: rootCtx, cancel: cancel, acceptsImages: primary.Model.Caps.AcceptsImages}, nil
 }
 
 // newRestoredSessionAgent constructs a sessionAgent over a RESTORED session via
@@ -123,7 +123,7 @@ func newRestoredSessionAgent(ctx context.Context, primary loop.Config, sessionID
 		cancel()
 		return nil, err
 	}
-	return &sessionAgent{session: sess, rootCtx: rootCtx, cancel: cancel, acceptsImages: primary.Model.AcceptsImages}, nil
+	return &sessionAgent{session: sess, rootCtx: rootCtx, cancel: cancel, acceptsImages: primary.Model.Caps.AcceptsImages}, nil
 }
 
 // Submit delivers a multimodal user message FIRE-AND-FORGET as a queueable
