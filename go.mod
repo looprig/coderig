@@ -3,7 +3,7 @@ module github.com/ciram-co/swe
 go 1.26.4
 
 require (
-	github.com/ciram-co/looprig v0.3.0
+	github.com/ciram-co/looprig v0.4.0
 	github.com/nats-io/nats.go v1.52.0
 )
 
@@ -25,6 +25,7 @@ require (
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/google/go-tdx-guest v0.3.1 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
