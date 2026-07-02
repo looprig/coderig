@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,7 @@ import (
 	"github.com/ciram-co/looprig/pkg/identity"
 	"github.com/ciram-co/looprig/pkg/loop"
 	"github.com/ciram-co/looprig/pkg/tool"
+	"github.com/ciram-co/looprig/pkg/tools"
 )
 
 // fakeSkill is a minimal tool.InvokableTool named "Skill" used to prove the leaf
@@ -165,6 +167,59 @@ func TestBuildToolSetWithSkill(t *testing.T) {
 	}
 	if eff := ts.Permission.Check(context.Background(), tl, "Skill", `{"name":"code-style"}`); eff != loop.EffectAutoApprove {
 		t.Errorf("Check(Skill) effect = %v, want %v (Skill must auto-approve)", eff, loop.EffectAutoApprove)
+	}
+}
+
+// TestBuildToolsFailsClosedOnUnresolvableHome proves the Part-B security contract: when the
+// fail-secure PermissionChecker cannot be constructed — because $HOME is unresolvable while
+// DefaultHardDeny's home-relative ("~/…") deny patterns require it — BuildTools fails CLOSED.
+// It returns a typed *ToolSetError whose Unwrap chain reaches the underlying
+// *tools.HomeUnresolvableError, and the returned tool set is the ZERO value (no checker-less,
+// half-built set ever leaks out). This is the "thread the error up, never fail open" behavior.
+func TestBuildToolsFailsClosedOnUnresolvableHome(t *testing.T) {
+	// NOT t.Parallel(): HOME is process-global and t.Setenv panics under t.Parallel.
+	t.Setenv("HOME", "")
+
+	ts, err := BuildTools(t.TempDir(), nil)
+
+	var tse *ToolSetError
+	if !errors.As(err, &tse) {
+		t.Fatalf("BuildTools() error = %T (%v), want *ToolSetError", err, err)
+	}
+	var hue *tools.HomeUnresolvableError
+	if !errors.As(err, &hue) {
+		t.Fatalf("BuildTools() error does not unwrap to *tools.HomeUnresolvableError: %v", err)
+	}
+	if ts.Permission != nil || ts.Registry != nil {
+		t.Errorf("BuildTools() returned a non-zero tool set on failure (want fail-closed): Permission=%v Registry=%v", ts.Permission, ts.Registry)
+	}
+}
+
+// TestToolSetError proves the typed error's message (with and without a Cause — exercising the
+// nil-Cause guard) and that Unwrap returns the wrapped cause so errors.As recovers it.
+func TestToolSetError(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("home unresolvable")
+	tests := []struct {
+		name      string
+		err       *ToolSetError
+		wantMsg   string
+		wantCause error
+	}{
+		{name: "with cause", err: &ToolSetError{Cause: cause}, wantMsg: "reviewer: cannot build tool set: home unresolvable", wantCause: cause},
+		{name: "nil cause", err: &ToolSetError{}, wantMsg: "reviewer: cannot build tool set", wantCause: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.err.Error(); got != tt.wantMsg {
+				t.Errorf("Error() = %q, want %q", got, tt.wantMsg)
+			}
+			if got := tt.err.Unwrap(); got != tt.wantCause {
+				t.Errorf("Unwrap() = %v, want %v", got, tt.wantCause)
+			}
+		})
 	}
 }
 

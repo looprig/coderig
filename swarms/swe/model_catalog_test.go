@@ -131,6 +131,19 @@ func TestModelCatalogInvalidModelIsTyped(t *testing.T) {
 			wantTier:  TierEconomy,
 			wantIndex: 0,
 		},
+		{
+			// A classified provider + non-empty name that still fails llm.Model.Validate for a
+			// NEW reason (a non-loopback http:// BaseURL is rejected — plaintext remote endpoint),
+			// proving validateCatalogModel wraps Validate failures, not just empty-name/unknown-provider.
+			name: "validate failure (non-loopback http BaseURL) in premium",
+			catalog: ModelCatalog{Premium: []llm.Model{func() llm.Model {
+				m := catalogModel("insecure")
+				m.BaseURL = "http://api.example.com"
+				return m
+			}()}},
+			wantTier:  TierPremium,
+			wantIndex: 0,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

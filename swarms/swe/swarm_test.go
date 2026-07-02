@@ -3,6 +3,7 @@ package swe
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"sort"
 	"strings"
@@ -180,6 +181,45 @@ func TestOperatorPrimaryToolSetIsLeafUnionPlusSubagent(t *testing.T) {
 	}
 	if !equalStringSlice(got, leafNames) {
 		t.Errorf("primary tools minus Subagent = %v, want the leaf union %v", got, leafNames)
+	}
+}
+
+// TestOperatorPrimaryToolSetFailsClosedOnUnresolvableHome proves the Part-B security contract
+// for the PRIMARY operator: when the fail-secure PermissionChecker cannot be constructed —
+// because $HOME is unresolvable while DefaultHardDeny's home-relative ("~/…") deny patterns
+// require it — operatorPrimaryToolSet fails CLOSED with a typed *PrimaryToolSetError whose
+// Unwrap chain reaches *tools.HomeUnresolvableError, and returns the ZERO tool set. It also
+// proves operatorPrimaryConfig THREADS the same typed error up (the config-assembly seam that
+// carries it to buildOperatorWiring → New/Open → the composition root), never a partial config.
+func TestOperatorPrimaryToolSetFailsClosedOnUnresolvableHome(t *testing.T) {
+	// NOT t.Parallel(): HOME is process-global and t.Setenv panics under t.Parallel.
+	t.Setenv("HOME", "")
+
+	root := t.TempDir()
+
+	// (1) operatorPrimaryToolSet is the entry point that constructs the checker. It returns
+	// before touching the (here nil) spawner/catalog/skill, so nil args are safe.
+	ts, err := operatorPrimaryToolSet(root, &http.Client{}, nil, nil, nil)
+	var ptse *PrimaryToolSetError
+	if !errors.As(err, &ptse) {
+		t.Fatalf("operatorPrimaryToolSet() error = %T (%v), want *PrimaryToolSetError", err, err)
+	}
+	var hue *tools.HomeUnresolvableError
+	if !errors.As(err, &hue) {
+		t.Fatalf("operatorPrimaryToolSet() error does not unwrap to *tools.HomeUnresolvableError: %v", err)
+	}
+	if ts.Permission != nil || ts.Registry != nil {
+		t.Errorf("operatorPrimaryToolSet() returned a non-zero tool set on failure (want fail-closed): Permission=%v Registry=%v", ts.Permission, ts.Registry)
+	}
+
+	// (2) operatorPrimaryConfig threads the SAME typed error up, returning a zero config.
+	deps, spawner, catalog, loader, skill := operatorPrimaryArgs(t, root)
+	cfg, err := operatorPrimaryConfig(&fakeLLM{}, newModelFactory(), deps, spawner, catalog, nil, loader, skill)
+	if !errors.As(err, &hue) {
+		t.Fatalf("operatorPrimaryConfig() error does not unwrap to *tools.HomeUnresolvableError: %v", err)
+	}
+	if cfg.Client != nil || cfg.Tools.Permission != nil {
+		t.Errorf("operatorPrimaryConfig() returned a non-zero config on failure (want fail-closed): Client=%v Permission=%v", cfg.Client, cfg.Tools.Permission)
 	}
 }
 
