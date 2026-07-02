@@ -19,8 +19,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ciram-co/looprig/pkg/cli"
-	"github.com/ciram-co/looprig/pkg/tui"
+	"github.com/ciram-co/looprig-console/cli"
+	"github.com/ciram-co/looprig-console/tui"
 	"github.com/ciram-co/looprig/pkg/uuid"
 	"github.com/ciram-co/swe/swarms/swe"
 )

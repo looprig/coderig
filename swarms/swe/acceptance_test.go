@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ciram-co/looprig-console/tui"
 	"github.com/ciram-co/looprig/pkg/content"
 	"github.com/ciram-co/looprig/pkg/event"
 	"github.com/ciram-co/looprig/pkg/identity"
 	"github.com/ciram-co/looprig/pkg/llm"
 	"github.com/ciram-co/looprig/pkg/session"
 	"github.com/ciram-co/looprig/pkg/tool"
-	"github.com/ciram-co/looprig/pkg/tui"
 	"github.com/ciram-co/looprig/pkg/uuid"
 	"github.com/ciram-co/swe/agents/operator"
 )

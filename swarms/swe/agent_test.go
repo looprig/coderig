@@ -6,6 +6,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/ciram-co/looprig-console/tui"
 	"github.com/ciram-co/looprig/pkg/event"
 	"github.com/ciram-co/looprig/pkg/journal"
 	"github.com/ciram-co/looprig/pkg/llm"
@@ -14,7 +15,6 @@ import (
 	"github.com/ciram-co/looprig/pkg/tool"
 	"github.com/ciram-co/looprig/pkg/transcript"
 	"github.com/ciram-co/looprig/pkg/transcript/journalsource"
-	"github.com/ciram-co/looprig/pkg/tui"
 	"github.com/ciram-co/looprig/pkg/uuid"
 )
 

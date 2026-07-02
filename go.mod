@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/ciram-co/looprig v0.4.0
+	github.com/ciram-co/looprig-console v0.0.0
 	github.com/nats-io/nats.go v1.52.0
 )
 
@@ -54,5 +55,8 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+// Local, unpublished dep; drop + pin a tag at release.
+replace github.com/ciram-co/looprig-console => ../looprig-console
 
 replace charm.land/bubbletea/v2 => github.com/ciram-co/bubbletea/v2 v2.0.0-20260623210731-9571e88971cd

@@ -11,12 +11,12 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/ciram-co/looprig-console/tui"
 	"github.com/ciram-co/looprig/pkg/llm"
 	"github.com/ciram-co/looprig/pkg/loop"
 	"github.com/ciram-co/looprig/pkg/session"
 	"github.com/ciram-co/looprig/pkg/tool"
 	"github.com/ciram-co/looprig/pkg/tools"
-	"github.com/ciram-co/looprig/pkg/tui"
 	"github.com/ciram-co/swe/agents/operator"
 )
 
