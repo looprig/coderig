@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ciram-co/looprig/pkg/llm"
-	"github.com/ciram-co/looprig/pkg/uuid"
+	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/harness/pkg/uuid"
 	"github.com/nats-io/nats.go"
 )
 

@@ -11,13 +11,13 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/ciram-co/looprig-console/tui"
-	"github.com/ciram-co/looprig/pkg/llm"
-	"github.com/ciram-co/looprig/pkg/loop"
-	"github.com/ciram-co/looprig/pkg/session"
-	"github.com/ciram-co/looprig/pkg/tool"
-	"github.com/ciram-co/looprig/pkg/tools"
-	"github.com/ciram-co/swe/agents/operator"
+	"github.com/looprig/cli/tui"
+	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/harness/pkg/session"
+	"github.com/looprig/harness/pkg/tool"
+	"github.com/looprig/harness/pkg/tools"
+	"github.com/looprig/swe/agents/operator"
 )
 
 // operatorAgentKind is the swarm + primary agent identity stamped onto the session's

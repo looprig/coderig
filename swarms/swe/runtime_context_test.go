@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ciram-co/looprig/pkg/content"
-	"github.com/ciram-co/looprig/pkg/loop"
+	"github.com/looprig/harness/pkg/content"
+	"github.com/looprig/harness/pkg/loop"
 )
 
 // fakeGitError is a typed error for the runner seam's failure paths in tests.

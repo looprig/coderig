@@ -19,10 +19,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ciram-co/looprig-console/cli"
-	"github.com/ciram-co/looprig-console/tui"
-	"github.com/ciram-co/looprig/pkg/uuid"
-	"github.com/ciram-co/swe/swarms/swe"
+	"github.com/looprig/cli/cli"
+	"github.com/looprig/cli/tui"
+	"github.com/looprig/harness/pkg/uuid"
+	"github.com/looprig/swe/swarms/swe"
 )
 
 // bannerName is the SWE-Swarm's user-facing banner name shown in the TUI session-ready

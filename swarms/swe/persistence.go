@@ -7,12 +7,12 @@ import (
 	"os"
 	"time"
 
-	"github.com/ciram-co/looprig/pkg/event"
-	"github.com/ciram-co/looprig/pkg/journal"
-	"github.com/ciram-co/looprig/pkg/llm"
-	"github.com/ciram-co/looprig/pkg/persistence"
-	"github.com/ciram-co/looprig/pkg/session"
-	"github.com/ciram-co/looprig/pkg/uuid"
+	"github.com/looprig/harness/pkg/event"
+	"github.com/looprig/harness/pkg/journal"
+	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/harness/pkg/persistence"
+	"github.com/looprig/harness/pkg/session"
+	"github.com/looprig/harness/pkg/uuid"
 	"github.com/nats-io/nats.go"
 )
 

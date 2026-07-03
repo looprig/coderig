@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/swe/agents/operator"
+	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/swe/agents/operator"
 )
 
 // TestBuildGreeting pins the deterministic, LLM-free greeting builder: it is derived

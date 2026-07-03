@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ciram-co/looprig-console/tui"
-	"github.com/ciram-co/looprig/pkg/loop"
-	"github.com/ciram-co/looprig/pkg/tool"
-	"github.com/ciram-co/looprig/pkg/tools"
-	"github.com/ciram-co/swe/agents/operator"
+	"github.com/looprig/cli/tui"
+	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/harness/pkg/tool"
+	"github.com/looprig/harness/pkg/tools"
+	"github.com/looprig/swe/agents/operator"
 )
 
 // operatorPrimaryArgs builds the inputs operatorPrimaryConfig / operatorPrimaryToolSet

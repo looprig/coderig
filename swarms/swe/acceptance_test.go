@@ -9,15 +9,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ciram-co/looprig-console/tui"
-	"github.com/ciram-co/looprig/pkg/content"
-	"github.com/ciram-co/looprig/pkg/event"
-	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/looprig/pkg/llm"
-	"github.com/ciram-co/looprig/pkg/session"
-	"github.com/ciram-co/looprig/pkg/tool"
-	"github.com/ciram-co/looprig/pkg/uuid"
-	"github.com/ciram-co/swe/agents/operator"
+	"github.com/looprig/cli/tui"
+	"github.com/looprig/harness/pkg/content"
+	"github.com/looprig/harness/pkg/event"
+	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/harness/pkg/session"
+	"github.com/looprig/harness/pkg/tool"
+	"github.com/looprig/harness/pkg/uuid"
+	"github.com/looprig/swe/agents/operator"
 )
 
 // acceptance_test.go is the swarm's CROSS-CUTTING acceptance suite: it drives the

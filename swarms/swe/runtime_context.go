@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ciram-co/looprig/pkg/content"
-	"github.com/ciram-co/looprig/pkg/loop"
+	"github.com/looprig/harness/pkg/content"
+	"github.com/looprig/harness/pkg/loop"
 )
 
 const (

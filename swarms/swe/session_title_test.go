@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ciram-co/looprig/pkg/content"
-	"github.com/ciram-co/looprig/pkg/llm"
-	"github.com/ciram-co/looprig/pkg/persistence"
-	"github.com/ciram-co/looprig/pkg/uuid"
+	"github.com/looprig/harness/pkg/content"
+	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/harness/pkg/persistence"
+	"github.com/looprig/harness/pkg/uuid"
 )
 
 var titleClock = time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)

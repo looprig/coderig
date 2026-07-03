@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ciram-co/looprig/pkg/session"
-	"github.com/ciram-co/swe/agents/operator"
+	"github.com/looprig/harness/pkg/session"
+	"github.com/looprig/swe/agents/operator"
 )
 
 // TestOperatorFingerprintFields asserts the swarm-level config-fingerprint fields the

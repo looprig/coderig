@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/looprig/pkg/tools"
+	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/harness/pkg/tools"
 )
 
 // skills_catalog.go is the composition-root seam that turns the swarm's per-agent

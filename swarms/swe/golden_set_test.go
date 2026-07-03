@@ -3,7 +3,7 @@ package swe
 import (
 	"testing"
 
-	"github.com/ciram-co/looprig/pkg/eval"
+	"github.com/looprig/harness/pkg/eval"
 )
 
 // TestGoldenSetLoads proves the checked-in golden cases are valid JSON that

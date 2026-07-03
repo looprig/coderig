@@ -6,7 +6,7 @@
 
 **Architecture:** Reuse the codebase's existing primary-vs-leaf capability split. The primary loop is an `operator` whose toolset includes `Subagent`; the spawnable `operator` leaf has the identical toolset **minus** `Subagent`, so a spawned operator structurally cannot spawn. `explorer`/`researcher` capabilities fold into `operator` (read/search + web + write/edit/Bash); `orchestrator`'s delegation guidance moves to a primary-only prompt fragment. `reviewer` is unchanged.
 
-**Tech Stack:** Go 1.26, `github.com/ciram-co/looprig` (loop/session/tools/identity), NATS JetStream (persistence), Bubble Tea v2 (TUI, via looprig).
+**Tech Stack:** Go 1.26, `github.com/looprig/harness` (loop/session/tools/identity), NATS JetStream (persistence), Bubble Tea v2 (TUI, via looprig).
 
 **Working context:** Branch `operator-consolidation`. The dev workspace `/Users/ipotter/code/go.work` makes `go build`/`go test` use local `./looprig`. Run all build/test commands from `/Users/ipotter/code/swe`.
 
@@ -25,19 +25,19 @@
 
 In `go.mod`, change:
 ```
-	github.com/ciram-co/looprig v0.1.2
+	github.com/looprig/harness v0.1.2
 ```
 to:
 ```
-	github.com/ciram-co/looprig v0.2.0
+	github.com/looprig/harness v0.2.0
 ```
 
 **Step 2: Refresh go.sum for v0.2.0 (workspace OFF, private module)**
 
 Run:
 ```bash
-GOWORK=off GOFLAGS=-mod=mod GOPRIVATE='github.com/ciram-co/*' GOSUMDB=off \
-  go get github.com/ciram-co/looprig@v0.2.0
+GOWORK=off GOFLAGS=-mod=mod GOPRIVATE='github.com/looprig/*' GOSUMDB=off \
+  go get github.com/looprig/harness@v0.2.0
 ```
 Expected: `go.sum` gains v0.2.0 entries (and drops v0.1.2 if unused). If the module is not yet cached, this fetches it from `git@github.com:ciram-co/looprig.git` (the tag is already pushed).
 
@@ -45,7 +45,7 @@ Expected: `go.sum` gains v0.2.0 entries (and drops v0.1.2 if unused). If the mod
 
 Run:
 ```bash
-GOWORK=off GOPRIVATE='github.com/ciram-co/*' GOSUMDB=off go build ./...
+GOWORK=off GOPRIVATE='github.com/looprig/*' GOSUMDB=off go build ./...
 ```
 Expected: exit 0 (the v0.2.0 additions are additive; no code change needed).
 
@@ -53,7 +53,7 @@ Expected: exit 0 (the v0.2.0 additions are additive; no code change needed).
 
 Run:
 ```bash
-GOWORK=off GOPRIVATE='github.com/ciram-co/*' GOSUMDB=off go test ./...
+GOWORK=off GOPRIVATE='github.com/looprig/*' GOSUMDB=off go test ./...
 ```
 Expected: PASS. (If anything fails to compile against v0.2.0, that is genuine API drift — stop and reconcile before continuing; the design assumed none.)
 
@@ -93,10 +93,10 @@ Replace the `import` block, `Role`, and `BuildTools` so operator gains web tools
 import (
 	"net/http"
 
-	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/looprig/pkg/loop"
-	"github.com/ciram-co/looprig/pkg/tool"
-	"github.com/ciram-co/looprig/pkg/tools"
+	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/harness/pkg/tool"
+	"github.com/looprig/harness/pkg/tools"
 )
 
 const Name = identity.AgentName("operator")
@@ -193,7 +193,7 @@ git commit -m "feat(operator): absorb explorer + researcher (read/search + web),
 
 **Step 1: `swarm.go` — swap the import and primary identity**
 
-- Change import `"github.com/ciram-co/swe/agents/orchestrator"` → `"github.com/ciram-co/swe/agents/operator"`, and add `"context"`.
+- Change import `"github.com/looprig/swe/agents/orchestrator"` → `"github.com/looprig/swe/agents/operator"`, and add `"context"`.
 - Rename, mechanically, every `orchestrator*` identifier → `operator*` (Go symbols, not the `operator` package):
   `orchestratorAgentKind→operatorAgentKind`, `orchestratorFingerprintFields→operatorFingerprintFields`, `orchestratorLimits→operatorLimits`, `orchestratorSpawnDepth→operatorSpawnDepth`, `orchestratorSpawnQuota→operatorSpawnQuota`, `orchestratorWiring→operatorWiring`, `buildOrchestratorWiring→buildOperatorWiring`. Delete `orchestratorAutoApprovedTools`, `orchestratorToolSet`, `orchestratorConfig` (replaced below).
 - `operatorAgentKind`:
@@ -435,7 +435,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/ciram-co/looprig/pkg/loop"
+	"github.com/looprig/harness/pkg/loop"
 )
 
 // toolNames returns the sorted Info().Name of every tool in a ToolSet.
@@ -539,18 +539,18 @@ The leaf operator cannot spawn, so real nesting never exceeds 1. Optionally set 
 
 Start from `/Users/ipotter/code/looprig/CLAUDE.md`. Keep the doctrine sections **verbatim** (they apply to swe): *SOLID Principles*, *Security — First-Class*, *Secure Coding Patterns*, *Build & Testing Requirements* (table-driven + `-race`), *Code Rules*. Adapt the repo-specific parts:
 
-- **Title/intro:** note this is the SWE-Swarm (`github.com/ciram-co/swe`), a looprig-based multi-agent coding swarm; the agent runtime (loop/session/tools/tui) lives in looprig.
+- **Title/intro:** note this is the SWE-Swarm (`github.com/looprig/swe`), a looprig-based multi-agent coding swarm; the agent runtime (loop/session/tools/tui) lives in looprig.
 - **Dependencies → Approved external packages:** replace looprig's internal list with swe's actual direct deps:
-  - `github.com/ciram-co/looprig` — the SWE-Swarm framework: loop, session (NATS-backed), tools (ReadFile/Glob/Grep/WriteFile/EditFile/Bash/WebSearch/Fetch/Subagent/Skill/Todo/AskUser + PermissionChecker), identity, content, journal, tui.
+  - `github.com/looprig/harness` — the SWE-Swarm framework: loop, session (NATS-backed), tools (ReadFile/Glob/Grep/WriteFile/EditFile/Bash/WebSearch/Fetch/Subagent/Skill/Todo/AskUser + PermissionChecker), identity, content, journal, tui.
   - `github.com/nats-io/nats.go` — JetStream client for session persistence (`swarms/swe/persistence.go`, `agent.go`).
-  - Bubble Tea **v2** stack — inherited via looprig's TUI: `charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`, `charm.land/glamour/v2`. swe pins a fork via `replace charm.land/bubbletea/v2 => github.com/ciram-co/bubbletea/v2 …` (the strand-fix fork).
+  - Bubble Tea **v2** stack — inherited via looprig's TUI: `charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`, `charm.land/glamour/v2`. swe pins a fork via `replace charm.land/bubbletea/v2 => github.com/looprig/bubbletea/v2 …` (the strand-fix fork).
 - **Build & Testing — adapt commands to swe's Makefile (do NOT invent targets):**
   - `make build` → `CGO_ENABLED=0 go build -trimpath -o bin/swe ./cmd/swe`
   - `make run` → loads `.env`, `go run ./cmd/swe`
   - `make test` → `go test -race ./...`
   - `make fmt` / `make fmt-check` / `make lint` (`fmt-check` + `go vet`)
   - Note: swe does **not** wire `make secure`/`gosec`/`govulncheck`/`staticcheck` today — list it as "not yet wired" rather than claiming a command that doesn't exist.
-- **Add a swe-specific Workspace note:** `/Users/ipotter/code/go.work` declares `use ./looprig`, so workspace builds compile against the **local** looprig checkout (the go.mod pin is masked). For a clean/pinned build use `GOWORK=off`; looprig is a private module, so set `GOPRIVATE='github.com/ciram-co/*'` (and `GOSUMDB=off`) when fetching.
+- **Add a swe-specific Workspace note:** `/Users/ipotter/code/go.work` declares `use ./looprig`, so workspace builds compile against the **local** looprig checkout (the go.mod pin is masked). For a clean/pinned build use `GOWORK=off`; looprig is a private module, so set `GOPRIVATE='github.com/looprig/*'` (and `GOSUMDB=off`) when fetching.
 - **Bash exception:** restate for swe — operator/reviewer wire looprig's `Bash` tool; the security boundary is the **permission gate** (Bash defaults to Ask; human-approved per call), not the argv shape.
 
 **Step 2: Create the symlink**
@@ -580,7 +580,7 @@ git commit -m "docs(swe): add CLAUDE.md + AGENTS.md (adapted from looprig)"
 Run from `/Users/ipotter/code/swe`:
 ```bash
 go build ./... && go test -race ./...                 # workspace (local looprig)
-GOWORK=off GOPRIVATE='github.com/ciram-co/*' GOSUMDB=off go build ./...   # pinned v0.2.0
+GOWORK=off GOPRIVATE='github.com/looprig/*' GOSUMDB=off go build ./...   # pinned v0.2.0
 make lint
 ```
 Expected: all PASS. Then `superpowers:finishing-a-development-branch` to decide merge/PR.

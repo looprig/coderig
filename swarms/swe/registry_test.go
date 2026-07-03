@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/looprig/pkg/llm"
-	"github.com/ciram-co/looprig/pkg/loop"
+	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/harness/pkg/loop"
 )
 
 // stubAgent builds a minimal Agent with a no-op BuildTools so the table rows are terse.

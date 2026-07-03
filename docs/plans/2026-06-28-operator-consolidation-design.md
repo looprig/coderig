@@ -29,7 +29,7 @@ Two pieces of work, landing in order:
 - The dev workspace `/Users/ipotter/code/go.work` declares `use ./looprig`, so a normal
   `go build` in the workspace already compiles swe against the **local** looprig checkout
   (currently `v0.2.0` main). The workspace masks the go.mod pin.
-- The `swe/go.mod` pin still reads `github.com/ciram-co/looprig v0.1.2` — that is what a
+- The `swe/go.mod` pin still reads `github.com/looprig/harness v0.1.2` — that is what a
   clean build (`GOWORK=off`) or any external/CI consumer resolves.
 - A `GOWORK=off` build against the `v0.1.2` pin currently **passes**, which means the
   v0.2.0 additions (foreign-loop / fingerprint APIs) are additive and swe does not depend
@@ -40,7 +40,7 @@ Two pieces of work, landing in order:
 - `swe/go.mod`: `looprig v0.1.2` → `v0.2.0`.
 - Refresh `swe/go.sum` for v0.2.0.
 - Verify the **pinned** build/test (workspace off):
-  `GOWORK=off GOPRIVATE='github.com/ciram-co/*' GOSUMDB=off go build ./... && go test ./...`
+  `GOWORK=off GOPRIVATE='github.com/looprig/*' GOSUMDB=off go build ./... && go test ./...`
   (requires v0.2.0 fetchable from GitHub into the module cache).
 - The workspace `go.work` (local `./looprig`) is unaffected.
 
@@ -174,15 +174,15 @@ Code Rules.
 
 ### What is adapted to swe's data
 
-- **Module path** — `github.com/ciram-co/swe`.
+- **Module path** — `github.com/looprig/swe`.
 - **Approved external packages** — rewrite the list for swe's actual direct deps:
-  - `github.com/ciram-co/looprig` — the SWE-Swarm framework (loop / session / tools / tui /
+  - `github.com/looprig/harness` — the SWE-Swarm framework (loop / session / tools / tui /
     identity / content / journal). The entire agent runtime.
   - `github.com/nats-io/nats.go` — JetStream client for session persistence
     (`swarms/swe/persistence.go`, `agent.go`).
   - the Bubble Tea **v2** stack (`charm.land/bubbletea/v2`, `bubbles/v2`, `lipgloss/v2`,
     `glamour/v2`) — inherited transitively via looprig's TUI, with swe's
-    `replace charm.land/bubbletea/v2 => github.com/ciram-co/bubbletea/v2 …` fork (the
+    `replace charm.land/bubbletea/v2 => github.com/looprig/bubbletea/v2 …` fork (the
     strand-fix fork; see the project memory note).
 - **Build & test commands** — match swe's **actual** Makefile: `make build`
   (`CGO_ENABLED=0 go build -trimpath`), `make run`, `make test` (`go test -race ./...`),
@@ -190,7 +190,7 @@ Code Rules.
   `make secure` / `gosec` / `govulncheck` today — describe what exists; note security tooling
   as not-yet-wired rather than inventing commands.
 - **Workspace note (swe-specific)** — document the `/Users/ipotter/code/go.work`
-  `use ./looprig` workspace and the `GOWORK=off` / `GOPRIVATE='github.com/ciram-co/*'`
+  `use ./looprig` workspace and the `GOWORK=off` / `GOPRIVATE='github.com/looprig/*'`
   gotchas for a clean (pinned) build, matching the project memory note.
 - **Bash exception** — swe wires looprig's `Bash` tool into operator/reviewer; the security
   boundary is the **permission gate** (Bash defaults to Ask, human-approved per call), not the

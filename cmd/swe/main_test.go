@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ciram-co/looprig/pkg/persistence"
-	"github.com/ciram-co/looprig/pkg/uuid"
-	"github.com/ciram-co/swe/swarms/swe"
+	"github.com/looprig/harness/pkg/persistence"
+	"github.com/looprig/harness/pkg/uuid"
+	"github.com/looprig/swe/swarms/swe"
 )
 
 // TestParseFlags covers the SWE CLI flag parser: --list, --resume <uuid>, and the boundary

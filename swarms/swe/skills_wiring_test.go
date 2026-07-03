@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/looprig/pkg/loop"
-	"github.com/ciram-co/looprig/pkg/tool"
-	"github.com/ciram-co/swe/agents/operator"
-	"github.com/ciram-co/swe/agents/reviewer"
+	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/harness/pkg/tool"
+	"github.com/looprig/swe/agents/operator"
+	"github.com/looprig/swe/agents/reviewer"
 )
 
 // skills_wiring_test.go proves the Task-3 composition: a SKILLED leaf (operator)

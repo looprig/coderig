@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ciram-co/looprig/pkg/content"
-	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/looprig/pkg/loop"
-	"github.com/ciram-co/swe/agents/operator"
+	"github.com/looprig/harness/pkg/content"
+	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/swe/agents/operator"
 )
 
 // spawner_test.go exercises swarmSpawner against a FAKE subagentRunner (DIP: the

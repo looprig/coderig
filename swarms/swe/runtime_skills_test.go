@@ -4,10 +4,10 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/looprig/pkg/loop"
-	"github.com/ciram-co/swe/agents/operator"
-	"github.com/ciram-co/swe/agents/reviewer"
+	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/swe/agents/operator"
+	"github.com/looprig/swe/agents/reviewer"
 )
 
 // runtime_skills_test.go pins P2b Phase 3c: the --runtime-skills enablement gate

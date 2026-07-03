@@ -4,12 +4,12 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/ciram-co/looprig/pkg/content"
-	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/looprig/pkg/llm"
-	"github.com/ciram-co/looprig/pkg/loop"
-	"github.com/ciram-co/looprig/pkg/session"
-	"github.com/ciram-co/looprig/pkg/tools"
+	"github.com/looprig/harness/pkg/content"
+	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/harness/pkg/session"
+	"github.com/looprig/harness/pkg/tools"
 )
 
 // subagentRunner is the ONE session method the spawner needs (interface segregation /

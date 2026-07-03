@@ -5,9 +5,9 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/swe/agents/operator"
-	"github.com/ciram-co/swe/agents/reviewer"
+	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/swe/agents/operator"
+	"github.com/looprig/swe/agents/reviewer"
 )
 
 // testLeafDeps is a minimal LeafToolDeps for registry-shape tests: a throwaway

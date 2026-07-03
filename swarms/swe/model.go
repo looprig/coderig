@@ -4,9 +4,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ciram-co/looprig/pkg/llm"
-	"github.com/ciram-co/looprig/pkg/llm/auth"
-	"github.com/ciram-co/looprig/pkg/llm/auto"
+	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/harness/pkg/llm/auth"
+	"github.com/looprig/harness/pkg/llm/auto"
 )
 
 // model is the named model every agent in the SWE-Swarm runs on. P1 reuses Kimi

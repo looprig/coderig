@@ -10,9 +10,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/ciram-co/looprig/pkg/identity"
-	"github.com/ciram-co/looprig/pkg/llm"
-	"github.com/ciram-co/looprig/pkg/loop"
+	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/harness/pkg/loop"
 )
 
 // Agent is what an agent PACKAGE exposes. It owns its role prompt + toolset

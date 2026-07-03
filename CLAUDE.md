@@ -1,8 +1,8 @@
 # CLAUDE.md — Development Guidelines
 
-This is the **SWE-Swarm** (`github.com/ciram-co/swe`): a multi-agent software-engineering
+This is the **SWE-Swarm** (`github.com/looprig/swe`): a multi-agent software-engineering
 swarm built on the **looprig** framework. The entire agent runtime — loop, session, tools,
-tui, identity, content, journal — lives in looprig (`github.com/ciram-co/looprig`), which swe
+tui, identity, content, journal — lives in looprig (`github.com/looprig/harness`), which swe
 consumes as a Go module. swe itself owns the swarm: the model/provider wiring, the agent
 roster, the system identity, and the composition root that assembles looprig's loop into a
 runnable TUI agent.
@@ -66,7 +66,7 @@ The current, post-consolidation shape (verified against `swarms/swe/swarm.go`,
 **Amend this file when approved.** Once a package is approved, add it here so future sessions know it is sanctioned:
 
 <!-- Approved external packages -->
-- `github.com/ciram-co/looprig` — the SWE-Swarm framework and the entire agent runtime
+- `github.com/looprig/harness` — the SWE-Swarm framework and the entire agent runtime
   (loop / session [NATS-backed persistence] / tools [`ReadFile`, `Glob`, `Grep`, `WriteFile`,
   `EditFile`, `Bash`, `WebSearch`, `Fetch`, `Subagent`, `Skill`, `Todo`, `AskUser`, +
   `PermissionChecker`] / tui / identity / content / journal). A **direct** dependency.
@@ -83,7 +83,7 @@ The current, post-consolidation shape (verified against `swarms/swe/swarm.go`,
   fork) via this `go.mod` `replace` directive:
 
   ```
-  replace charm.land/bubbletea/v2 => github.com/ciram-co/bubbletea/v2 v2.0.0-20260623210731-9571e88971cd
+  replace charm.land/bubbletea/v2 => github.com/looprig/bubbletea/v2 v2.0.0-20260623210731-9571e88971cd
   ```
 
   The same `replace` is mirrored in the workspace `go.work` so workspace builds use the fork too.
@@ -111,7 +111,7 @@ srv := &http.Server{
 **Shell commands** — Never pass user input to `exec.Command` as a shell string. Always pass args as separate parameters.
 
 > **Documented exception — the `Bash` tool.** swe wires looprig's `Bash` tool (from
-> `github.com/ciram-co/looprig/pkg/tools`, `tools.NewBash`) into the **primary operator**, the
+> `github.com/looprig/harness/pkg/tools`, `tools.NewBash`) into the **primary operator**, the
 > **operator leaf**, and the **reviewer**. `Bash` runs a single command via `sh -c <command>` — a
 > deliberate violation of the shell-args rule above, because a coding agent genuinely needs shell
 > features (pipes, globs, `&&`, redirects) an argv list can't express. The security boundary is the
@@ -187,16 +187,16 @@ func TestFoo(t *testing.T) {
 
 The workspace file `/Users/ipotter/code/go.work` declares `use ./looprig` and `use ./swe`. So a
 normal `go build`/`go test` from inside the workspace compiles swe against the **local looprig
-checkout** — the `go.mod` version pin (`github.com/ciram-co/looprig v0.2.0`) is **masked**
+checkout** — the `go.mod` version pin (`github.com/looprig/harness v0.2.0`) is **masked**
 in-workspace, and your local looprig edits are picked up directly.
 
 For a **clean, pinned** build (against the `go.mod` version, not the local checkout) set
 `GOWORK=off`. looprig is a **private** module, so when fetching/building with the workspace off,
-also set `GOPRIVATE='github.com/ciram-co/*'` (and `GOSUMDB=off`) so the toolchain doesn't try the
+also set `GOPRIVATE='github.com/looprig/*'` (and `GOSUMDB=off`) so the toolchain doesn't try the
 public proxy/checksum DB:
 
 ```bash
-GOWORK=off GOPRIVATE='github.com/ciram-co/*' GOSUMDB=off go build ./...
+GOWORK=off GOPRIVATE='github.com/looprig/*' GOSUMDB=off go build ./...
 ```
 
 ## Code Rules
