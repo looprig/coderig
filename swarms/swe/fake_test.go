@@ -6,11 +6,11 @@ import (
 	"io"
 	"sync"
 
-	"github.com/looprig/harness/pkg/content"
-	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/core/content"
+	"github.com/looprig/inference"
 )
 
-// fakeLLM is a controllable llm.LLM for tests. The loop only ever calls Stream,
+// fakeLLM is a controllable inference.Client for tests. The loop only ever calls Stream,
 // so Invoke is a stub. Salvaged from the prior coding agent's fake_test.go.
 type fakeLLM struct {
 	chunks    []content.Chunk
@@ -21,11 +21,11 @@ type fakeLLM struct {
 	enteredOnce sync.Once
 }
 
-func (f *fakeLLM) Invoke(ctx context.Context, req llm.Request) (*llm.Response, error) {
+func (f *fakeLLM) Invoke(ctx context.Context, req inference.Request) (*inference.Response, error) {
 	return nil, errors.New("fakeLLM.Invoke not used")
 }
 
-func (f *fakeLLM) Stream(ctx context.Context, req llm.Request) (*llm.StreamReader[content.Chunk], error) {
+func (f *fakeLLM) Stream(ctx context.Context, req inference.Request) (*inference.StreamReader[content.Chunk], error) {
 	if f.entered != nil {
 		f.enteredOnce.Do(func() { close(f.entered) })
 	}
@@ -49,12 +49,12 @@ func (f *fakeLLM) Stream(ctx context.Context, req llm.Request) (*llm.StreamReade
 		}
 		return nil, io.EOF
 	}
-	return llm.NewStreamReader(next, nil), nil
+	return inference.NewStreamReader(next, nil), nil
 }
 
-// testModel is a minimal valid llm.Model for fake-client tests. The fake ignores it; loop.New
-// only requires it to pass llm.Model.Validate (valid provider/APIFormat/BaseURL + non-empty
+// testModel is a minimal valid inference.Model for fake-client tests. The fake ignores it; loop.New
+// only requires it to pass inference.Model.Validate (valid provider/APIFormat/BaseURL + non-empty
 // name), which the loopback LM Studio catalog row satisfies.
-func testModel() llm.Model {
-	return llm.LMStudioLocal("fake-model")
+func testModel() inference.Model {
+	return lmStudioLocal("fake-model")
 }

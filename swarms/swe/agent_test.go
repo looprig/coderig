@@ -7,15 +7,16 @@ import (
 	"testing"
 
 	"github.com/looprig/cli/tui"
+	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/event"
 	"github.com/looprig/harness/pkg/journal"
-	"github.com/looprig/harness/pkg/llm"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/session"
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/harness/pkg/transcript"
 	"github.com/looprig/harness/pkg/transcript/journalsource"
-	"github.com/looprig/harness/pkg/uuid"
+	"github.com/looprig/inference"
+	"github.com/looprig/llm"
 )
 
 // Compile-time proof that *sessionAgent satisfies the TUI's Agent surface (the
@@ -26,7 +27,7 @@ var _ tui.Agent = (*sessionAgent)(nil)
 // testPrimaryCfg builds a minimal valid primary loop.Config over a fake client for
 // wrapper construction tests: a secret-free model plus a (possibly empty) system prompt,
 // mirroring the post-split loop.Config shape.
-func testPrimaryCfg(m llm.Model, system string) loop.Config {
+func testPrimaryCfg(m inference.Model, system string) loop.Config {
 	return loop.Config{Client: &fakeLLM{}, Model: m, System: system, Tools: loop.ToolSet{}}
 }
 
@@ -104,12 +105,12 @@ func TestSessionAgentAcceptsImages(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			m := llm.Model{
-				Provider:  llm.ProviderLMStudio,
-				APIFormat: llm.APIFormatOpenAI,
+			m := inference.Model{
+				Provider:  inference.ProviderName(llm.ProviderLMStudio),
+				APIFormat: inference.APIFormatOpenAI,
 				BaseURL:   "http://localhost:1234/v1",
 				Name:      "fake-model",
-				Caps:      llm.Capabilities{AcceptsImages: tt.want},
+				Caps:      inference.Capabilities{AcceptsImages: tt.want},
 			}
 			a, err := newSessionAgent(context.Background(), testPrimaryCfg(m, ""))
 			if err != nil {

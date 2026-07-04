@@ -2,21 +2,18 @@ package main
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/looprig/harness/pkg/persistence"
-	"github.com/looprig/harness/pkg/uuid"
-	"github.com/looprig/swe/swarms/swe"
+	"github.com/looprig/core/uuid"
+	"github.com/looprig/harness/pkg/sessionstore"
 )
 
-// TestParseFlags covers the SWE CLI flag parser: --list, --resume <uuid>, and the boundary
-// validation (an invalid/empty resume id fails at the boundary, not deep in the wiring;
-// --list and --resume are mutually exclusive). The swarm has no positional agent name (it
-// is a single swarm), so an unexpected positional arg is rejected.
+// TestParseFlags covers the SWE CLI flag parser: --list, --resume <uuid>, --runtime-skills,
+// --greeting, --data-dir, and the boundary validation (an invalid/empty resume id fails at the
+// boundary, not deep in the wiring; --list and --resume are mutually exclusive). The swarm has
+// no positional agent name (it is a single swarm), so an unexpected positional arg is rejected.
 func TestParseFlags(t *testing.T) {
 	t.Parallel()
 
@@ -31,6 +28,7 @@ func TestParseFlags(t *testing.T) {
 		wantResume        uuid.UUID
 		wantRuntimeSkills bool
 		wantGreeting      bool
+		wantDataDir       string
 		wantErr           bool
 	}{
 		{name: "no flags → new session", args: nil},
@@ -46,6 +44,11 @@ func TestParseFlags(t *testing.T) {
 		{name: "greeting flag", args: []string{"-greeting"}, wantGreeting: true},
 		{name: "greeting flag double dash", args: []string{"--greeting"}, wantGreeting: true},
 		{name: "greeting with resume", args: []string{"-greeting", "-resume", validID.String()}, wantResume: validID, wantGreeting: true},
+		{name: "data-dir default empty", args: nil, wantDataDir: ""},
+		{name: "data-dir flag", args: []string{"-data-dir", "/tmp/swe-store"}, wantDataDir: "/tmp/swe-store"},
+		{name: "data-dir double dash", args: []string{"--data-dir", "/tmp/swe-store"}, wantDataDir: "/tmp/swe-store"},
+		{name: "data-dir whitespace trimmed to empty", args: []string{"-data-dir", "   "}, wantDataDir: ""},
+		{name: "data-dir with resume", args: []string{"-data-dir", "/tmp/s", "-resume", validID.String()}, wantResume: validID, wantDataDir: "/tmp/s"},
 		{name: "invalid resume id rejected", args: []string{"-resume", "not-a-uuid"}, wantErr: true},
 		{name: "empty resume id rejected", args: []string{"-resume", ""}, wantErr: true},
 		{name: "list and resume are mutually exclusive", args: []string{"-list", "-resume", validID.String()}, wantErr: true},
@@ -73,6 +76,9 @@ func TestParseFlags(t *testing.T) {
 			}
 			if got.greeting != tt.wantGreeting {
 				t.Errorf("greeting = %v, want %v", got.greeting, tt.wantGreeting)
+			}
+			if got.dataDir != tt.wantDataDir {
+				t.Errorf("dataDir = %q, want %q", got.dataDir, tt.wantDataDir)
 			}
 		})
 	}
@@ -115,224 +121,84 @@ type errStub struct{}
 
 func (errStub) Error() string { return "stub" }
 
-// TestParseFlagsPurgeLegacy covers the destructive --purge-legacy-sessions flag: it parses
-// on its own but is mutually exclusive with --list and --resume (a list/resume-and-purge
-// request is ambiguous and must fail at the boundary).
-func TestParseFlagsPurgeLegacy(t *testing.T) {
+// TestPrintSessions proves the --list formatter renders each catalog row (id, status,
+// last-active, title) in the order given, shows "(untitled)" for a title-less session, and
+// prints a friendly note for an empty store. Ordering is the catalog's responsibility; the CLI
+// prints in the order it receives.
+func TestPrintSessions(t *testing.T) {
 	t.Parallel()
 
-	validID, err := uuid.New()
-	if err != nil {
-		t.Fatalf("uuid.New: %v", err)
-	}
+	newer := mustUUID(t)
+	older := mustUUID(t)
+	untitled := mustUUID(t)
+	now := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+
 	tests := []struct {
 		name      string
-		args      []string
-		wantPurge bool
-		wantErr   bool
+		metas     []sessionstore.SessionMeta
+		wantNote  string   // exact single-line note (empty store)
+		wantOrder []string // substrings that must appear, in this order
+		wantParts []string // substrings that must be present
 	}{
-		{name: "no purge by default", args: nil, wantPurge: false},
-		{name: "purge alone", args: []string{"-purge-legacy-sessions"}, wantPurge: true},
-		{name: "purge double dash", args: []string{"--purge-legacy-sessions"}, wantPurge: true},
-		{name: "purge with list rejected", args: []string{"-purge-legacy-sessions", "-list"}, wantErr: true},
-		{name: "purge with resume rejected", args: []string{"-purge-legacy-sessions", "-resume", validID.String()}, wantErr: true},
+		{
+			name:     "empty store prints a friendly note",
+			metas:    nil,
+			wantNote: "no sessions yet\n",
+		},
+		{
+			name: "rows render newest-first in the order given",
+			metas: []sessionstore.SessionMeta{
+				{SessionID: newer, Title: "newer work", Status: sessionstore.StatusActive, LastActiveAt: now},
+				{SessionID: older, Title: "older work", Status: sessionstore.StatusStopped, LastActiveAt: now.Add(-time.Hour)},
+			},
+			wantOrder: []string{newer.String(), older.String()},
+			wantParts: []string{"newer work", "older work", "active", "stopped", now.Format(time.RFC3339)},
+		},
+		{
+			name: "untitled session shows a placeholder",
+			metas: []sessionstore.SessionMeta{
+				{SessionID: untitled, Status: sessionstore.StatusActive, LastActiveAt: now},
+			},
+			wantParts: []string{untitled.String(), "(untitled)"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := parseFlags(tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parseFlags(%v) err = %v, wantErr %v", tt.args, err, tt.wantErr)
+			var buf bytes.Buffer
+			if err := printSessions(&buf, tt.metas); err != nil {
+				t.Fatalf("printSessions: %v", err)
 			}
-			if tt.wantErr {
-				return
+			out := buf.String()
+			if tt.wantNote != "" && out != tt.wantNote {
+				t.Fatalf("printSessions(empty) = %q, want %q", out, tt.wantNote)
 			}
-			if got.purgeLegacy != tt.wantPurge {
-				t.Errorf("purgeLegacy = %v, want %v", got.purgeLegacy, tt.wantPurge)
+			for _, part := range tt.wantParts {
+				if !strings.Contains(out, part) {
+					t.Errorf("output missing %q:\n%s", part, out)
+				}
+			}
+			prev := -1
+			for _, want := range tt.wantOrder {
+				i := strings.Index(out, want)
+				if i < 0 {
+					t.Fatalf("output missing ordered token %q:\n%s", want, out)
+				}
+				if i < prev {
+					t.Errorf("token %q out of order:\n%s", want, out)
+				}
+				prev = i
 			}
 		})
 	}
 }
 
-// seedSession writes a titled, active manifest for a fresh session under root and returns
-// its id, so the list tests have deterministic, sortable rows.
-func seedSession(t *testing.T, root *persistence.SessionStoreRoot, title string, now time.Time) uuid.UUID {
+// mustUUID mints a random UUID for a test row or fails the test.
+func mustUUID(t *testing.T) uuid.UUID {
 	t.Helper()
 	id, err := uuid.New()
 	if err != nil {
 		t.Fatalf("uuid.New: %v", err)
 	}
-	store, err := root.OpenSessionMeta(id)
-	if err != nil {
-		t.Fatalf("OpenSessionMeta: %v", err)
-	}
-	if _, err := store.Init(now); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	if _, err := store.SetTitle(title, persistence.TitleSourceGenerated, now); err != nil {
-		t.Fatalf("SetTitle: %v", err)
-	}
 	return id
-}
-
-// TestListSessionsOutput proves --list prints the filesystem manifests newest-updated first
-// and renders a missing/corrupt manifest as metadata-invalid — with no engine startup.
-func TestListSessionsOutput(t *testing.T) {
-	xdg := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", xdg)
-
-	root, err := persistence.OpenSessionStoreRoot()
-	if err != nil {
-		t.Fatalf("OpenSessionStoreRoot: %v", err)
-	}
-	older := seedSession(t, root, "older work", time.Now().Add(-time.Hour))
-	newer := seedSession(t, root, "newer work", time.Now())
-
-	missing, err := uuid.New()
-	if err != nil {
-		t.Fatalf("uuid.New: %v", err)
-	}
-	if _, err := root.CreateSessionDir(missing); err != nil {
-		t.Fatalf("CreateSessionDir(missing): %v", err)
-	}
-
-	factory, err := swe.NewSessionStoreFactory()
-	if err != nil {
-		t.Fatalf("NewSessionStoreFactory: %v", err)
-	}
-
-	var buf bytes.Buffer
-	if err := listSessions(factory, &buf); err != nil {
-		t.Fatalf("listSessions: %v", err)
-	}
-	out := buf.String()
-
-	// Newest-updated first.
-	iNewer := strings.Index(out, newer.String())
-	iOlder := strings.Index(out, older.String())
-	if iNewer < 0 || iOlder < 0 {
-		t.Fatalf("listing missing a session id:\n%s", out)
-	}
-	if iNewer > iOlder {
-		t.Errorf("newer session listed after older:\n%s", out)
-	}
-	// The missing manifest is rendered as metadata-invalid.
-	if !strings.Contains(out, missing.String()) || !strings.Contains(out, "metadata-invalid") {
-		t.Errorf("missing-manifest session not shown as metadata-invalid:\n%s", out)
-	}
-}
-
-// TestListSessionsEmpty proves an empty store prints a friendly note rather than nothing.
-func TestListSessionsEmpty(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	factory, err := swe.NewSessionStoreFactory()
-	if err != nil {
-		t.Fatalf("NewSessionStoreFactory: %v", err)
-	}
-	var buf bytes.Buffer
-	if err := listSessions(factory, &buf); err != nil {
-		t.Fatalf("listSessions: %v", err)
-	}
-	if !strings.Contains(buf.String(), "no sessions") {
-		t.Errorf("empty store output = %q, want a friendly note", buf.String())
-	}
-}
-
-// TestPurgeLegacyOutput covers the destructive purge: a present legacy store is removed and
-// its exact path printed, an absent store is a no-op with no path, and a symlinked legacy
-// path is refused (its target never followed).
-func TestPurgeLegacyOutput(t *testing.T) {
-	t.Run("removes legacy store and prints path", func(t *testing.T) {
-		xdg := t.TempDir()
-		t.Setenv("XDG_DATA_HOME", xdg)
-		legacy := filepath.Join(xdg, "looprig", "jetstream")
-		if err := os.MkdirAll(legacy, 0o700); err != nil {
-			t.Fatalf("seed legacy: %v", err)
-		}
-
-		factory, err := swe.NewSessionStoreFactory()
-		if err != nil {
-			t.Fatalf("NewSessionStoreFactory: %v", err)
-		}
-		var buf bytes.Buffer
-		if err := purgeLegacy(factory, &buf); err != nil {
-			t.Fatalf("purgeLegacy: %v", err)
-		}
-		if !strings.Contains(buf.String(), legacy) {
-			t.Errorf("output %q does not contain the removed path %q", buf.String(), legacy)
-		}
-		if _, err := os.Stat(legacy); !os.IsNotExist(err) {
-			t.Errorf("legacy store not removed: %v", err)
-		}
-	})
-
-	t.Run("absent store is a no-op without a path", func(t *testing.T) {
-		t.Setenv("XDG_DATA_HOME", t.TempDir())
-		factory, err := swe.NewSessionStoreFactory()
-		if err != nil {
-			t.Fatalf("NewSessionStoreFactory: %v", err)
-		}
-		var buf bytes.Buffer
-		if err := purgeLegacy(factory, &buf); err != nil {
-			t.Fatalf("purgeLegacy: %v", err)
-		}
-		if strings.Contains(buf.String(), string(filepath.Separator)+"jetstream") {
-			t.Errorf("printed a path for an absent legacy store: %q", buf.String())
-		}
-	})
-
-	t.Run("listing survives a legacy purge", func(t *testing.T) {
-		xdg := t.TempDir()
-		t.Setenv("XDG_DATA_HOME", xdg)
-		root, err := persistence.OpenSessionStoreRoot()
-		if err != nil {
-			t.Fatalf("OpenSessionStoreRoot: %v", err)
-		}
-		id := seedSession(t, root, "kept work", time.Now())
-		legacy := filepath.Join(xdg, "looprig", "jetstream")
-		if err := os.MkdirAll(legacy, 0o700); err != nil {
-			t.Fatalf("seed legacy: %v", err)
-		}
-
-		factory, err := swe.NewSessionStoreFactory()
-		if err != nil {
-			t.Fatalf("NewSessionStoreFactory: %v", err)
-		}
-		var pbuf bytes.Buffer
-		if err := purgeLegacy(factory, &pbuf); err != nil {
-			t.Fatalf("purgeLegacy: %v", err)
-		}
-		if _, err := os.Stat(legacy); !os.IsNotExist(err) {
-			t.Errorf("legacy store not removed: %v", err)
-		}
-
-		var lbuf bytes.Buffer
-		if err := listSessions(factory, &lbuf); err != nil {
-			t.Fatalf("listSessions after purge: %v", err)
-		}
-		if !strings.Contains(lbuf.String(), id.String()) {
-			t.Errorf("session missing from listing after purge:\n%s", lbuf.String())
-		}
-	})
-
-	t.Run("symlinked legacy path is refused", func(t *testing.T) {
-		xdg := t.TempDir()
-		t.Setenv("XDG_DATA_HOME", xdg)
-		appDir := filepath.Join(xdg, "looprig")
-		if err := os.MkdirAll(appDir, 0o700); err != nil {
-			t.Fatalf("seed app dir: %v", err)
-		}
-		if err := os.Symlink(t.TempDir(), filepath.Join(appDir, "jetstream")); err != nil {
-			t.Fatalf("Symlink: %v", err)
-		}
-
-		factory, err := swe.NewSessionStoreFactory()
-		if err != nil {
-			t.Fatalf("NewSessionStoreFactory: %v", err)
-		}
-		var buf bytes.Buffer
-		if err := purgeLegacy(factory, &buf); err == nil {
-			t.Fatal("purgeLegacy on a symlinked legacy path succeeded, want error")
-		}
-	})
 }

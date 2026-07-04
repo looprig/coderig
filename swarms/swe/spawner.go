@@ -4,12 +4,12 @@ import (
 	"context"
 	"strconv"
 
-	"github.com/looprig/harness/pkg/content"
+	"github.com/looprig/core/content"
 	"github.com/looprig/harness/pkg/identity"
-	"github.com/looprig/harness/pkg/llm"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/session"
 	"github.com/looprig/harness/pkg/tools"
+	"github.com/looprig/inference"
 )
 
 // subagentRunner is the ONE session method the spawner needs (interface segregation /
@@ -71,7 +71,7 @@ type swarmSpawner struct {
 	session    subagentRunner              // late-bound after the session is built (see bind)
 	registry   *Registry                   // authoritative spawnable leaf set
 	deps       LeafToolDeps                // per-spawn tool-construction deps (root + HTTP client)
-	client     llm.LLM                     // provider client shared with the parent (no per-loop client)
+	client     inference.Client            // provider client shared with the parent (no per-loop client)
 	factory    ModelFactory                // builds each leaf's model spec from its finished system prompt
 	describer  tools.SkillDescriber        // reads a leaf's allowed-skill metadata for the catalog
 	runtimeCtx loop.RuntimeContextProvider // volatile per-turn context (date/cwd/git) every leaf gets; shared with the primary operator
@@ -85,7 +85,7 @@ type swarmSpawner struct {
 // load. runtimeCtx is the swarm-wide RuntimeContextProvider (shared with the primary
 // operator) every spawned leaf's loop.Config carries, so leaves get the same volatile
 // per-turn context as the primary; nil leaves a leaf with runtime context OFF.
-func newSwarmSpawner(registry *Registry, deps LeafToolDeps, client llm.LLM, factory ModelFactory, describer tools.SkillDescriber, runtimeCtx loop.RuntimeContextProvider) *swarmSpawner {
+func newSwarmSpawner(registry *Registry, deps LeafToolDeps, client inference.Client, factory ModelFactory, describer tools.SkillDescriber, runtimeCtx loop.RuntimeContextProvider) *swarmSpawner {
 	return &swarmSpawner{registry: registry, deps: deps, client: client, factory: factory, describer: describer, runtimeCtx: runtimeCtx}
 }
 

@@ -4,11 +4,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/llm"
 )
 
 // TestModelFactoryYieldsSharedModel proves the ModelFactory yields the swarm's shared,
-// secret-free llm.Model identity (the package default) verbatim: same provider, API format,
+// secret-free inference.Model identity (the package default) verbatim: same provider, API format,
 // endpoint, and model name — and, being secret-free, no API key field to carry. Post-split
 // the factory takes no system prompt (each agent's prompt rides loop.Config.System) and no
 // key (the secret binds to the Client at auto.New).

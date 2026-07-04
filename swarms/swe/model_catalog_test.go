@@ -4,13 +4,13 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/inference"
 )
 
-// catalogModel builds a valid, secret-free Chutes llm.Model named name, for catalog tests.
+// catalogModel builds a valid, secret-free Chutes inference.Model named name, for catalog tests.
 // The connection secret is bound to the Client at auto.New, never on a catalog entry.
-func catalogModel(name string) llm.Model {
-	m := llm.ChutesKimiK2()
+func catalogModel(name string) inference.Model {
+	m := chutesKimiK26()
 	m.Name = name
 	return m
 }
@@ -36,12 +36,12 @@ func TestModelCatalogEmptyPreservesDefault(t *testing.T) {
 }
 
 // TestModelCatalogStandardChoosesFirst proves Standard selects its FIRST entry's identity,
-// and that the resolved value is a secret-free llm.Model (no API key field exists on it).
+// and that the resolved value is a secret-free inference.Model (no API key field exists on it).
 func TestModelCatalogStandardChoosesFirst(t *testing.T) {
 	t.Parallel()
 
 	r, err := newModelResolver(ModelCatalog{
-		Standard: []llm.Model{catalogModel("standard-first"), catalogModel("standard-second")},
+		Standard: []inference.Model{catalogModel("standard-first"), catalogModel("standard-second")},
 	})
 	if err != nil {
 		t.Fatalf("newModelResolver: %v", err)
@@ -65,7 +65,7 @@ func TestModelCatalogEconomyResolvesLazily(t *testing.T) {
 	t.Parallel()
 
 	r, err := newModelResolver(ModelCatalog{
-		Economy: []llm.Model{catalogModel("economy-first")},
+		Economy: []inference.Model{catalogModel("economy-first")},
 	})
 	if err != nil {
 		t.Fatalf("newModelResolver: %v", err)
@@ -88,7 +88,7 @@ func TestModelCatalogPremiumHasNoImplicitSelection(t *testing.T) {
 	t.Parallel()
 
 	r, err := newModelResolver(ModelCatalog{
-		Premium: []llm.Model{catalogModel("premium-first")},
+		Premium: []inference.Model{catalogModel("premium-first")},
 	})
 	if err != nil {
 		t.Fatalf("newModelResolver: %v", err)
@@ -117,26 +117,26 @@ func TestModelCatalogInvalidModelIsTyped(t *testing.T) {
 	}{
 		{
 			name:      "empty model name in standard",
-			catalog:   ModelCatalog{Standard: []llm.Model{catalogModel("ok"), catalogModel("")}},
+			catalog:   ModelCatalog{Standard: []inference.Model{catalogModel("ok"), catalogModel("")}},
 			wantTier:  TierStandard,
 			wantIndex: 1,
 		},
 		{
 			name: "unclassified provider in economy",
-			catalog: ModelCatalog{Economy: []llm.Model{func() llm.Model {
+			catalog: ModelCatalog{Economy: []inference.Model{func() inference.Model {
 				m := catalogModel("eco")
-				m.Provider = llm.Provider("bogus")
+				m.Provider = inference.ProviderName("bogus")
 				return m
 			}()}},
 			wantTier:  TierEconomy,
 			wantIndex: 0,
 		},
 		{
-			// A classified provider + non-empty name that still fails llm.Model.Validate for a
+			// A classified provider + non-empty name that still fails inference.Model.Validate for a
 			// NEW reason (a non-loopback http:// BaseURL is rejected — plaintext remote endpoint),
 			// proving validateCatalogModel wraps Validate failures, not just empty-name/unknown-provider.
 			name: "validate failure (non-loopback http BaseURL) in premium",
-			catalog: ModelCatalog{Premium: []llm.Model{func() llm.Model {
+			catalog: ModelCatalog{Premium: []inference.Model{func() inference.Model {
 				m := catalogModel("insecure")
 				m.BaseURL = "http://api.example.com"
 				return m

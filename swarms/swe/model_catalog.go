@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/looprig/harness/pkg/llm"
+	"github.com/looprig/inference"
+	"github.com/looprig/llm"
 )
 
 // ModelTier names an optional model-catalog tier in typed errors and logs.
@@ -28,17 +29,17 @@ var errEmptyModelName = errors.New("model name is empty")
 // mean "no override": an empty Standard preserves the swarm's existing default model, an
 // empty Economy disables title-model generation, and Premium is catalog-only in this change
 // (stored, never implicitly selected). Post-split each tier is a list of secret-free
-// llm.Model identities: the connection secret is bound to the Client at auto.New, not carried
+// inference.Model identities: the connection secret is bound to the Client at auto.New, not carried
 // on any catalog entry, so a resolved or logged model never holds an API key.
 type ModelCatalog struct {
-	Economy  []llm.Model
-	Standard []llm.Model
-	Premium  []llm.Model
+	Economy  []inference.Model
+	Standard []inference.Model
+	Premium  []inference.Model
 }
 
 // ModelCatalogError reports an invalid configured model found at construction. It carries the
 // tier, the index within that tier, and a sanitized, field-based reason. A secret-free
-// llm.Model carries no API key, so the error cannot expose one.
+// inference.Model carries no API key, so the error cannot expose one.
 type ModelCatalogError struct {
 	Tier   ModelTier
 	Index  int
@@ -58,16 +59,16 @@ func (e *ModelCatalogError) Unwrap() error { return e.Cause }
 
 // modelResolver is the narrow seam the swarm depends on to choose a model per use, instead
 // of threading the whole catalog through session logic. Its accessors return secret-free
-// llm.Model identities (the connection secret is bound to the Client at auto.New; each
+// inference.Model identities (the connection secret is bound to the Client at auto.New; each
 // agent's system prompt rides loop.Config.System), so a resolved or logged value never
 // carries an API key.
 type modelResolver interface {
 	// standardModel returns the identity for normal operator/subagent turns. ok is false
 	// when no Standard tier is configured (the caller uses the swarm's default model).
-	standardModel() (llm.Model, bool)
+	standardModel() (inference.Model, bool)
 	// economyModel returns the identity for best-effort title generation, resolved lazily by
 	// the title coordinator. ok is false when no Economy tier is configured.
-	economyModel() (llm.Model, bool)
+	economyModel() (inference.Model, bool)
 	// hasPremium reports whether a Premium tier is configured. Premium is catalog-only in this
 	// change: there is no implicit Premium selection.
 	hasPremium() bool
@@ -75,13 +76,13 @@ type modelResolver interface {
 
 // catalogResolver is the default modelResolver over a validated catalog.
 type catalogResolver struct {
-	standard *llm.Model
-	economy  *llm.Model
+	standard *inference.Model
+	economy  *inference.Model
 	premium  bool
 }
 
 // newModelResolver validates EVERY supplied model in every tier (a non-empty model name, a
-// classified provider, and a valid APIFormat/BaseURL per llm.Model.Validate) and returns a
+// classified provider, and a valid APIFormat/BaseURL per inference.Model.Validate) and returns a
 // resolver that selects the first entry of each tier. An empty catalog yields a resolver with
 // no overrides. The first invalid model returns a typed *ModelCatalogError naming the tier +
 // index.
@@ -104,22 +105,22 @@ func newModelResolver(catalog ModelCatalog) (modelResolver, error) {
 	return &catalogResolver{standard: standard, economy: economy, premium: premium != nil}, nil
 }
 
-func (r *catalogResolver) standardModel() (llm.Model, bool) { return derefModel(r.standard) }
-func (r *catalogResolver) economyModel() (llm.Model, bool)  { return derefModel(r.economy) }
-func (r *catalogResolver) hasPremium() bool                 { return r.premium }
+func (r *catalogResolver) standardModel() (inference.Model, bool) { return derefModel(r.standard) }
+func (r *catalogResolver) economyModel() (inference.Model, bool)  { return derefModel(r.economy) }
+func (r *catalogResolver) hasPremium() bool                       { return r.premium }
 
-func derefModel(m *llm.Model) (llm.Model, bool) {
+func derefModel(m *inference.Model) (inference.Model, bool) {
 	if m == nil {
-		return llm.Model{}, false
+		return inference.Model{}, false
 	}
 	return *m, true
 }
 
 // firstValidModel validates every model in tier (so a misconfiguration anywhere fails loud)
 // and returns a copy of the FIRST entry, or nil for an empty tier. The entries are already
-// secret-free llm.Model values (the connection secret binds to the Client at auto.New).
-func firstValidModel(tier ModelTier, models []llm.Model) (*llm.Model, error) {
-	var first *llm.Model
+// secret-free inference.Model values (the connection secret binds to the Client at auto.New).
+func firstValidModel(tier ModelTier, models []inference.Model) (*inference.Model, error) {
+	var first *inference.Model
 	for i, m := range models {
 		if err := validateCatalogModel(m); err != nil {
 			return nil, &ModelCatalogError{Tier: tier, Index: i, Reason: err.Error(), Cause: err}
@@ -132,16 +133,16 @@ func firstValidModel(tier ModelTier, models []llm.Model) (*llm.Model, error) {
 	return first, nil
 }
 
-// validateCatalogModel checks a configured model has a non-empty name, a classified provider
-// (RequiresKey resolves — fail secure on an unknown provider), and passes llm.Model.Validate
-// (provider supports the APIFormat, valid https / loopback-http BaseURL). The errors it
-// surfaces are field-based; a secret-free llm.Model carries no API key to leak.
-func validateCatalogModel(m llm.Model) error {
+// validateCatalogModel checks a configured model has a non-empty name and passes the
+// fail-closed llm.ValidateModel provider preset: a classified provider that speaks the
+// model's APIFormat over a structurally valid https / loopback-http BaseURL (fail secure
+// on an unknown provider or an unsupported provider/format pair). Provider policy now lives
+// in the llm module — the provider-neutral inference.Model.Validate is structural-only, so
+// llm.ValidateModel restores the pre-split fail-closed behavior. The errors it surfaces are
+// field-based; a secret-free inference.Model carries no API key to leak.
+func validateCatalogModel(m inference.Model) error {
 	if strings.TrimSpace(m.Name) == "" {
 		return errEmptyModelName
 	}
-	if _, err := m.Provider.RequiresKey(); err != nil {
-		return err // unclassified provider — fail secure
-	}
-	return m.Validate()
+	return llm.ValidateModel(m)
 }

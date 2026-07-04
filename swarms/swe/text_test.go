@@ -3,7 +3,7 @@ package swe
 import (
 	"testing"
 
-	"github.com/looprig/harness/pkg/content"
+	"github.com/looprig/core/content"
 )
 
 // TestAIMessageText proves the projection helper concatenates only text blocks,

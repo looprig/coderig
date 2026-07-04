@@ -10,15 +10,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/looprig/harness/pkg/content"
+	"github.com/looprig/core/content"
+	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/eval"
 	"github.com/looprig/harness/pkg/event"
-	"github.com/looprig/harness/pkg/llm"
-	"github.com/looprig/harness/pkg/llm/auth"
-	"github.com/looprig/harness/pkg/llm/auto"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/session"
-	"github.com/looprig/harness/pkg/uuid"
+	"github.com/looprig/inference"
+	"github.com/looprig/inference/auth"
+	"github.com/looprig/llm/auto"
 	"github.com/looprig/swe/agents/operator"
 )
 
@@ -84,12 +84,12 @@ func (r operatorRunner) Run(ctx context.Context, input string) (string, error) {
 	}
 }
 
-// modelCompleter adapts an llm.LLM to eval.Completer for the Judge metric. It holds the
+// modelCompleter adapts an inference.Client to eval.Completer for the Judge metric. It holds the
 // provider client, the secret-free model built from the judge factory, and the judge's system
-// prompt (post-split the system prompt rides llm.Request.System, not the model).
+// prompt (post-split the system prompt rides inference.Request.System, not the model).
 type modelCompleter struct {
-	client llm.LLM
-	model  llm.Model
+	client inference.Client
+	model  inference.Model
 	system string
 }
 
@@ -97,7 +97,7 @@ type modelCompleter struct {
 // text. The AgenticMessages construction mirrors the production turn builder in
 // internal/agent/loop/turn.go (a *content.UserMessage wrapping a content.Message
 // with Role: content.RoleUser and the prompt as a TextBlock), and
-// llm.Response.Message is a *content.AIMessage, so aiMessageText projects it.
+// inference.Response.Message is a *content.AIMessage, so aiMessageText projects it.
 func (m modelCompleter) Complete(ctx context.Context, prompt string) (string, error) {
 	msgs := content.AgenticMessages{
 		&content.UserMessage{Message: content.Message{
@@ -105,7 +105,7 @@ func (m modelCompleter) Complete(ctx context.Context, prompt string) (string, er
 			Blocks: []content.Block{&content.TextBlock{Text: prompt}},
 		}},
 	}
-	resp, err := m.client.Invoke(ctx, llm.Request{Model: m.model, System: m.system, Messages: msgs})
+	resp, err := m.client.Invoke(ctx, inference.Request{Model: m.model, System: m.system, Messages: msgs})
 	if err != nil {
 		return "", err
 	}
@@ -121,7 +121,7 @@ func (m modelCompleter) Complete(ctx context.Context, prompt string) (string, er
 // fragment — so the eval measures the operator's own investigate+implement craft in
 // isolation, not its delegation behaviour (the production primary built by
 // operatorPrimaryConfig additionally carries Subagent + the delegation guidance).
-func newOperatorPrimary(ctx context.Context, client llm.LLM, factory ModelFactory, root string) (*sessionAgent, error) {
+func newOperatorPrimary(ctx context.Context, client inference.Client, factory ModelFactory, root string) (*sessionAgent, error) {
 	toolSet, err := operator.BuildTools(root, newHTTPClient(), nil)
 	if err != nil {
 		return nil, err

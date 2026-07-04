@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/looprig/cli/tui"
-	"github.com/looprig/harness/pkg/content"
+	"github.com/looprig/core/content"
+	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/event"
 	"github.com/looprig/harness/pkg/identity"
-	"github.com/looprig/harness/pkg/llm"
 	"github.com/looprig/harness/pkg/session"
 	"github.com/looprig/harness/pkg/tool"
-	"github.com/looprig/harness/pkg/uuid"
+	"github.com/looprig/inference"
 	"github.com/looprig/swe/agents/operator"
 )
 
@@ -26,7 +26,7 @@ import (
 // through the same surface a TUI uses — Submit a user turn, observe the session event
 // stream, route gate decisions — proving the wired behaviour, not a unit in isolation.
 //
-// It uses the fake llm.LLM (no network, no key): a SCRIPTED fake that routes its reply
+// It uses the fake inference.Client (no network, no key): a SCRIPTED fake that routes its reply
 // by the requesting agent's system prompt (the primary operator vs a named leaf) so a
 // single shared client drives BOTH the primary turn (which emits a Subagent tool call)
 // and the spawned leaf turn (which completes) — the production wiring shares one client
@@ -61,7 +61,7 @@ const (
 	routeUnknown route = ""
 )
 
-// scriptedSwarmLLM is a controllable llm.LLM that drives the whole swarm tree from one
+// scriptedSwarmLLM is a controllable inference.Client that drives the whole swarm tree from one
 // client. Each Stream() call is classified to a route by the request's system prompt;
 // the route's next scripted reply (by per-route call index) is streamed. An unrouted
 // request, or a route that runs out of scripts, streams a single fail-loud text so a
@@ -93,7 +93,7 @@ func (c *scriptedSwarmLLM) script(r route, replies ...scriptedReply) {
 // Invoke is a stub (mirrors fakeLLM.Invoke).
 var errInvokeUnused = errors.New("scriptedSwarmLLM.Invoke not used")
 
-func (c *scriptedSwarmLLM) Invoke(context.Context, llm.Request) (*llm.Response, error) {
+func (c *scriptedSwarmLLM) Invoke(context.Context, inference.Request) (*inference.Response, error) {
 	return nil, errInvokeUnused
 }
 
@@ -117,7 +117,7 @@ func (c *scriptedSwarmLLM) classify(system string) route {
 	return routeUnknown
 }
 
-func (c *scriptedSwarmLLM) Stream(ctx context.Context, req llm.Request) (*llm.StreamReader[content.Chunk], error) {
+func (c *scriptedSwarmLLM) Stream(ctx context.Context, req inference.Request) (*inference.StreamReader[content.Chunk], error) {
 	c.mu.Lock()
 	r := c.classify(req.System)
 	i := c.calls[r]
@@ -144,7 +144,7 @@ func (c *scriptedSwarmLLM) Stream(ctx context.Context, req llm.Request) (*llm.St
 		}
 		return nil, io.EOF
 	}
-	return llm.NewStreamReader(next, nil), nil
+	return inference.NewStreamReader(next, nil), nil
 }
 
 // textReply scripts a single final-text turn (no tool call).

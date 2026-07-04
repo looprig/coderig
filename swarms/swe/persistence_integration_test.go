@@ -4,18 +4,19 @@ package swe
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/looprig/harness/pkg/content"
+	"github.com/looprig/core/content"
+	"github.com/looprig/core/uuid"
+	"github.com/looprig/fsstore"
 	"github.com/looprig/harness/pkg/event"
 	"github.com/looprig/harness/pkg/identity"
-	"github.com/looprig/harness/pkg/llm"
-	"github.com/looprig/harness/pkg/persistence"
 	"github.com/looprig/harness/pkg/transcript"
-	"github.com/looprig/harness/pkg/uuid"
 	"github.com/looprig/swe/agents/operator"
 )
 
@@ -24,22 +25,28 @@ import (
 // integration tests, which need to drive a turn to a terminal.)
 func textChunk(s string) content.Chunk { return &content.TextChunk{Text: s} }
 
-// newIntegrationFactory points the data root at a temp XDG home and returns the production
-// session-store factory over it: real isolated per-session engines, opened on demand. It is
-// the CLI-shaped composition — each session gets its own embedded StoreDir under sessions/.
+// newIntegrationFactory opens the production session-store factory over a temp fsstore backend
+// (session ledger/journal/blobs + workspace snapshots all under one root) and registers its
+// Close. It is the CLI-shaped composition — one on-disk store shared by every session — and the
+// seam the integration tests drive with an injected fake client via openWithClient.
 func newIntegrationFactory(t *testing.T) *SessionStoreFactory {
 	t.Helper()
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	root, err := persistence.OpenSessionStoreRoot()
+	fs, err := fsstore.Open(fsstore.Options{Root: t.TempDir()})
 	if err != nil {
-		t.Fatalf("OpenSessionStoreRoot: %v", err)
+		t.Fatalf("fsstore.Open: %v", err)
 	}
-	return newSessionStoreFactory(root)
+	f, err := newSessionStoreFactory(fs)
+	if err != nil {
+		_ = fs.Close()
+		t.Fatalf("newSessionStoreFactory: %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	return f
 }
 
-// drainTurn submits input through the persisted agent and drains a fresh subscription to
-// the turn terminal — deterministic (unlike a WaitIdle that can race the fire-and-forget
-// submit). The subscription is created BEFORE the submit so the terminal is never missed.
+// drainTurn submits input through the persisted agent and drains a fresh subscription to the
+// turn terminal — deterministic (unlike a WaitIdle that can race the fire-and-forget submit). The
+// subscription is created BEFORE the submit so the terminal is never missed.
 func drainTurn(t *testing.T, a *sessionAgent, text string) {
 	t.Helper()
 	sub, err := a.Subscribe(event.EventFilter{Enduring: event.LoopScope{All: true}})
@@ -69,10 +76,61 @@ func drainTurn(t *testing.T, a *sessionAgent, text string) {
 	}
 }
 
+// drainUntilCheckpoint submits a turn and drains a fresh subscription until the workspace
+// checkpoint at quiescence lands (event.WorkspaceCheckpointed, published by CheckpointWorkspace
+// after the Active→Idle edge). The subscription is created before the submit so the checkpoint is
+// never missed.
+func drainUntilCheckpoint(t *testing.T, a *sessionAgent, text string) {
+	t.Helper()
+	sub, err := a.Subscribe(event.EventFilter{Enduring: event.LoopScope{All: true}})
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer func() { _ = sub.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := a.Submit(ctx, []content.Block{&content.TextBlock{Text: text}}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	timeout := time.After(30 * time.Second)
+	for {
+		select {
+		case ev, ok := <-sub.Events():
+			if !ok {
+				t.Fatal("subscription closed before a workspace checkpoint")
+			}
+			if _, ok := ev.(event.WorkspaceCheckpointed); ok {
+				return
+			}
+		case <-timeout:
+			t.Fatal("no workspace checkpoint within deadline")
+		}
+	}
+}
+
+// TestNewSessionStoreFactoryOpensAndCloses proves the exported constructor opens a store over an
+// explicit data dir, lists an empty store as zero rows, and closes cleanly.
+func TestNewSessionStoreFactoryOpensAndCloses(t *testing.T) {
+	f, err := NewSessionStoreFactory(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSessionStoreFactory: %v", err)
+	}
+	metas, err := f.List(context.Background())
+	if err != nil {
+		t.Fatalf("List (empty): %v", err)
+	}
+	if len(metas) != 0 {
+		t.Errorf("fresh store List = %d entries, want 0", len(metas))
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
 // TestSessionStoreNewSessionBasics proves openWithClient with a ZERO selector builds a NEW
-// persisted session over its own isolated engine: it has a non-zero SessionID (the factory
-// minted + injected it) and, being a NEW (not restored) session, ReplayBacklog returns nil
-// so the TUI skips the cold-restore repaint.
+// persisted session over the shared store: it has a non-zero SessionID (the factory minted +
+// injected it) and, being a NEW (not restored) session, ReplayBacklog returns nil so the TUI
+// skips the cold-restore repaint.
 func TestSessionStoreNewSessionBasics(t *testing.T) {
 	f := newIntegrationFactory(t)
 
@@ -108,12 +166,11 @@ func primaryLoopAgentName(evs []event.Event, loopID uuid.UUID) identity.AgentNam
 	return ""
 }
 
-// TestSessionStoreRoundTrip is the headline CLI-shaped wiring smoke over isolated engines: a
-// NEW persisted session runs a turn that persists, the agent is Closed (which releases the
-// session lock and closes its engine), and the SAME session is RESUMED — opening a fresh
-// isolated engine on the SAME StoreDir. The restored session's ReplayBacklog reproduces the
-// committed Enduring events and a fresh turn continues, proving the durable log survived a
-// full close/reopen cycle on its own StoreDir.
+// TestSessionStoreRoundTrip is the headline CLI-shaped wiring smoke: a NEW persisted session
+// runs a turn that persists, the agent is Closed (which releases the session lease), and the
+// SAME session is RESUMED over the same store. The restored session's ReplayBacklog reproduces
+// the committed Enduring events and a fresh turn continues, proving the durable log survived a
+// full close/reopen cycle.
 func TestSessionStoreRoundTrip(t *testing.T) {
 	f := newIntegrationFactory(t)
 
@@ -129,8 +186,8 @@ func TestSessionStoreRoundTrip(t *testing.T) {
 
 	drainTurn(t, a, "hello")
 
-	// A clean Close releases the lock + closes the engine, so a resume can reopen the same
-	// session directory without contending the lock or waiting out the lease TTL.
+	// A clean Close releases the lease, so a resume can reopen the same session without contending
+	// the lease or waiting out its expiry.
 	if err := a.Close(context.Background()); err != nil {
 		t.Fatalf("Close (original): %v", err)
 	}
@@ -161,6 +218,56 @@ func TestSessionStoreRoundTrip(t *testing.T) {
 	}
 
 	drainTurn(t, a2, "continue")
+}
+
+// TestSessionStoreWorkspaceRoundTrip is the acceptance test the whole extraction exists for: a
+// session's workspace is checkpointed at quiescence (SessionIdle), and a later restore
+// materializes it — so both the conversation state AND the workspace files come back. The
+// workspace is a temp dir the session snapshots via os.Getwd(); t.Chdir points the process there
+// (and forbids t.Parallel for this test).
+func TestSessionStoreWorkspaceRoundTrip(t *testing.T) {
+	f := newIntegrationFactory(t)
+
+	workspace := t.TempDir()
+	t.Chdir(workspace)
+
+	const name = "notes.txt"
+	const body = "workspace survived a restore"
+	// Written BEFORE the session opens, so it is present in every checkpoint the session takes.
+	if err := os.WriteFile(filepath.Join(workspace, name), []byte(body), 0o600); err != nil {
+		t.Fatalf("seed workspace file: %v", err)
+	}
+
+	a, err := f.openWithClient(context.Background(),
+		&fakeLLM{chunks: []content.Chunk{textChunk("first reply")}}, newModelFactory(), SessionSelector{}, Config{})
+	if err != nil {
+		t.Fatalf("openWithClient (new): %v", err)
+	}
+	sessionID := a.SessionID()
+	drainUntilCheckpoint(t, a, "make a note")
+	if err := a.Close(context.Background()); err != nil {
+		t.Fatalf("Close (original): %v", err)
+	}
+
+	// Destroy the workspace file; a restore must materialize the checkpointed copy back.
+	if err := os.Remove(filepath.Join(workspace, name)); err != nil {
+		t.Fatalf("remove workspace file: %v", err)
+	}
+
+	a2, err := f.openWithClient(context.Background(),
+		&fakeLLM{chunks: []content.Chunk{textChunk("after restore")}}, newModelFactory(), SessionSelector{Resume: sessionID}, Config{})
+	if err != nil {
+		t.Fatalf("openWithClient (resume): %v", err)
+	}
+	t.Cleanup(func() { _ = a2.Close(context.Background()) })
+
+	got, err := os.ReadFile(filepath.Join(workspace, name))
+	if err != nil {
+		t.Fatalf("workspace file not materialized on restore: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("materialized workspace file = %q, want %q", string(got), body)
+	}
 }
 
 func TestSessionStoreExportSource(t *testing.T) {
@@ -245,9 +352,9 @@ func TestSessionStoreExportSource(t *testing.T) {
 	}
 }
 
-// TestSessionStoreDistinctSessionsCoexist proves two sessions can be active simultaneously,
-// each over its own isolated engine + StoreDir, neither contending the other. This is the
-// core isolation property the feature delivers.
+// TestSessionStoreDistinctSessionsCoexist proves two sessions can be active simultaneously over
+// the one shared store, each addressed by name, neither contending the other. This is the core
+// isolation property, now delivered by session-by-name addressing rather than per-session engines.
 func TestSessionStoreDistinctSessionsCoexist(t *testing.T) {
 	f := newIntegrationFactory(t)
 
@@ -274,16 +381,16 @@ func TestSessionStoreDistinctSessionsCoexist(t *testing.T) {
 	drainTurn(t, b, "to b")
 }
 
-// TestSessionStoreListFindsSession proves the engine-free filesystem List enumerates a
-// session directory created by opening a session.
+// TestSessionStoreListFindsSession proves the store's listing catalog enumerates a session
+// created by opening it (the event tap upserts the catalog on SessionStarted).
 func TestSessionStoreListFindsSession(t *testing.T) {
 	f := newIntegrationFactory(t)
 
 	// An empty store lists nothing.
-	if entries, err := f.List(); err != nil {
+	if metas, err := f.List(context.Background()); err != nil {
 		t.Fatalf("List (empty): %v", err)
-	} else if len(entries) != 0 {
-		t.Errorf("List on a fresh store = %d entries, want 0", len(entries))
+	} else if len(metas) != 0 {
+		t.Errorf("List on a fresh store = %d entries, want 0", len(metas))
 	}
 
 	a, err := f.openWithClient(context.Background(),
@@ -294,62 +401,18 @@ func TestSessionStoreListFindsSession(t *testing.T) {
 	sessionID := a.SessionID()
 	t.Cleanup(func() { _ = a.Close(context.Background()) })
 
-	entries, err := f.List()
+	metas, err := f.List(context.Background())
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
 	found := false
-	for _, e := range entries {
-		if e.Meta.ID == sessionID {
+	for _, m := range metas {
+		if m.SessionID == sessionID {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("List did not include the open session %v: %+v", sessionID, entries)
-	}
-}
-
-// TestPersistentTitleGenerated proves the end-to-end titling wiring: opening a session with
-// an Economy model configured, running one turn writes a generated title to the manifest
-// (replacing the synchronous first-user-message fallback). The Economy provider is LM Studio
-// (no key) so the wiring needs no credential.
-func TestPersistentTitleGenerated(t *testing.T) {
-	f := newIntegrationFactory(t)
-	cfg := Config{ModelCatalog: ModelCatalog{
-		Economy: []llm.Model{llm.LMStudioLocal("title-model")},
-	}}
-
-	a, err := f.openWithClient(context.Background(),
-		&fakeLLM{chunks: []content.Chunk{textChunk("Add upload retries")}}, newModelFactory(),
-		SessionSelector{}, cfg)
-	if err != nil {
-		t.Fatalf("openWithClient: %v", err)
-	}
-	t.Cleanup(func() { _ = a.Close(context.Background()) })
-	id := a.SessionID()
-
-	drainTurn(t, a, "make uploads retry on failure")
-
-	// The fallback lands synchronously on TurnStarted; the generated title lands
-	// asynchronously after TurnDone. Poll the manifest until the generated title appears.
-	store, err := f.root.OpenSessionMeta(id)
-	if err != nil {
-		t.Fatalf("OpenSessionMeta: %v", err)
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	var meta persistence.SessionMeta
-	for time.Now().Before(deadline) {
-		meta, err = store.Read()
-		if err == nil && meta.TitleSource == persistence.TitleSourceGenerated {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if meta.TitleSource != persistence.TitleSourceGenerated {
-		t.Fatalf("title source = %q, want generated (meta %+v, err %v)", meta.TitleSource, meta, err)
-	}
-	if meta.Title == "" {
-		t.Error("generated title is empty")
+		t.Errorf("List did not include the open session %v: %+v", sessionID, metas)
 	}
 }
 

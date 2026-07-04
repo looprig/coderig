@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/looprig/cli/tui"
-	"github.com/looprig/harness/pkg/llm"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/session"
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/harness/pkg/tools"
+	"github.com/looprig/inference"
 	"github.com/looprig/swe/agents/operator"
 )
 
@@ -158,7 +158,7 @@ func toolCatalog(reg *Registry) []tools.SubagentCatalogEntry {
 // = OFF); the SAME provider is shared with the spawner so leaves get identical runtime
 // context. describer + skill are the SAME code-style loader/Skill tool the operator leaf
 // gets, so the primary's skill catalog and the leaf's cannot drift.
-func operatorPrimaryConfig(client llm.LLM, factory ModelFactory, deps LeafToolDeps, spawner *swarmSpawner, catalog []tools.SubagentCatalogEntry, rc loop.RuntimeContextProvider, describer tools.SkillDescriber, skill tool.InvokableTool) (loop.Config, error) {
+func operatorPrimaryConfig(client inference.Client, factory ModelFactory, deps LeafToolDeps, spawner *swarmSpawner, catalog []tools.SubagentCatalogEntry, rc loop.RuntimeContextProvider, describer tools.SkillDescriber, skill tool.InvokableTool) (loop.Config, error) {
 	system := Identity + operator.Role + operatorDelegation +
 		availableSkillsCatalog(context.Background(), describer, operator.Name, operatorSkills)
 	toolSet, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, spawner, catalog, skill)
@@ -228,7 +228,7 @@ func operatorBuiltin() leafBuiltin {
 // leaf's Skill tool is workspace-enabled when the mode is on. The workspace root the Skill
 // tool reads is the SAME root the file tools use (LeafToolDeps.Root). The caller builds the
 // session from wiring.cfg and then calls wiring.spawner.bind(session) once.
-func buildOperatorWiring(client llm.LLM, factory ModelFactory, root string, cfg Config) (operatorWiring, error) {
+func buildOperatorWiring(client inference.Client, factory ModelFactory, root string, cfg Config) (operatorWiring, error) {
 	deps := LeafToolDeps{Root: root, HTTPCl: newHTTPClient()}
 	registry, loader, err := leafRegistry(deps, cfg)
 	if err != nil {
@@ -272,14 +272,14 @@ func New(ctx context.Context, cfg Config) (tui.Agent, error) {
 }
 
 // newWithClient is the construction seam shared by New and tests; tests inject a
-// fake llm.LLM + a key-bound ModelFactory here, avoiding real environment reads and
+// fake inference.Client + a key-bound ModelFactory here, avoiding real environment reads and
 // network calls. It resolves the workspace root (fail-fast on os.Getwd error), builds
 // the operator wiring (leaf registry + unbound spawner + primary cfg with Subagent
 // wired) under cfg (the human-set modes), starts the session under the spawn caps via
 // newSessionAgent (which owns the agent-rooted lifetime), then binds the live session
 // onto the spawner BEFORE returning (no turn can run before bind, so the Subagent tool
 // always sees a live session). ctx bounds only this construction call.
-func newWithClient(ctx context.Context, client llm.LLM, factory ModelFactory, cfg Config) (*sessionAgent, error) {
+func newWithClient(ctx context.Context, client inference.Client, factory ModelFactory, cfg Config) (*sessionAgent, error) {
 	// The workspace root is the process working directory: file tools are confined
 	// to it and the PermissionChecker uses it for containment + path relativisation.
 	root, err := os.Getwd()

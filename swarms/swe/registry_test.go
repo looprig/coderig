@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/looprig/harness/pkg/identity"
-	"github.com/looprig/harness/pkg/llm"
 	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/inference"
 )
 
 // stubAgent builds a minimal Agent with a no-op BuildTools so the table rows are terse.
@@ -238,7 +238,7 @@ func TestCatalogIsACopy(t *testing.T) {
 }
 
 // ModelFactory is a plain func type; this compile-time assertion documents its shape:
-// it yields the swarm's shared, secret-free llm.Model identity (no system, no secret).
-var _ ModelFactory = func() llm.Model {
-	return llm.Model{}
+// it yields the swarm's shared, secret-free inference.Model identity (no system, no secret).
+var _ ModelFactory = func() inference.Model {
+	return inference.Model{}
 }

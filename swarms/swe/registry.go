@@ -11,8 +11,8 @@ import (
 	"strconv"
 
 	"github.com/looprig/harness/pkg/identity"
-	"github.com/looprig/harness/pkg/llm"
 	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/inference"
 )
 
 // Agent is what an agent PACKAGE exposes. It owns its role prompt + toolset
@@ -79,11 +79,11 @@ type Config struct {
 	ModelCatalog ModelCatalog
 }
 
-// ModelFactory yields the swarm's shared, secret-free llm.Model identity (provider/
+// ModelFactory yields the swarm's shared, secret-free inference.Model identity (provider/
 // endpoint/model/sampling). Post-split it carries NO secret and NO system prompt: the
 // connection secret is bound to the Client once at auto.New, and each agent's finished
-// system prompt is set on loop.Config.System (and llm.Request.System), never on the model.
-type ModelFactory func() llm.Model
+// system prompt is set on loop.Config.System (and inference.Request.System), never on the model.
+type ModelFactory func() inference.Model
 
 // AgentCatalogEntry is the public, lookup-free view of an agent: just the name
 // and one-line description used to render the Subagent catalog and greeting.

@@ -24,6 +24,25 @@ func (e *WorkspaceRootError) Error() string {
 
 func (e *WorkspaceRootError) Unwrap() error { return e.Cause }
 
+// StoreInitError is returned by NewSessionStoreFactory when the on-disk session store cannot
+// be opened. Stage names which layer failed (the fsstore backend, the sessionstore facade, or
+// the workspace store) so the composition root can report a precise, actionable failure;
+// Cause carries the underlying error. Persistence is the whole point of the CLI, so a store it
+// cannot open fails loud at startup. It is errors.As-recoverable.
+type StoreInitError struct {
+	Stage string
+	Cause error
+}
+
+func (e *StoreInitError) Error() string {
+	if e.Cause == nil {
+		return "swe: cannot open session store (" + e.Stage + ")"
+	}
+	return "swe: cannot open session store (" + e.Stage + "): " + e.Cause.Error()
+}
+
+func (e *StoreInitError) Unwrap() error { return e.Cause }
+
 // PrimaryToolSetError is returned during construction when the primary operator's
 // fail-secure PermissionChecker cannot be built — currently only when $HOME is unresolvable
 // while a home-relative ("~/…") deny pattern is configured. It wraps the underlying cause

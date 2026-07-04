@@ -6,16 +6,16 @@ import (
 	"io"
 	"sync"
 
-	"github.com/looprig/harness/pkg/content"
+	"github.com/looprig/core/content"
+	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/event"
 	"github.com/looprig/harness/pkg/journal"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/session"
+	"github.com/looprig/harness/pkg/sessionstore"
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/harness/pkg/transcript"
 	"github.com/looprig/harness/pkg/transcript/journalsource"
-	"github.com/looprig/harness/pkg/uuid"
-	"github.com/nats-io/nats.go"
 )
 
 // sessionAgent is a thin wrapper over a session.Session that exposes the tui.Agent
@@ -113,12 +113,12 @@ func newPersistentSessionAgent(ctx context.Context, primary loop.Config, opts ..
 // single-writer lease internally and installs its own lease-release-on-Shutdown hook. The
 // caller (persistence.go) wires the replayer + restored ids + GC teardown after this
 // returns so ReplayBacklog can repaint the restored transcript.
-func newRestoredSessionAgent(ctx context.Context, primary loop.Config, sessionID uuid.UUID, js nats.JetStreamContext, objects nats.ObjectStore, leases *journal.LeaseManager, opts ...session.Option) (*sessionAgent, error) {
+func newRestoredSessionAgent(ctx context.Context, primary loop.Config, sessionID uuid.UUID, store *sessionstore.Store, opts ...session.Option) (*sessionAgent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, &session.SessionError{Kind: session.SessionContextDone, Cause: err}
 	}
 	rootCtx, cancel := context.WithCancel(context.Background())
-	sess, err := session.Restore(rootCtx, primary, sessionID, js, objects, leases, opts...)
+	sess, err := session.Restore(rootCtx, primary, sessionID, store, opts...)
 	if err != nil {
 		cancel()
 		return nil, err
