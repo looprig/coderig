@@ -26,21 +26,12 @@ func TestCatalogModelsAreValid(t *testing.T) {
 		wantCaps  inference.Capabilities
 	}{
 		{
-			name:      "chutes kimi k2.6",
+			name:      "chutes kimi k2.6 (default)",
 			got:       chutesKimiK26(),
 			provider:  llm.ProviderChutes,
 			apiFormat: inference.APIFormatOpenAI,
 			baseURL:   "https://api.chutes.ai",
 			modelID:   "moonshotai/Kimi-K2.6-TEE",
-			wantCaps:  inference.Capabilities{MaxContext: 128_000, Tools: true, Thinking: true},
-		},
-		{
-			name:      "chutes kimi k2.7 (default)",
-			got:       chutesKimiK27(),
-			provider:  llm.ProviderChutes,
-			apiFormat: inference.APIFormatOpenAI,
-			baseURL:   "https://api.chutes.ai",
-			modelID:   "moonshotai/Kimi-K2.7-TEE",
 			wantCaps:  inference.Capabilities{MaxContext: 128_000, Tools: true, Thinking: true},
 		},
 		{
@@ -87,13 +78,13 @@ func TestCatalogModelsAreValid(t *testing.T) {
 	}
 }
 
-// TestDefaultModelIsKimiK27 proves the package default the whole swarm runs on is Chutes
-// Kimi K2.7 — the model swap this migration makes.
-func TestDefaultModelIsKimiK27(t *testing.T) {
+// TestDefaultModelIsKimiK26 proves the package default the whole swarm runs on is Chutes
+// Kimi K2.6 — the newest Kimi Chutes serves.
+func TestDefaultModelIsKimiK26(t *testing.T) {
 	t.Parallel()
 
-	if model.Name != "moonshotai/Kimi-K2.7-TEE" {
-		t.Errorf("default model = %q, want the Chutes Kimi K2.7 id %q", model.Name, "moonshotai/Kimi-K2.7-TEE")
+	if model.Name != "moonshotai/Kimi-K2.6-TEE" {
+		t.Errorf("default model = %q, want the Chutes Kimi K2.6 id %q", model.Name, "moonshotai/Kimi-K2.6-TEE")
 	}
 	if model.Provider != inference.ProviderName(llm.ProviderChutes) {
 		t.Errorf("default model provider = %q, want %q", model.Provider, llm.ProviderChutes)

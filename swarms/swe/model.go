@@ -11,12 +11,12 @@ import (
 )
 
 // model is the named model every agent in the SWE-Swarm runs on: the swarm's local
-// catalogue default, Chutes Kimi K2.7 (a strong agentic-coding model served over
-// Chutes' TEE tunnel, text-only). Swapping models is a one-line change here.
-// chutesKimiK27 validates the row via llm.ValidateModel at construction, so a
-// malformed default fails loud at package init. Read-only after init: do not reassign
+// catalogue default, Chutes Kimi K2.6 (the newest Kimi Chutes serves, a strong
+// agentic-coding model over the TEE tunnel, text-only). Swapping models is a one-line
+// change here. chutesKimiK26 validates the row via llm.ValidateModel at construction, so
+// a malformed default fails loud at package init. Read-only after init: do not reassign
 // or mutate it — the parallel fake-client tests read it concurrently.
-var model = chutesKimiK27()
+var model = chutesKimiK26()
 
 // envAPIKey is the only value read from the environment. The value is the NAME of
 // an env var, not a secret; the #nosec annotation documents that gosec's G101
