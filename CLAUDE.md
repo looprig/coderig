@@ -124,8 +124,13 @@ srv := &http.Server{
 > features (pipes, globs, `&&`, redirects) an argv list can't express. The security boundary is the
 > **permission gate**, not the argv shape: `Bash` defaults to **Ask**, so a human reads and approves
 > each command before it runs. The real hard boundary — OS-level sandboxing (seccomp/landlock/nsjail)
-> — is **out of scope** in looprig and is the prerequisite for ever auto-approving `Bash` broadly;
-> until then `Bash` must stay human-gated.
+> — is **realized** in `github.com/looprig/sandbox` (v0.1.0; Seatbelt on macOS, a namespaces +
+> Landlock + seccomp + nftables + cgroup ladder on Linux). swe is the only module that imports BOTH
+> harness and sandbox: it wires a per-leaf `sandbox.Executor` into each toolset's Bash/Grep runner and
+> the matching gate posture (`swarms/swe/security.go`). Broad `Bash` auto-approval is unlocked per
+> leaf only when the wired sandbox's `GuaranteeBits()` satisfy that posture's required mask
+> (`RequiredGuarantees`); otherwise `Bash` falls back to Ask (fail-closed). `min(role, session ceiling)`
+> clamps the effective mode.
 
 **File paths** — Always call `filepath.Clean` and verify the result stays within the expected root before opening files from user-supplied paths.
 
