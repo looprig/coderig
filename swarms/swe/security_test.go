@@ -1,6 +1,7 @@
 package swe
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/looprig/harness/pkg/ceiling"
@@ -42,11 +43,31 @@ var (
 	_ sandbox.ModeSource = ceilingModeSource{}
 )
 
+// osEnforcementProven reports whether a runner's Level indicates a REAL OS backend is
+// enforcing — i.e. whether the OS-enforcement guarantee assertions (WriteBoundary /
+// ReadDenies) are meaningful. A LevelNone runner is the null backend, OR a platform
+// without an OS backend yet: on Linux the sandbox returns the NULL backend until
+// Phase-3 Landlock lands, so a real Write executor there reports only EnvScrub +
+// LevelNone. When this returns false the OS-enforcement assertions must be SKIPPED,
+// not failed. It is a pure decision so the null/Linux path can be exercised
+// deterministically on any host (the null-backend constructor is unexported, so a null
+// executor cannot be built from this package).
+func osEnforcementProven(level uint8) bool {
+	return level != sandbox.LevelNone
+}
+
 // TestExecutorProbePathEndToEnd builds a REAL *sandbox.Executor and confirms the
 // GuaranteeBits()/Level() probe path works end-to-end — i.e. it returns real
 // enforcement data, not the silent 0 the fail-closed interlock treats as "no
-// guarantees". The compile-time block above proves the SIGNATURES match; this
-// proves the wired methods actually report.
+// guarantees". The compile-time block above proves the SIGNATURES match; this proves
+// the wired methods actually report.
+//
+// PORTABLE: the EnvScrub bit is executor-side and holds on EVERY backend (including
+// null), so it is asserted unconditionally. The OS-enforcement mask (WriteBoundary |
+// ReadDenies) is backend-dependent — enforced by darwin's Seatbelt backend, but NOT
+// by the null backend Linux uses until Phase-3 Landlock — so those assertions are
+// gated behind osEnforcementProven(Level()) and SKIPPED (not failed) on the
+// null/Linux path. TestOSEnforcementGate proves that gate deterministically.
 func TestExecutorProbePathEndToEnd(t *testing.T) {
 	t.Parallel()
 
@@ -59,22 +80,55 @@ func TestExecutorProbePathEndToEnd(t *testing.T) {
 	}
 
 	bits := ex.GuaranteeBits()
+	// Portable floor: the probe path must return REAL bits, never the silent 0.
 	if bits == 0 {
 		t.Fatal("GuaranteeBits() = 0: probe path returns no guarantees (silent-0 failure mode)")
 	}
 	// EnvScrub is enforced for Write on every backend (even the null backend), so a
-	// real Write executor must report it — the portable floor of the probe path.
+	// real Write executor must report it on any platform.
 	if bits&sandbox.GuaranteeEnvScrub == 0 {
 		t.Errorf("GuaranteeBits() = %#b, missing GuaranteeEnvScrub", bits)
 	}
-	// The host platform (darwin/linux) must actually enforce the write-mode bash
-	// interlock mask, otherwise write-mode Bash auto-approve could never fire.
+
+	// OS-enforcement guarantees are backend-dependent: skip (do not fail) when no OS
+	// backend is enforcing (null backend / Linux pre-Landlock).
+	lvl := ex.Level()
+	if !osEnforcementProven(lvl) {
+		t.Logf("Level() = LevelNone on %s: no OS backend enforcing yet (null backend) — skipping OS-enforcement assertions", runtime.GOOS)
+		return
+	}
+
+	// Real backend (e.g. darwin Seatbelt): the write-mode bash interlock mask must be
+	// enforced, otherwise write-mode Bash auto-approve could never fire.
 	if bits&writeBashGuarantees != writeBashGuarantees {
 		t.Errorf("GuaranteeBits() = %#b, does not satisfy writeBashGuarantees %#b", bits, writeBashGuarantees)
 	}
+}
 
-	if lvl := ex.Level(); lvl == sandbox.LevelNone {
-		t.Errorf("Level() = LevelNone: a real Write executor should report a non-none isolation level")
+// TestOSEnforcementGate proves the probe test's gate: a LevelNone runner (the null
+// backend / Linux pre-Landlock) SKIPS the OS-enforcement assertions, while any real
+// backend level exercises them. This makes the null/Linux path deterministic on any
+// host without constructing a null executor (its constructor is unexported).
+func TestOSEnforcementGate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		level uint8
+		want  bool
+	}{
+		{name: "null backend / linux pre-landlock -> skip", level: sandbox.LevelNone, want: false},
+		{name: "degraded real backend -> prove", level: sandbox.LevelDegraded, want: true},
+		{name: "full seatbelt -> prove", level: sandbox.LevelFull, want: true},
+		{name: "external -> prove", level: sandbox.LevelExternal, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := osEnforcementProven(tt.level); got != tt.want {
+				t.Errorf("osEnforcementProven(%d) = %v, want %v", tt.level, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -197,6 +251,18 @@ func TestCeilingModeSourceMapsOrdinalToMode(t *testing.T) {
 				t.Errorf("Current() = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCeilingModeSourceNilSourceFailsClosed asserts a nil source resolves to the
+// most-restrictive mode (ZeroTrust) rather than panicking on the nil deref —
+// mirroring the harness ceilingPostures nil/out-of-range clamp to table[0].
+func TestCeilingModeSourceNilSourceFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	m := ceilingModeSource{src: nil}
+	if got := m.Current(); got != sandbox.ZeroTrust {
+		t.Errorf("Current() with nil src = %d, want ZeroTrust (%d)", got, sandbox.ZeroTrust)
 	}
 }
 

@@ -49,9 +49,17 @@ type ceilingModeSource struct {
 // sandbox dynamic executor, mirroring the checker's per-Check read, so a ceiling
 // downgrade takes effect on the very next command.
 //
+// FAIL-CLOSED: a nil src resolves to sandbox.Mode(0) (ZeroTrust, the most
+// restrictive mode) rather than panicking on the nil deref — mirroring the harness
+// ceilingPostures side, which clamps a nil/out-of-range source to table[0] (the most
+// restrictive posture). Consistent with the module's fail-secure ethos.
+//
 // CONCURRENCY: src.Current() is a lock-free atomic load (ceiling.State) — cheap and
 // safe to call from the executor's compile path.
 func (m ceilingModeSource) Current() sandbox.Mode {
+	if m.src == nil {
+		return sandbox.Mode(0) // fail closed to ZeroTrust; never nil-deref.
+	}
 	return sandbox.Mode(m.src.Current())
 }
 
@@ -150,9 +158,17 @@ func postureTable() []tools.Posture {
 
 // trivialBashPrefixes is the conservative interim allowlist backing the write-mode
 // "trivial auto, rest ask" slot (SPEC §4 write row; Phase-0 decision §13.2 —
-// "extend the existing HardApproveRules prefix rules"). Every entry is a plainly
-// read-only, side-effect-free command prefix. It is deliberately SMALL: a command that
-// is not provably trivial falls to Ask, which is fail-safe.
+// "extend the existing HardApproveRules prefix rules"). Every entry is a trivial
+// command whose side effects are CONTAINED by the write-mode boundary — NOT
+// unconditionally side-effect-free. `git diff` is the sharp case: `--output=FILE`
+// writes and `diff.external`/`GIT_EXTERNAL_DIFF` can exec, but a `--output` outside
+// the workspace is blocked by write-mode `WriteBoundary`, `.git/config` is a
+// deny-read + carveout, and `EnvScrub` strips `GIT_EXTERNAL_DIFF` — so every path
+// stays contained. The list is deliberately SMALL: a command that is not provably
+// trivial falls to Ask, which is fail-safe.
+//
+// TODO(Task 22): converge on the shared HardApproveRules prefix classifier so these
+// trivial-command rules live in one place.
 var trivialBashPrefixes = []string{
 	"ls",
 	"cat",
