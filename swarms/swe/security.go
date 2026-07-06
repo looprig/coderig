@@ -85,6 +85,16 @@ const (
 	// unavailable on macOS Seatbelt and Linux rung 2 (SPEC §7.1/§13.6), so requiring it
 	// would make trusted behave as write-with-asks on every supported platform today.
 	trustedBashGuarantees = writeBashGuarantees | sandbox.GuaranteeNetworkBoundary
+
+	// editsGuarantees is what an auto-approved file EDIT requires (SPEC §10.3): the OS
+	// write-boundary must ACTUALLY confine writes to the workspace. Edits, like Bash,
+	// are now interlock-gated — in-process write-containment alone is not an OS
+	// boundary, so on a non-enforcing backend (nil / null-backend runner) the edit
+	// interlock fails and edits fall back to Ask. This is a NARROWER mask than
+	// writeBashGuarantees: an in-process editor never spawns a subprocess, so it needs
+	// neither EnvScrub (no child env to scrub) nor NetworkBoundary — only that a write
+	// escaping the workspace is actually blocked by the OS.
+	editsGuarantees = sandbox.GuaranteeWriteBoundary
 )
 
 // postureTable returns the ordinal→Posture table (SPEC §4/§10.3), indexed by the
@@ -99,6 +109,14 @@ const (
 //	ordinal 2 write      : file-edit auto,  bash trivial-auto / rest-ask
 //	ordinal 3 trusted    : file-edit auto,  bash all-auto
 //	ordinal 4 unconfined : file-edit auto,  bash all-auto (no interlock)
+//
+// EDITS ARE INTERLOCK-GATED TOO (SPEC §10.3): the "file-edit auto" rows set
+// RequiredGuaranteesEdits so an edit auto-approves ONLY when the held runner actually
+// enforces the OS write-boundary — exactly as Bash auto-approve requires OS
+// enforcement. Write and trusted require GuaranteeWriteBoundary (editsGuarantees);
+// unconfined steps off the ladder with a ZERO mask (no interlock). On a null /
+// non-enforcing backend the edit interlock fails and edits fall back to Ask, so the
+// "file-edit auto" rows degrade fail-secure just like the Bash column.
 //
 // GrantCarryingAlwaysAsk is set on EVERY row (including the ask-only rows, where it is
 // harmless): an escalation grant-carrying call is never auto-approved by posture in
@@ -121,37 +139,43 @@ func postureTable() []tools.Posture {
 			AutoApproveBash:        false,
 			GrantCarryingAlwaysAsk: true,
 		},
-		// [2] write — file edits auto-approve (they are confined by write-containment +
-		// the ReadGuard, not the subprocess interlock); Bash is "trivial auto, rest
-		// ask" via trivialBash, and the interlock requires the write guarantees (SPEC §4
-		// write column, §10.3 write mask).
+		// [2] write — file edits auto-approve, but ONLY when the runner enforces the OS
+		// write-boundary (editsGuarantees): in-process write-containment + the ReadGuard
+		// confine edits, yet that is not an OS boundary, so the edit interlock requires
+		// GuaranteeWriteBoundary and edits Ask on a null/non-enforcing backend. Bash is
+		// "trivial auto, rest ask" via trivialBash, and its interlock requires the write
+		// bash guarantees (SPEC §4 write column, §10.3 write masks).
 		sandbox.Write: {
-			AutoApproveEdits:       true,
-			AutoApproveBash:        false,
-			TrivialBash:            trivialBash,
-			RequiredGuarantees:     writeBashGuarantees,
-			GrantCarryingAlwaysAsk: true,
+			AutoApproveEdits:        true,
+			AutoApproveBash:         false,
+			TrivialBash:             trivialBash,
+			RequiredGuarantees:      writeBashGuarantees,
+			RequiredGuaranteesEdits: editsGuarantees,
+			GrantCarryingAlwaysAsk:  true,
 		},
-		// [3] trusted — file edits auto, ALL Bash auto, but only when the runner enforces
-		// the trusted guarantee mask (write guarantees + NetworkBoundary). Without an
-		// enforcing runner the interlock fails and trusted degrades to write-with-asks
-		// (SPEC §4 trusted column, §10.3).
+		// [3] trusted — file edits auto (OS write-boundary gated, same editsGuarantees as
+		// write), ALL Bash auto but only when the runner enforces the trusted bash mask
+		// (write guarantees + NetworkBoundary). Without an enforcing runner both interlocks
+		// fail: Bash degrades to write-with-asks AND edits degrade to Ask (SPEC §4 trusted
+		// column, §10.3).
 		sandbox.Trusted: {
-			AutoApproveEdits:       true,
-			AutoApproveBash:        true,
-			RequiredGuarantees:     trustedBashGuarantees,
-			GrantCarryingAlwaysAsk: true,
+			AutoApproveEdits:        true,
+			AutoApproveBash:         true,
+			RequiredGuarantees:      trustedBashGuarantees,
+			RequiredGuaranteesEdits: editsGuarantees,
+			GrantCarryingAlwaysAsk:  true,
 		},
 		// [4] unconfined — steps OFF the ladder (SPEC §4 note): no OS wrapper, so there
-		// is nothing to interlock against. Everything auto-approves with an EMPTY
-		// RequiredGuarantees mask — the consumer's explicit "no interlock" choice
-		// (§10.3). The scare-surface for choosing unconfined lives at config/CLI, not
-		// here.
+		// is nothing to interlock against. Everything auto-approves with EMPTY
+		// RequiredGuarantees AND RequiredGuaranteesEdits masks — the consumer's explicit
+		// "no interlock" choice (§10.3). The scare-surface for choosing unconfined lives
+		// at config/CLI, not here.
 		sandbox.Unconfined: {
-			AutoApproveEdits:       true,
-			AutoApproveBash:        true,
-			RequiredGuarantees:     0,
-			GrantCarryingAlwaysAsk: true,
+			AutoApproveEdits:        true,
+			AutoApproveBash:         true,
+			RequiredGuarantees:      0,
+			RequiredGuaranteesEdits: 0,
+			GrantCarryingAlwaysAsk:  true,
 		},
 	}
 }

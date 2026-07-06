@@ -143,52 +143,58 @@ func TestPostureTableMatchesSpec(t *testing.T) {
 	}
 
 	tests := []struct {
-		name               string
-		ordinal            sandbox.Mode
-		autoApproveEdits   bool
-		autoApproveBash    bool
-		requiredGuarantees uint64
-		trivialBashSet     bool
+		name                    string
+		ordinal                 sandbox.Mode
+		autoApproveEdits        bool
+		autoApproveBash         bool
+		requiredGuarantees      uint64
+		requiredGuaranteesEdits uint64
+		trivialBashSet          bool
 	}{
 		{
-			name:               "zerotrust: everything ask",
-			ordinal:            sandbox.ZeroTrust,
-			autoApproveEdits:   false,
-			autoApproveBash:    false,
-			requiredGuarantees: 0,
-			trivialBashSet:     false,
+			name:                    "zerotrust: everything ask",
+			ordinal:                 sandbox.ZeroTrust,
+			autoApproveEdits:        false,
+			autoApproveBash:         false,
+			requiredGuarantees:      0,
+			requiredGuaranteesEdits: 0,
+			trivialBashSet:          false,
 		},
 		{
-			name:               "readonly: everything ask",
-			ordinal:            sandbox.ReadOnly,
-			autoApproveEdits:   false,
-			autoApproveBash:    false,
-			requiredGuarantees: 0,
-			trivialBashSet:     false,
+			name:                    "readonly: everything ask",
+			ordinal:                 sandbox.ReadOnly,
+			autoApproveEdits:        false,
+			autoApproveBash:         false,
+			requiredGuarantees:      0,
+			requiredGuaranteesEdits: 0,
+			trivialBashSet:          false,
 		},
 		{
-			name:               "write: edits auto, trivial bash auto, rest ask",
-			ordinal:            sandbox.Write,
-			autoApproveEdits:   true,
-			autoApproveBash:    false,
-			requiredGuarantees: sandbox.GuaranteeWriteBoundary | sandbox.GuaranteeEnvScrub | sandbox.GuaranteeReadDenies,
-			trivialBashSet:     true,
+			name:                    "write: edits auto (OS write-boundary gated), trivial bash auto, rest ask",
+			ordinal:                 sandbox.Write,
+			autoApproveEdits:        true,
+			autoApproveBash:         false,
+			requiredGuarantees:      sandbox.GuaranteeWriteBoundary | sandbox.GuaranteeEnvScrub | sandbox.GuaranteeReadDenies,
+			requiredGuaranteesEdits: sandbox.GuaranteeWriteBoundary,
+			trivialBashSet:          true,
 		},
 		{
-			name:               "trusted: edits auto, all bash auto",
-			ordinal:            sandbox.Trusted,
-			autoApproveEdits:   true,
-			autoApproveBash:    true,
-			requiredGuarantees: sandbox.GuaranteeWriteBoundary | sandbox.GuaranteeEnvScrub | sandbox.GuaranteeReadDenies | sandbox.GuaranteeNetworkBoundary,
-			trivialBashSet:     false,
+			name:                    "trusted: edits auto (OS write-boundary gated), all bash auto",
+			ordinal:                 sandbox.Trusted,
+			autoApproveEdits:        true,
+			autoApproveBash:         true,
+			requiredGuarantees:      sandbox.GuaranteeWriteBoundary | sandbox.GuaranteeEnvScrub | sandbox.GuaranteeReadDenies | sandbox.GuaranteeNetworkBoundary,
+			requiredGuaranteesEdits: sandbox.GuaranteeWriteBoundary,
+			trivialBashSet:          false,
 		},
 		{
-			name:               "unconfined: all auto, no interlock",
-			ordinal:            sandbox.Unconfined,
-			autoApproveEdits:   true,
-			autoApproveBash:    true,
-			requiredGuarantees: 0,
-			trivialBashSet:     false,
+			name:                    "unconfined: all auto, no interlock",
+			ordinal:                 sandbox.Unconfined,
+			autoApproveEdits:        true,
+			autoApproveBash:         true,
+			requiredGuarantees:      0,
+			requiredGuaranteesEdits: 0,
+			trivialBashSet:          false,
 		},
 	}
 
@@ -204,6 +210,9 @@ func TestPostureTableMatchesSpec(t *testing.T) {
 			}
 			if p.RequiredGuarantees != tt.requiredGuarantees {
 				t.Errorf("RequiredGuarantees = %#b, want %#b", p.RequiredGuarantees, tt.requiredGuarantees)
+			}
+			if p.RequiredGuaranteesEdits != tt.requiredGuaranteesEdits {
+				t.Errorf("RequiredGuaranteesEdits = %#b, want %#b", p.RequiredGuaranteesEdits, tt.requiredGuaranteesEdits)
 			}
 			if (p.TrivialBash != nil) != tt.trivialBashSet {
 				t.Errorf("TrivialBash set = %v, want %v", p.TrivialBash != nil, tt.trivialBashSet)

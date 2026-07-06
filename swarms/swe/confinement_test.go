@@ -6,6 +6,7 @@ import (
 
 	"github.com/looprig/harness/pkg/ceiling"
 	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/harness/pkg/tools"
 	"github.com/looprig/sandbox"
 	"github.com/looprig/swe/confine"
@@ -27,6 +28,20 @@ type planGranter interface {
 // leveled is the structural Level probe (mirrors the harness interlock's probe): a
 // LevelNone runner is the null backend / a platform without OS enforcement.
 type leveled interface{ Level() uint8 }
+
+// fakeGuaranteeRunner is a tool.CommandRunner exposing GuaranteeBits — the structural
+// probe the posture interlock reads. It lets a test drive the edit/Bash auto-approve
+// gate with a CHOSEN guarantee mask WITHOUT a real OS backend, so the interlock
+// behavior is proven deterministically on any host (macOS Seatbelt OR the Linux null
+// backend). Mirrors the harness posture_test fake.
+type fakeGuaranteeRunner struct{ bits uint64 }
+
+func (fakeGuaranteeRunner) RunCommand(context.Context, string, string) ([]byte, int, error) {
+	return nil, 0, nil
+}
+func (f fakeGuaranteeRunner) GuaranteeBits() uint64 { return f.bits }
+
+var _ tool.CommandRunner = fakeGuaranteeRunner{}
 
 // TestEffectiveModeSourceIsMinOfRoleAndCeiling proves the effective mode is
 // min(role static mode, session ceiling), read live — a role never exceeds the
@@ -183,6 +198,65 @@ func TestFallbackConfinementKeepsBashGated(t *testing.T) {
 	bash := tools.NewBash(root, conf.BashOptions()...)
 	if eff := pc.Check(context.Background(), bash, "Bash", `{"command":"ls"}`); eff == loop.EffectAutoApprove {
 		t.Errorf("Check(Bash ls) with nil runner = EffectAutoApprove, want a human gate (interlock must fail closed)")
+	}
+}
+
+// TestWriteModeEditAutoApproveIsOSGated is the fix's proof: under the Write posture a
+// file-EDIT/write tool auto-approves ONLY when the held runner actually enforces the
+// OS write-boundary (GuaranteeWriteBoundary). A runner WITHOUT that bit — or a nil
+// runner (the null-backend / executor-build fallback) — fails the edit interlock and
+// the edit falls to Ask. So on the Ubuntu null backend edits Ask; on macOS Seatbelt
+// (which enforces WriteBoundary) they auto-approve. Before this fix edits auto-approved
+// with NO OS write-boundary. Mirrors the Bash-interlock proofs
+// (TestFallbackConfinementKeepsBashGated / TestConfinedCheckerAutoApprovesTrivialBashAtWrite).
+func TestWriteModeEditAutoApproveIsOSGated(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		runner tool.CommandRunner
+		want   loop.Effect
+	}{
+		{
+			name:   "runner enforces WriteBoundary -> auto-approve (macOS Seatbelt path)",
+			runner: fakeGuaranteeRunner{bits: sandbox.GuaranteeWriteBoundary},
+			want:   loop.EffectAutoApprove,
+		},
+		{
+			name:   "runner enforces the full write bash mask (incl. WriteBoundary) -> auto-approve",
+			runner: fakeGuaranteeRunner{bits: writeBashGuarantees},
+			want:   loop.EffectAutoApprove,
+		},
+		{
+			name:   "runner WITHOUT WriteBoundary -> ask (OS not enforcing writes)",
+			runner: fakeGuaranteeRunner{bits: sandbox.GuaranteeEnvScrub | sandbox.GuaranteeReadDenies},
+			want:   loop.EffectAsk,
+		},
+		{
+			name:   "nil runner (null backend / build-failure fallback) -> ask",
+			runner: nil,
+			want:   loop.EffectAsk,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			st := ceiling.New()
+			st.Set(uint8(sandbox.Write))
+			effSrc := effectiveModeSource{role: operatorRoleMode, ceiling: st}
+			// The exact confinement shape a build site produces, but with a chosen fake
+			// runner so the edit interlock is exercised deterministically on any host.
+			conf := confine.Confinement{CheckerOption: tools.WithCeilingPostures(effSrc, postureTable(), tt.runner)}
+			pc := newConfinedChecker(t, root, conf)
+			edit := tools.NewEditFile(root)
+			// a.txt is inside the workspace, so containment clears and ONLY the posture
+			// edit interlock decides auto-approve vs Ask.
+			if eff := pc.Check(context.Background(), edit, "EditFile", `{"path":"a.txt"}`); eff != tt.want {
+				t.Errorf("Check(EditFile a.txt) @ Write = %v, want %v (edit auto-approve must be OS-gated)", eff, tt.want)
+			}
+		})
 	}
 }
 

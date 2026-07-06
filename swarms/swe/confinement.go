@@ -72,9 +72,11 @@ func ceilingCurrent(c tools.CeilingSource) uint8 {
 // GRACEFUL FALLBACK (Ubuntu-safe, SPEC §6/§13.6): if the executor cannot be built
 // (e.g. an unsupported platform, or an unresolvable-home secret-deny guard) it returns
 // a Confinement with NIL runners but a posture Option carrying a NIL runner — so
-// Bash/Grep run UNCONFINED-but-GATED (direct exec) and the guarantee interlock fails
-// closed → Bash auto-approve is OFF (stays Ask). It NEVER crashes and NEVER
-// auto-approves on the fallback path.
+// Bash/Grep run UNCONFINED-but-GATED (direct exec). With a nil runner the guarantee
+// interlock fails closed for BOTH the Bash mask AND the edit mask (editsGuarantees),
+// so on the fallback path BOTH Bash AND file-edit auto-approve are OFF — every mutating
+// call stays Ask. It NEVER crashes and NEVER auto-approves Bash OR edits on the fallback
+// path.
 func confinementFor(root string, effSrc tools.CeilingSource) confine.Confinement {
 	ex, err := sandbox.NewExecutorDynamic(ceilingModeSource{src: effSrc}, root)
 	if err != nil {
@@ -99,12 +101,15 @@ func buildConfinement(root string, role uint8, ceiling tools.CeilingSource) conf
 	return confinementFor(root, effectiveModeSource{role: role, ceiling: ceiling})
 }
 
-// DefaultSecurityMode is the CLI's default session ceiling: Write — file edits
-// auto-approve (confined by workspace write-containment + the ReadGuard), trivial
-// Bash auto-approves under OS enforcement, and network + non-trivial Bash stay gated
-// (SPEC §4 write column). It is the sensible default for an interactive coding
-// session on a platform with a real OS backend; on a backend that enforces nothing
-// the interlock keeps Bash at Ask regardless.
+// DefaultSecurityMode is the CLI's default session ceiling: Write — file edits and
+// trivial Bash auto-approve ONLY under real OS enforcement, with network + non-trivial
+// Bash gated (SPEC §4 write column). BOTH edit and Bash auto-approve are now
+// interlock-gated: edits require the OS write-boundary (editsGuarantees) and Bash the
+// write bash mask, so on a backend that enforces nothing (null backend / pre-Landlock
+// Linux / an executor-build failure) the interlocks fail and edits AND Bash both fall
+// back to Ask. That makes Write FAIL-SECURE on every backend — a real backend gets
+// auto-approved edits, a null backend asks — which is why it is a safe default for an
+// interactive coding session.
 const DefaultSecurityMode = uint8(sandbox.Write)
 
 // securityModeNames maps the CLI-selectable session-ceiling names to their ceiling
