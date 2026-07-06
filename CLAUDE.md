@@ -72,6 +72,13 @@ The current, post-consolidation shape (verified against `swarms/swe/swarm.go`,
   `PermissionChecker`] / tui / identity / content / journal). A **direct** dependency.
 - `github.com/nats-io/nats.go` — JetStream client for session persistence; used by
   `swarms/swe/persistence.go` and `swarms/swe/agent.go`. A **direct** dependency.
+- `github.com/looprig/sandbox` — the OS-sandbox module (Seatbelt/landlock policy +
+  `Executor` runner). swe is the ONLY module that may import BOTH harness and sandbox
+  (SPEC §2): it wires the sandbox's confined runner into harness's stdlib-typed
+  `tool.CommandRunner` seam and maps the session ceiling ordinal → `sandbox.Mode` →
+  `tools.Posture` (`swarms/swe/security.go`). Its only transitive dep, `golang.org/x/sys`,
+  is already in swe's graph, so it is offline-safe. Resolved via the `../sandbox` local
+  replace (unpublished). A **direct** dependency.
 - The **Bubble Tea v2** TUI stack, inherited **transitively via looprig's TUI** (all `// indirect`
   in `go.mod`): `charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`,
   `charm.land/glamour/v2`. These use the `charm.land/...` vanity import paths, **not**

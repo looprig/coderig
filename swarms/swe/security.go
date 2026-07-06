@@ -1,0 +1,206 @@
+package swe
+
+import (
+	"strings"
+
+	"github.com/looprig/harness/pkg/tools"
+	"github.com/looprig/sandbox"
+)
+
+// security.go is the ordinal↔mode↔posture layer — the ONE place swe (the only
+// module that imports BOTH harness and sandbox, SPEC §2) translates between the
+// two vocabularies:
+//
+//   - harness knows an ORDINAL scale only: the session ceiling is a uint8 (0 = most
+//     restrictive), read per-Check as a tools.CeilingSource, and each ordinal maps to
+//     a tools.Posture the consumer registers (SPEC §8/§10.2). harness never sees a
+//     mode name.
+//   - sandbox knows a MODE ladder: sandbox.Mode (ZeroTrust=0 … Unconfined=4), same
+//     order, and enforces the OS policy plus reports the guarantees it achieves.
+//
+// The two ladders are the SAME ladder. This file pins that: postureTable() maps each
+// ordinal to the posture for the mode at that ordinal, and ceilingModeSource adapts
+// the ONE ceiling source so it drives both the harness checker (as tools.CeilingSource,
+// uint8) and the sandbox dynamic executor (as sandbox.ModeSource, sandbox.Mode). One
+// source → posture and enforcement can never disagree (§10.2).
+//
+// NOTE: this task builds the types/table/adapter only. Wiring the executor and this
+// table into the tool-build sites (BuildTools / WithCeilingPostures / NewExecutorDynamic)
+// is Task 22.
+
+// ceilingModeSource adapts the harness ceiling ORDINAL source (tools.CeilingSource,
+// uint8) into the sandbox.ModeSource (sandbox.Mode) the dynamic executor reads. The
+// ordinal maps 1:1 onto sandbox.Mode along the same ladder (0 = most restrictive), so
+// the adapter is a pure widen-and-retype.
+//
+// The whole point is that ONE ceiling State is shared: *ceiling.State satisfies
+// tools.CeilingSource structurally, the checker reads it directly, and the sandbox
+// executor reads the very same State through this adapter — so a journaled ceiling
+// change moves the checker's posture AND the executor's enforced mode together, never
+// letting the gate and the OS boundary drift apart (SPEC §10.2).
+type ceilingModeSource struct {
+	// src is the shared read side of the session ceiling — the SAME source the
+	// harness PermissionChecker reads per Check. It must not be nil in production
+	// wiring; a nil src is a programming error (Current would panic).
+	src tools.CeilingSource
+}
+
+// Current returns the live ceiling as a sandbox.Mode. It is read per command by the
+// sandbox dynamic executor, mirroring the checker's per-Check read, so a ceiling
+// downgrade takes effect on the very next command.
+//
+// CONCURRENCY: src.Current() is a lock-free atomic load (ceiling.State) — cheap and
+// safe to call from the executor's compile path.
+func (m ceilingModeSource) Current() sandbox.Mode {
+	return sandbox.Mode(m.src.Current())
+}
+
+// Guarantee interlock masks (SPEC §10.3). A Bash auto-approve fires only when the
+// held runner's GuaranteeBits() satisfy the posture's RequiredGuarantees
+// (runnerBits & required == required). These masks are the LOAD-BEARING safety gate:
+// they name the SPECIFIC OS guarantees a mode's Bash auto-approve depends on, so an
+// unenforcing runner (nil, a null backend, or a degraded platform) fails the interlock
+// and Bash falls back to Ask.
+const (
+	// writeBashGuarantees is what write-mode Bash auto-approve requires (SPEC §10.3):
+	// writes are confined to the workspace (WriteBoundary), the environment is
+	// scrubbed to the baseline allowlist so secrets are not exported to subprocesses
+	// (EnvScrub), and secret/host deny-reads are enforced (ReadDenies). Network stays
+	// gated in write mode, so NetworkBoundary is NOT required here.
+	writeBashGuarantees = sandbox.GuaranteeWriteBoundary | sandbox.GuaranteeEnvScrub | sandbox.GuaranteeReadDenies
+
+	// trustedBashGuarantees is what trusted-mode "all bash auto" requires: everything
+	// write requires PLUS a real network boundary (SPEC §10.3 "trusted adds
+	// NetworkBoundary"). trusted permits full Bash auto-approve, so egress must be
+	// bounded (default-deny with the trusted allowlist) before that is safe.
+	// AddressNetwork (metadata/local-net scoping) is deliberately NOT required: it is
+	// unavailable on macOS Seatbelt and Linux rung 2 (SPEC §7.1/§13.6), so requiring it
+	// would make trusted behave as write-with-asks on every supported platform today.
+	trustedBashGuarantees = writeBashGuarantees | sandbox.GuaranteeNetworkBoundary
+)
+
+// postureTable returns the ordinal→Posture table (SPEC §4/§10.3), indexed by the
+// ceiling ordinal, which equals the sandbox.Mode value at that rung. It is registered
+// with the checker via tools.WithCeilingPostures so a Check selects table[ordinal]
+// (harness clamps an out-of-range ordinal to table[0], the most restrictive — §10.2).
+//
+// Each row encodes one column of the SPEC §4 mode matrix:
+//
+//	ordinal 0 zerotrust  : file-edit ask,   bash ask
+//	ordinal 1 readonly   : file-edit ask,   bash ask
+//	ordinal 2 write      : file-edit auto,  bash trivial-auto / rest-ask
+//	ordinal 3 trusted    : file-edit auto,  bash all-auto
+//	ordinal 4 unconfined : file-edit auto,  bash all-auto (no interlock)
+//
+// GrantCarryingAlwaysAsk is set on EVERY row (including the ask-only rows, where it is
+// harmless): an escalation grant-carrying call is never auto-approved by posture in
+// any mode — it must be human-reviewed (SPEC §9.3/§10.7).
+func postureTable() []tools.Posture {
+	return []tools.Posture{
+		// [0] zerotrust — the fail-closed floor: writes denied, network hard-denied,
+		// reads restricted. Nothing auto-approves; every file-edit and Bash call asks
+		// (SPEC §4 zerotrust column). RequiredGuarantees is moot (nothing auto-fires).
+		sandbox.ZeroTrust: {
+			AutoApproveEdits:       false,
+			AutoApproveBash:        false,
+			GrantCarryingAlwaysAsk: true,
+		},
+		// [1] readonly — broad reads but writes gated; still no auto-approve (same gate
+		// posture as zerotrust: file-edit ask, bash ask — SPEC §4 readonly column). The
+		// difference between zerotrust and readonly is OS read scope, not gate posture.
+		sandbox.ReadOnly: {
+			AutoApproveEdits:       false,
+			AutoApproveBash:        false,
+			GrantCarryingAlwaysAsk: true,
+		},
+		// [2] write — file edits auto-approve (they are confined by write-containment +
+		// the ReadGuard, not the subprocess interlock); Bash is "trivial auto, rest
+		// ask" via trivialBash, and the interlock requires the write guarantees (SPEC §4
+		// write column, §10.3 write mask).
+		sandbox.Write: {
+			AutoApproveEdits:       true,
+			AutoApproveBash:        false,
+			TrivialBash:            trivialBash,
+			RequiredGuarantees:     writeBashGuarantees,
+			GrantCarryingAlwaysAsk: true,
+		},
+		// [3] trusted — file edits auto, ALL Bash auto, but only when the runner enforces
+		// the trusted guarantee mask (write guarantees + NetworkBoundary). Without an
+		// enforcing runner the interlock fails and trusted degrades to write-with-asks
+		// (SPEC §4 trusted column, §10.3).
+		sandbox.Trusted: {
+			AutoApproveEdits:       true,
+			AutoApproveBash:        true,
+			RequiredGuarantees:     trustedBashGuarantees,
+			GrantCarryingAlwaysAsk: true,
+		},
+		// [4] unconfined — steps OFF the ladder (SPEC §4 note): no OS wrapper, so there
+		// is nothing to interlock against. Everything auto-approves with an EMPTY
+		// RequiredGuarantees mask — the consumer's explicit "no interlock" choice
+		// (§10.3). The scare-surface for choosing unconfined lives at config/CLI, not
+		// here.
+		sandbox.Unconfined: {
+			AutoApproveEdits:       true,
+			AutoApproveBash:        true,
+			RequiredGuarantees:     0,
+			GrantCarryingAlwaysAsk: true,
+		},
+	}
+}
+
+// trivialBashPrefixes is the conservative interim allowlist backing the write-mode
+// "trivial auto, rest ask" slot (SPEC §4 write row; Phase-0 decision §13.2 —
+// "extend the existing HardApproveRules prefix rules"). Every entry is a plainly
+// read-only, side-effect-free command prefix. It is deliberately SMALL: a command that
+// is not provably trivial falls to Ask, which is fail-safe.
+var trivialBashPrefixes = []string{
+	"ls",
+	"cat",
+	"pwd",
+	"echo",
+	"git status",
+	"git diff",
+}
+
+// trivialBash is the write-mode Posture.TrivialBash classifier. It auto-approves ONLY
+// commands it can prove are trivial read-only invocations and fails safe (returns
+// false → Ask) for everything else.
+//
+// It is STRICTER than the harness advisory denied-prefix matcher: that matcher
+// over-DENIES (fail-secure), but an AUTO-APPROVE classifier must never over-APPROVE
+// (that would be fail-OPEN). So it (a) rejects any command carrying a shell
+// metacharacter that could chain, substitute, or redirect a non-trivial command — so
+// "cat x && rm -rf /" never auto-approves — and (b) matches the allowlist on WORD
+// boundaries, so "cat" matches "cat file" but never "catalog".
+//
+// CONCURRENCY: this is the Posture.TrivialBash slot — invoked under the checker's held
+// mutex during Check. It is pure and cheap and must never call back into Check.
+//
+// TODO(task-22+): replace this interim allowlist with the shared HardApproveRules
+// prefix classifier (Phase-0 decision §13.2) so trivial-command rules live in one place.
+func trivialBash(command string) bool {
+	// Reject on the RAW command first: newlines are shell command separators and must
+	// be caught before whitespace normalization (strings.Fields) would fold them away.
+	// The metacharacter set covers chaining (; | &), redirection (< >), and command
+	// substitution (backtick, and "$(" checked below).
+	if strings.ContainsAny(command, ";|&<>`\n\r") || strings.Contains(command, "$(") {
+		return false
+	}
+	nc := normalizeBashCommand(command)
+	if nc == "" {
+		return false
+	}
+	for _, p := range trivialBashPrefixes {
+		if nc == p || strings.HasPrefix(nc, p+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeBashCommand trims and collapses internal runs of whitespace to single
+// spaces, mirroring the harness denied-prefix normalization so "git   status"
+// classifies identically to "git status".
+func normalizeBashCommand(command string) string {
+	return strings.Join(strings.Fields(command), " ")
+}

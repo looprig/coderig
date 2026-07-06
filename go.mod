@@ -9,6 +9,7 @@ require (
 	github.com/looprig/harness v0.5.0
 	github.com/looprig/inference v0.1.0
 	github.com/looprig/llm v0.1.0
+	github.com/looprig/sandbox v0.0.0
 )
 
 require (
@@ -61,6 +62,7 @@ replace (
 	github.com/looprig/harness => ../harness
 	github.com/looprig/inference => ../inference
 	github.com/looprig/llm => ../llm
+	github.com/looprig/sandbox => ../sandbox
 	github.com/looprig/storage => ../storage
 )
 
