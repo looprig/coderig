@@ -22,6 +22,7 @@ import (
 	"github.com/looprig/cli/tui"
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/sessionstore"
+	"github.com/looprig/sandbox"
 	"github.com/looprig/swe/swarms/swe"
 )
 
@@ -41,15 +42,20 @@ const (
 // cliFlags is the parsed CLI invocation: whether to list sessions and exit (--list), which
 // session to resume (--resume <uuid>; zero = new session), whether to enable the untrusted,
 // human-gated workspace skill source (--runtime-skills; off by default, §7a), whether to show
-// the optional UI-only startup greeting (--greeting; off by default, §5a), and the session
-// store root (--data-dir; empty = the ~/.looprig/store default). There is no positional agent
-// name — swe is a single swarm.
+// the optional UI-only startup greeting (--greeting; off by default, §5a), the session
+// store root (--data-dir; empty = the ~/.looprig/store default), and the session security
+// ceiling (--security-mode; default write, §8). There is no positional agent name — swe is a
+// single swarm.
 type cliFlags struct {
 	list          bool
 	resume        uuid.UUID
 	runtimeSkills bool
 	greeting      bool
 	dataDir       string
+	// securityCeiling is the session security-mode ceiling ordinal (min(role, this) is
+	// each leaf's effective mode; see swe.Config.SecurityCeiling). Parsed from the
+	// --security-mode NAME flag, defaulting to swe.DefaultSecurityMode (Write).
+	securityCeiling uint8
 }
 
 // FlagParseError reports a malformed CLI invocation (an unknown flag, a non-UUID --resume
@@ -85,6 +91,7 @@ func parseFlags(args []string) (cliFlags, error) {
 		runtimeSkills = fs.Bool("runtime-skills", false, "enable the untrusted, human-gated workspace skill source (.skills/) for read-only agents")
 		greeting      = fs.Bool("greeting", false, "show a UI-only startup greeting listing the swarm's agents and skills")
 		dataDir       = fs.String("data-dir", "", "session store root (default ~/.looprig/store)")
+		securityMode  = fs.String("security-mode", "write", "session security ceiling: zerotrust|readonly|write|trusted (caps per-role auto-approval)")
 	)
 	if err := fs.Parse(args); err != nil {
 		return cliFlags{}, &FlagParseError{Reason: "invalid flags", Cause: err}
@@ -96,7 +103,14 @@ func parseFlags(args []string) (cliFlags, error) {
 		return cliFlags{}, &FlagParseError{Reason: "unexpected argument " + strconv.Quote(fs.Arg(0))}
 	}
 
-	out := cliFlags{list: *list, runtimeSkills: *runtimeSkills, greeting: *greeting, dataDir: strings.TrimSpace(*dataDir)}
+	// Validate the security-mode name at this boundary (untrusted CLI input): an unknown
+	// mode fails closed rather than silently defaulting to a surprising permissiveness.
+	ceilingOrd, ok := swe.ParseSecurityMode(strings.ToLower(strings.TrimSpace(*securityMode)))
+	if !ok {
+		return cliFlags{}, &FlagParseError{Reason: "invalid --security-mode " + strconv.Quote(*securityMode) + " (want zerotrust|readonly|write|trusted)"}
+	}
+
+	out := cliFlags{list: *list, runtimeSkills: *runtimeSkills, greeting: *greeting, dataDir: strings.TrimSpace(*dataDir), securityCeiling: ceilingOrd}
 
 	// Detect whether --resume was explicitly given (vs left at its empty default): an
 	// explicit --resume with an empty/whitespace value is a malformed invocation, rejected
@@ -230,12 +244,17 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	// is set — and handed to the TUI as an opening transcript entry via the Banner; it is NOT a
 	// turn, NOT a command, and never enters the model's context. cli.Run owns logging, signal
 	// teardown, the TUI, and bounded Close.
-	cfg := swe.Config{RuntimeSkills: flags.runtimeSkills, Greeting: flags.greeting}
+	cfg := swe.Config{RuntimeSkills: flags.runtimeSkills, Greeting: flags.greeting, SecurityCeiling: flags.securityCeiling}
 	open := openThunk(factory, flags.resume, cfg)
 	return cli.Run(ctx, open, cli.Banner{Name: bannerName, Greeting: swe.Greeting(cfg)})
 }
 
 func main() {
+	// MUST be the FIRST line of main() (SPEC §6): a no-op on darwin, but on Linux it
+	// re-executes the process as the stage-2 sandbox helper before any other goroutine,
+	// fd, or thread state exists. Wiring it from day one means no retrofit later.
+	sandbox.Init()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr))

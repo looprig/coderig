@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/looprig/cli/tui"
+	"github.com/looprig/harness/pkg/ceiling"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/session"
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/harness/pkg/tools"
 	"github.com/looprig/inference"
 	"github.com/looprig/swe/agents/operator"
+	"github.com/looprig/swe/confine"
 )
 
 // operatorAgentKind is the swarm + primary agent identity stamped onto the session's
@@ -100,7 +102,7 @@ const operatorDelegation = `<delegation>
 // Drift from the leaf is guarded by a test asserting primary-minus-Subagent == leaf tools.
 // It returns a typed *PrimaryToolSetError (never a nil, checker-less tool set) when the
 // fail-secure PermissionChecker cannot be built, so the primary never runs unguarded.
-func operatorPrimaryToolSet(root string, httpCl *http.Client, spawner *swarmSpawner, catalog []tools.SubagentCatalogEntry, skill tool.InvokableTool) (loop.ToolSet, error) {
+func operatorPrimaryToolSet(root string, httpCl *http.Client, spawner *swarmSpawner, catalog []tools.SubagentCatalogEntry, skill tool.InvokableTool, conf confine.Confinement) (loop.ToolSet, error) {
 	approved := []string{"ReadFile", "Glob", "Grep", "Todo", "AskUser", "Subagent"}
 	if skill != nil {
 		approved = append(approved, "Skill")
@@ -110,17 +112,21 @@ func operatorPrimaryToolSet(root string, httpCl *http.Client, spawner *swarmSpaw
 		HardDeny:      tools.DefaultHardDeny(),
 		HardApprove:   tools.HardApproveRules{Tools: approved},
 	}
-	pc, err := tools.NewPermissionChecker(policy)
+	// conf.CheckerOptions() registers the ceiling-posture stage (SPEC §10.2) carrying
+	// the SAME executor as Bash's runner, so under an enforcing backend WriteFile/
+	// EditFile auto-approve and trivial Bash auto-approves at Write mode, while the
+	// interlock keeps the rest at Ask (and everything at Ask on an unenforcing backend).
+	pc, err := tools.NewPermissionChecker(policy, conf.CheckerOptions()...)
 	if err != nil {
 		return loop.ToolSet{}, &PrimaryToolSetError{Cause: err}
 	}
 	registry := []tool.InvokableTool{
 		tools.NewReadFile(root, pc),
 		tools.NewGlob(root, pc),
-		tools.NewGrep(root, pc),
+		tools.NewGrep(root, pc, conf.GrepOptions()...),
 		tools.NewWriteFile(root),
 		tools.NewEditFile(root),
-		tools.NewBash(root),
+		tools.NewBash(root, conf.BashOptions()...),
 		tools.NewWebSearch(tools.NewDuckDuckGoProvider(httpCl)),
 		tools.NewFetch(httpCl),
 		tools.NewTodo(),
@@ -158,10 +164,10 @@ func toolCatalog(reg *Registry) []tools.SubagentCatalogEntry {
 // = OFF); the SAME provider is shared with the spawner so leaves get identical runtime
 // context. describer + skill are the SAME code-style loader/Skill tool the operator leaf
 // gets, so the primary's skill catalog and the leaf's cannot drift.
-func operatorPrimaryConfig(client inference.Client, factory ModelFactory, deps LeafToolDeps, spawner *swarmSpawner, catalog []tools.SubagentCatalogEntry, rc loop.RuntimeContextProvider, describer tools.SkillDescriber, skill tool.InvokableTool) (loop.Config, error) {
+func operatorPrimaryConfig(client inference.Client, factory ModelFactory, deps LeafToolDeps, spawner *swarmSpawner, catalog []tools.SubagentCatalogEntry, rc loop.RuntimeContextProvider, describer tools.SkillDescriber, skill tool.InvokableTool, conf confine.Confinement) (loop.Config, error) {
 	system := Identity + operator.Role + operatorDelegation +
 		availableSkillsCatalog(context.Background(), describer, operator.Name, operatorSkills)
-	toolSet, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, spawner, catalog, skill)
+	toolSet, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, spawner, catalog, skill, conf)
 	if err != nil {
 		return loop.Config{}, err
 	}
@@ -201,6 +207,12 @@ func newHTTPClient() *http.Client {
 type operatorWiring struct {
 	cfg     loop.Config
 	spawner *swarmSpawner
+	// ceiling is the ONE session security-ceiling state shared by the primary + every
+	// leaf checker (via the effective-mode sources) AND the session (via
+	// session.WithCeiling): SetSecurityCeiling mutates it and every checker reads it, so
+	// a ceiling change clamps posture everywhere at once (SPEC §8). Each construction
+	// path passes it to the session so the checker sees journaled ceiling changes.
+	ceiling *ceiling.State
 }
 
 // operatorBuiltin is the single operator leaf definition, shared by the primary's Skill
@@ -212,9 +224,10 @@ func operatorBuiltin() leafBuiltin {
 		description:         operator.Description,
 		role:                operator.Role,
 		skills:              operatorSkills,
-		allowsRuntimeSkills: true, // §7a: runtime-skills (workspace .skills/) eligibility extended to operator (approved); bounded — a non-embedded workspace load is human-gated (Ask) with no prompt-injected description and no new auto-execution.
-		build: func(d LeafToolDeps, s tool.InvokableTool) (loop.ToolSet, error) {
-			return operator.BuildTools(d.Root, d.HTTPCl, s)
+		allowsRuntimeSkills: true,             // §7a: runtime-skills (workspace .skills/) eligibility extended to operator (approved); bounded — a non-embedded workspace load is human-gated (Ask) with no prompt-injected description and no new auto-execution.
+		securityMode:        operatorRoleMode, // §8: operator implements — it writes/edits + runs bash (all still ceiling-clamped + gated)
+		build: func(d LeafToolDeps, s tool.InvokableTool, conf confine.Confinement) (loop.ToolSet, error) {
+			return operator.BuildTools(d.Root, d.HTTPCl, s, conf)
 		},
 	}
 }
@@ -229,7 +242,17 @@ func operatorBuiltin() leafBuiltin {
 // tool reads is the SAME root the file tools use (LeafToolDeps.Root). The caller builds the
 // session from wiring.cfg and then calls wiring.spawner.bind(session) once.
 func buildOperatorWiring(client inference.Client, factory ModelFactory, root string, cfg Config) (operatorWiring, error) {
-	deps := LeafToolDeps{Root: root, HTTPCl: newHTTPClient()}
+	// ONE session ceiling shared by every checker AND the session: the configured
+	// ordinal is BOTH the initial ceiling and the runtime cap (NewClamped) — a journaled
+	// SetSecurityCeiling can lower it, or raise it only up to this value, never past it.
+	ceilingState := ceiling.NewClamped(cfg.SecurityCeiling)
+	ceilingState.Set(cfg.SecurityCeiling)
+	// The PRIMARY operator's effective-mode source (min(operator role, ceiling)); it is
+	// ALSO the parent-effective clamp every spawned child is bounded by, so a child can
+	// never exceed the primary (non-escalation — elevation only via static config, §8).
+	primaryEffSrc := effectiveModeSource{role: operatorRoleMode, ceiling: ceilingState}
+
+	deps := LeafToolDeps{Root: root, HTTPCl: newHTTPClient(), Ceiling: ceilingState}
 	registry, loader, err := leafRegistry(deps, cfg)
 	if err != nil {
 		return operatorWiring{}, err
@@ -239,13 +262,21 @@ func buildOperatorWiring(client inference.Client, factory ModelFactory, root str
 	// tail each turn. The provider is stateless + cheap + non-fatal (it never errors a
 	// turn), so sharing one instance is safe and keeps the loop free of os/exec.
 	rc := NewRuntimeContextProvider()
-	spawner := newSwarmSpawner(registry, deps, client, factory, loader, rc)
+	// The spawner clamps every child to the PRIMARY effective mode: it passes the
+	// parent's effective source as the child's ceiling, so child effective =
+	// min(childRole, parentEffective) = min(childRole, operatorRole, ceiling).
+	spawnerDeps := deps
+	spawnerDeps.Ceiling = primaryEffSrc
+	spawner := newSwarmSpawner(registry, spawnerDeps, client, factory, loader, rc)
 	primarySkill := buildLeafSkill(loader, operatorBuiltin(), deps, cfg) // same code-style Skill the operator leaf gets
-	primaryCfg, err := operatorPrimaryConfig(client, factory, deps, spawner, toolCatalog(registry), rc, loader, primarySkill)
+	// The primary's own confinement wires the SAME executor into its Bash/Grep/checker;
+	// primaryEffSrc feeds both its posture and its OS enforcement (min(Write, ceiling)).
+	primaryConf := confinementFor(root, primaryEffSrc)
+	primaryCfg, err := operatorPrimaryConfig(client, factory, deps, spawner, toolCatalog(registry), rc, loader, primarySkill, primaryConf)
 	if err != nil {
 		return operatorWiring{}, err
 	}
-	return operatorWiring{cfg: primaryCfg, spawner: spawner}, nil
+	return operatorWiring{cfg: primaryCfg, spawner: spawner, ceiling: ceilingState}, nil
 }
 
 // New constructs the SWE-Swarm and returns it as a tui.Agent driven by the
@@ -294,6 +325,7 @@ func newWithClient(ctx context.Context, client inference.Client, factory ModelFa
 	agent, err := newSessionAgent(ctx, wiring.cfg,
 		session.WithLimits(operatorLimits()),
 		session.WithConfigFingerprintFields(operatorFingerprintFields(root, cfg)),
+		session.WithCeiling(wiring.ceiling), // SAME ceiling the checkers read → journaled changes are visible
 	)
 	if err != nil {
 		return nil, err

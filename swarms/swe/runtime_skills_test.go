@@ -8,6 +8,7 @@ import (
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/swe/agents/operator"
 	"github.com/looprig/swe/agents/reviewer"
+	"github.com/looprig/swe/confine"
 )
 
 // runtime_skills_test.go pins P2b Phase 3c: the --runtime-skills enablement gate
@@ -174,7 +175,7 @@ func TestRuntimeSkillsPrimaryHasEmbeddedSkillTool(t *testing.T) {
 			}
 			sp := newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory(), loader, NewRuntimeContextProvider())
 			skill := buildLeafSkill(loader, operatorBuiltin(), deps, Config{RuntimeSkills: mode})
-			ts, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, sp, toolCatalog(reg), skill)
+			ts, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, sp, toolCatalog(reg), skill, confine.Confinement{})
 			if err != nil {
 				t.Fatalf("operatorPrimaryToolSet() error = %v", err)
 			}

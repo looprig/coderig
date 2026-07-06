@@ -253,6 +253,7 @@ func (f *SessionStoreFactory) openNew(ctx context.Context, wiring operatorWiring
 		session.WithLimits(operatorLimits()),
 		session.WithConfigFingerprintFields(fields),
 		session.WithWorkspaceStore(f.ws, root),
+		session.WithCeiling(wiring.ceiling), // SAME ceiling the checkers read → journaled changes are visible
 	)
 	if err != nil {
 		releaseLeaseBestEffort(lease)
@@ -290,6 +291,10 @@ func (f *SessionStoreFactory) openResume(ctx context.Context, wiring operatorWir
 		session.WithLimits(operatorLimits()),
 		session.WithConfigFingerprintFields(fields),
 		session.WithWorkspaceStore(f.ws, root),
+		// The SAME ceiling the checkers read. Restore re-seeds it from the folded
+		// SecurityCeilingChanged events (clamped by the NewClamped cap), so a resumed
+		// session's checker sees the recovered ceiling (SPEC §8).
+		session.WithCeiling(wiring.ceiling),
 	}
 	if sel.AllowConfigMismatch {
 		opts = append(opts, session.WithAllowConfigMismatch())

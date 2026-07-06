@@ -12,6 +12,7 @@ import (
 
 	"github.com/looprig/harness/pkg/identity"
 	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/harness/pkg/tools"
 	"github.com/looprig/inference"
 )
 
@@ -46,6 +47,15 @@ type Agent struct {
 type LeafToolDeps struct {
 	Root   string
 	HTTPCl *http.Client
+
+	// Ceiling is the shared session security-ceiling source every leaf build reads to
+	// compute its EFFECTIVE mode (min(role static mode, ceiling)) — the SAME source the
+	// session's SetSecurityCeiling mutates and the checker reads per Check, so a ceiling
+	// change clamps every leaf at once (SPEC §8). For a SPAWNED child the spawner passes
+	// the PARENT's effective-mode source here instead, so a child clamps to
+	// min(childRole, parentEffective) and can never exceed its parent (non-escalation).
+	// A nil Ceiling fail-closes the effective mode to 0 (ZeroTrust): nothing auto-approves.
+	Ceiling tools.CeilingSource
 }
 
 // Config is the swarm's human-set construction config — the knobs a launch flag /
@@ -69,6 +79,17 @@ type Config struct {
 	// a turn, NOT a command, never in the model's context. The model can never set it;
 	// only a launch flag does (cmd/swe's --greeting). See Greeting() and greeting.go.
 	Greeting bool
+
+	// SecurityCeiling is the session security-mode CEILING ordinal (0 ZeroTrust … 4
+	// Unconfined, matching sandbox.Mode). It caps how permissive per-role auto-approval
+	// may be: each tool-building leaf's EFFECTIVE mode is min(its static role mode, this
+	// ceiling), read live so lowering it clamps every leaf at once (SPEC §8). It is BOTH
+	// the session's INITIAL ceiling and the runtime cap — a journaled SetSecurityCeiling
+	// can lower it, or raise it only up to this value, never past it (fail-secure). The
+	// launch flag sets it (cmd/swe's --security-mode); the model can never raise it. The
+	// ZERO value is ZeroTrust (fail-secure: nothing auto-approves — identical to the
+	// pre-sandbox gate); the CLI defaults it to Write (DefaultSecurityMode).
+	SecurityCeiling uint8
 
 	// ModelCatalog is the OPTIONAL model-tier catalog (§ optional model tiers). Its zero
 	// value (all tiers empty) preserves the swarm's existing default model and disables

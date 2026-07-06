@@ -11,6 +11,7 @@ import (
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/harness/pkg/tools"
+	"github.com/looprig/swe/confine"
 )
 
 // Name is the reviewer's immutable attribution name.
@@ -68,10 +69,16 @@ var autoApprovedTools = []string{"ReadFile", "Glob", "Grep", "Todo", "AskUser"}
 // "Skill" is appended to the hard-approve set so it auto-approves — a scoped,
 // side-effect-free read of trusted in-repo content, the same class as ReadFile.
 //
+// conf is the composition-root's per-spawn OS-sandbox wiring (confine.Confinement):
+// it routes Bash through the confined (read-only) executor and Grep through its
+// read-only view, and registers the ceiling-posture stage on the checker. reviewer's
+// static mode is ReadOnly so Bash never auto-approves (stays human-gated); a zero
+// Confinement is the pre-sandbox behavior.
+//
 // It returns a typed *ToolSetError (never a nil, checker-less tool set) when the
 // fail-secure PermissionChecker cannot be constructed — e.g. $HOME is unresolvable
 // while a home-relative deny pattern is configured — so a leaf never runs unguarded.
-func BuildTools(root string, skill tool.InvokableTool) (loop.ToolSet, error) {
+func BuildTools(root string, skill tool.InvokableTool, conf confine.Confinement) (loop.ToolSet, error) {
 	approved := autoApprovedTools
 	if skill != nil {
 		approved = append(append([]string(nil), autoApprovedTools...), "Skill")
@@ -81,7 +88,13 @@ func BuildTools(root string, skill tool.InvokableTool) (loop.ToolSet, error) {
 		HardDeny:      tools.DefaultHardDeny(),
 		HardApprove:   tools.HardApproveRules{Tools: approved},
 	}
-	pc, err := tools.NewPermissionChecker(policy)
+	// conf carries the composition-root's OS-sandbox wiring: the checker gets the
+	// ceiling-posture stage holding the SAME executor Bash routes through, Bash runs
+	// confined (read-only mode — reviewer never writes), and Grep uses the read-only
+	// view. reviewer's static mode is ReadOnly, so posture never auto-approves Bash —
+	// it stays human-gated — but even an approved command runs under read-only OS
+	// confinement (defense in depth). A zero Confinement is the pre-sandbox behavior.
+	pc, err := tools.NewPermissionChecker(policy, conf.CheckerOptions()...)
 	if err != nil {
 		return loop.ToolSet{}, &ToolSetError{Cause: err}
 	}
@@ -89,8 +102,8 @@ func BuildTools(root string, skill tool.InvokableTool) (loop.ToolSet, error) {
 	registry := []tool.InvokableTool{
 		tools.NewReadFile(root, pc),
 		tools.NewGlob(root, pc),
-		tools.NewGrep(root, pc),
-		tools.NewBash(root),
+		tools.NewGrep(root, pc, conf.GrepOptions()...),
+		tools.NewBash(root, conf.BashOptions()...),
 		tools.NewTodo(),
 		tools.NewAskUser(),
 	}

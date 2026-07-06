@@ -14,6 +14,7 @@ import (
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/harness/pkg/tools"
 	"github.com/looprig/swe/agents/operator"
+	"github.com/looprig/swe/confine"
 )
 
 // operatorPrimaryArgs builds the inputs operatorPrimaryConfig / operatorPrimaryToolSet
@@ -104,7 +105,7 @@ func TestOperatorPrimaryConfigCarriesRuntimeContext(t *testing.T) {
 		t.Parallel()
 		deps, spawner, catalog, loader, skill := operatorPrimaryArgs(t, "/tmp/workspace-root")
 		rc := NewRuntimeContextProvider()
-		cfg, err := operatorPrimaryConfig(&fakeLLM{}, newModelFactory(), deps, spawner, catalog, rc, loader, skill)
+		cfg, err := operatorPrimaryConfig(&fakeLLM{}, newModelFactory(), deps, spawner, catalog, rc, loader, skill, confine.Confinement{})
 		if err != nil {
 			t.Fatalf("operatorPrimaryConfig() error = %v", err)
 		}
@@ -116,7 +117,7 @@ func TestOperatorPrimaryConfigCarriesRuntimeContext(t *testing.T) {
 	t.Run("nil provider -> RuntimeContext stays nil (OFF)", func(t *testing.T) {
 		t.Parallel()
 		deps, spawner, catalog, loader, skill := operatorPrimaryArgs(t, "/tmp/workspace-root")
-		cfg, err := operatorPrimaryConfig(&fakeLLM{}, newModelFactory(), deps, spawner, catalog, nil, loader, skill)
+		cfg, err := operatorPrimaryConfig(&fakeLLM{}, newModelFactory(), deps, spawner, catalog, nil, loader, skill, confine.Confinement{})
 		if err != nil {
 			t.Fatalf("operatorPrimaryConfig() error = %v", err)
 		}
@@ -150,14 +151,14 @@ func TestOperatorPrimaryToolSetIsLeafUnionPlusSubagent(t *testing.T) {
 	t.Parallel()
 
 	deps, spawner, catalog, _, skill := operatorPrimaryArgs(t, "/tmp/workspace-root")
-	primary, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, spawner, catalog, skill)
+	primary, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, spawner, catalog, skill, confine.Confinement{})
 	if err != nil {
 		t.Fatalf("operatorPrimaryToolSet() error = %v", err)
 	}
 	if primary.Permission == nil {
 		t.Fatal("operatorPrimaryToolSet() Permission = nil, want non-nil PermissionChecker")
 	}
-	leaf, err := operator.BuildTools(deps.Root, deps.HTTPCl, skill)
+	leaf, err := operator.BuildTools(deps.Root, deps.HTTPCl, skill, confine.Confinement{})
 	if err != nil {
 		t.Fatalf("operator.BuildTools() error = %v", err)
 	}
@@ -199,7 +200,7 @@ func TestOperatorPrimaryToolSetFailsClosedOnUnresolvableHome(t *testing.T) {
 
 	// (1) operatorPrimaryToolSet is the entry point that constructs the checker. It returns
 	// before touching the (here nil) spawner/catalog/skill, so nil args are safe.
-	ts, err := operatorPrimaryToolSet(root, &http.Client{}, nil, nil, nil)
+	ts, err := operatorPrimaryToolSet(root, &http.Client{}, nil, nil, nil, confine.Confinement{})
 	var ptse *PrimaryToolSetError
 	if !errors.As(err, &ptse) {
 		t.Fatalf("operatorPrimaryToolSet() error = %T (%v), want *PrimaryToolSetError", err, err)
@@ -214,7 +215,7 @@ func TestOperatorPrimaryToolSetFailsClosedOnUnresolvableHome(t *testing.T) {
 
 	// (2) operatorPrimaryConfig threads the SAME typed error up, returning a zero config.
 	deps, spawner, catalog, loader, skill := operatorPrimaryArgs(t, root)
-	cfg, err := operatorPrimaryConfig(&fakeLLM{}, newModelFactory(), deps, spawner, catalog, nil, loader, skill)
+	cfg, err := operatorPrimaryConfig(&fakeLLM{}, newModelFactory(), deps, spawner, catalog, nil, loader, skill, confine.Confinement{})
 	if !errors.As(err, &hue) {
 		t.Fatalf("operatorPrimaryConfig() error does not unwrap to *tools.HomeUnresolvableError: %v", err)
 	}
@@ -243,7 +244,7 @@ func TestOperatorPrimaryToolSetPermissions(t *testing.T) {
 	// root) clears for the read/search tools.
 	root := t.TempDir()
 	deps, spawner, catalog, _, skill := operatorPrimaryArgs(t, root)
-	ts, err := operatorPrimaryToolSet(root, deps.HTTPCl, spawner, catalog, skill)
+	ts, err := operatorPrimaryToolSet(root, deps.HTTPCl, spawner, catalog, skill, confine.Confinement{})
 	if err != nil {
 		t.Fatalf("operatorPrimaryToolSet() error = %v", err)
 	}
@@ -313,11 +314,11 @@ func TestOperatorPrimaryToolSetPermissionParity(t *testing.T) {
 	// tools on both checkers.
 	root := t.TempDir()
 	deps, spawner, catalog, _, skill := operatorPrimaryArgs(t, root)
-	leaf, err := operatorBuiltin().build(deps, skill) // == operator.BuildTools(root, http, skill)
+	leaf, err := operatorBuiltin().build(deps, skill, confine.Confinement{}) // == operator.BuildTools(root, http, skill)
 	if err != nil {
 		t.Fatalf("operatorBuiltin().build() error = %v", err)
 	}
-	primary, err := operatorPrimaryToolSet(root, deps.HTTPCl, spawner, catalog, skill)
+	primary, err := operatorPrimaryToolSet(root, deps.HTTPCl, spawner, catalog, skill, confine.Confinement{})
 	if err != nil {
 		t.Fatalf("operatorPrimaryToolSet() error = %v", err)
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/harness/pkg/tools"
+	"github.com/looprig/swe/confine"
 )
 
 // fakeSkill is a minimal tool.InvokableTool named "Skill" used to prove the leaf
@@ -93,7 +94,7 @@ func equalStrings(a, b []string) bool {
 func TestBuildToolSetAllowlist(t *testing.T) {
 	t.Parallel()
 
-	ts, err := BuildTools("/tmp/workspace-root", testHTTPClient(), nil)
+	ts, err := BuildTools("/tmp/workspace-root", testHTTPClient(), nil, confine.Confinement{})
 	if err != nil {
 		t.Fatalf("BuildTools() error = %v", err)
 	}
@@ -126,7 +127,7 @@ func TestBuildToolSetAllowlist(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("seed file: %v", err)
 	}
-	tsReal, err := BuildTools(root, testHTTPClient(), nil)
+	tsReal, err := BuildTools(root, testHTTPClient(), nil, confine.Confinement{})
 	if err != nil {
 		t.Fatalf("BuildTools() error = %v", err)
 	}
@@ -166,7 +167,7 @@ func TestBuildToolSetAllowlist(t *testing.T) {
 func TestBuildToolSetWithSkill(t *testing.T) {
 	t.Parallel()
 
-	ts, err := BuildTools("/tmp/workspace-root", testHTTPClient(), fakeSkill{})
+	ts, err := BuildTools("/tmp/workspace-root", testHTTPClient(), fakeSkill{}, confine.Confinement{})
 	if err != nil {
 		t.Fatalf("BuildTools() error = %v", err)
 	}
@@ -202,7 +203,7 @@ func TestBuildToolsFailsClosedOnUnresolvableHome(t *testing.T) {
 	// NOT t.Parallel(): HOME is process-global and t.Setenv panics under t.Parallel.
 	t.Setenv("HOME", "")
 
-	ts, err := BuildTools(t.TempDir(), testHTTPClient(), nil)
+	ts, err := BuildTools(t.TempDir(), testHTTPClient(), nil, confine.Confinement{})
 
 	var tse *ToolSetError
 	if !errors.As(err, &tse) {

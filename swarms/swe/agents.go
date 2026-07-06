@@ -6,6 +6,7 @@ import (
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/harness/pkg/tools"
 	"github.com/looprig/swe/agents/reviewer"
+	"github.com/looprig/swe/confine"
 )
 
 // operatorSkills is the operator leaf's closed set of allowed embedded skills. The
@@ -38,11 +39,19 @@ type leafBuiltin struct {
 	// the gate; the swarm-wide RuntimeSkills mode is the other half — BOTH must be true to
 	// wire the source.
 	allowsRuntimeSkills bool
+	// securityMode is the leaf's STATIC per-role security mode (SPEC §8): the fixed
+	// ordinal its effective mode is clamped up to (never exceeded), before the session
+	// ceiling clamps it further. operator → Write (2, workspace write/edit + gated
+	// bash), reviewer → ReadOnly (1, broad read, no write, all gated). The composition
+	// root reads it per spawn to build the leaf's confinement (min(this, ceiling)).
+	securityMode uint8
 	// build adapts the leaf's raw BuildTools, threading the OPTIONAL per-agent Skill
 	// tool (nil when the agent has neither embedded skills nor a wired workspace
-	// source) into the leaf's allowlist. It returns a typed error (never a nil,
-	// checker-less tool set) when the fail-secure PermissionChecker cannot be built.
-	build func(d LeafToolDeps, skill tool.InvokableTool) (loop.ToolSet, error)
+	// source) AND the per-spawn OS-sandbox Confinement (built by the composition root
+	// from securityMode + the shared ceiling) into the leaf's allowlist. It returns a
+	// typed error (never a nil, checker-less tool set) when the fail-secure
+	// PermissionChecker cannot be built.
+	build func(d LeafToolDeps, skill tool.InvokableTool, conf confine.Confinement) (loop.ToolSet, error)
 }
 
 // leafBuiltins is the fixed roster of spawnable leaves, in deterministic catalog
@@ -55,11 +64,12 @@ func leafBuiltins() []leafBuiltin {
 	return []leafBuiltin{
 		operatorBuiltin(),
 		{
-			name:        reviewer.Name,
-			description: reviewer.Description,
-			role:        reviewer.Role,
-			build: func(d LeafToolDeps, s tool.InvokableTool) (loop.ToolSet, error) {
-				return reviewer.BuildTools(d.Root, s)
+			name:         reviewer.Name,
+			description:  reviewer.Description,
+			role:         reviewer.Role,
+			securityMode: reviewerRoleMode, // §8: reviewer is read-only (critique, never mutates)
+			build: func(d LeafToolDeps, s tool.InvokableTool, conf confine.Confinement) (loop.ToolSet, error) {
+				return reviewer.BuildTools(d.Root, s, conf)
 			},
 		},
 	}
@@ -125,7 +135,14 @@ func leafRegistry(deps LeafToolDeps, cfg Config) (*Registry, skillLoaderDescribe
 			Role:                b.role,
 			Skills:              b.skills,
 			AllowsRuntimeSkills: b.allowsRuntimeSkills,
-			BuildTools:          func(d LeafToolDeps) (loop.ToolSet, error) { return b.build(d, skill) },
+			// Per SPAWN: build the leaf's OS-sandbox confinement from its static role
+			// mode + the ceiling the spawner passes in d.Ceiling (the PARENT's effective
+			// source for a child — the non-escalation clamp), then thread it (and the
+			// captured Skill tool) into the leaf's fresh-checker tool set.
+			BuildTools: func(d LeafToolDeps) (loop.ToolSet, error) {
+				conf := buildConfinement(d.Root, b.securityMode, d.Ceiling)
+				return b.build(d, skill, conf)
+			},
 		})
 	}
 

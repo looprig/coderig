@@ -16,6 +16,7 @@ import (
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/harness/pkg/tools"
+	"github.com/looprig/swe/confine"
 )
 
 // Name is the operator's immutable attribution name.
@@ -86,10 +87,17 @@ var autoApprovedTools = []string{"ReadFile", "Glob", "Grep", "Todo", "AskUser"}
 // "Skill" is appended to the hard-approve set, so it auto-approves — a scoped,
 // side-effect-free read of trusted in-repo content, the same class as ReadFile.
 //
+// conf is the composition-root's per-spawn OS-sandbox wiring (confine.Confinement):
+// it routes Bash through the confined executor, Grep through the executor's read-only
+// view, and registers the ceiling-posture stage on the checker holding that SAME
+// executor. Under an enforcing backend at Write mode this auto-approves WriteFile/
+// EditFile (confined by in-process write-containment) and trivial Bash (interlock
+// passing); a zero Confinement leaves everything human-gated as before.
+//
 // It returns a typed *ToolSetError (never a nil, checker-less tool set) when the
 // fail-secure PermissionChecker cannot be constructed — e.g. $HOME is unresolvable
 // while a home-relative deny pattern is configured — so a leaf never runs unguarded.
-func BuildTools(root string, httpCl *http.Client, skill tool.InvokableTool) (loop.ToolSet, error) {
+func BuildTools(root string, httpCl *http.Client, skill tool.InvokableTool, conf confine.Confinement) (loop.ToolSet, error) {
 	approved := autoApprovedTools
 	if skill != nil {
 		approved = append(append([]string(nil), autoApprovedTools...), "Skill")
@@ -99,7 +107,11 @@ func BuildTools(root string, httpCl *http.Client, skill tool.InvokableTool) (loo
 		HardDeny:      tools.DefaultHardDeny(),
 		HardApprove:   tools.HardApproveRules{Tools: approved},
 	}
-	pc, err := tools.NewPermissionChecker(policy)
+	// conf carries the composition-root's OS-sandbox wiring: the checker gets the
+	// ceiling-posture stage (SPEC §10.2) holding the SAME executor Bash routes through,
+	// Bash runs confined, and Grep uses the read-only view. A zero Confinement leaves
+	// all three unset — the pre-sandbox behavior (direct exec, no posture, all gated).
+	pc, err := tools.NewPermissionChecker(policy, conf.CheckerOptions()...)
 	if err != nil {
 		return loop.ToolSet{}, &ToolSetError{Cause: err}
 	}
@@ -107,10 +119,10 @@ func BuildTools(root string, httpCl *http.Client, skill tool.InvokableTool) (loo
 	registry := []tool.InvokableTool{
 		tools.NewReadFile(root, pc),
 		tools.NewGlob(root, pc),
-		tools.NewGrep(root, pc),
+		tools.NewGrep(root, pc, conf.GrepOptions()...),
 		tools.NewWriteFile(root),
 		tools.NewEditFile(root),
-		tools.NewBash(root),
+		tools.NewBash(root, conf.BashOptions()...),
 		tools.NewWebSearch(tools.NewDuckDuckGoProvider(httpCl)),
 		tools.NewFetch(httpCl),
 		tools.NewTodo(),

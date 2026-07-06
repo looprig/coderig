@@ -18,6 +18,7 @@ import (
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/inference"
 	"github.com/looprig/swe/agents/operator"
+	"github.com/looprig/swe/confine"
 )
 
 // acceptance_test.go is the swarm's CROSS-CUTTING acceptance suite: it drives the
@@ -329,7 +330,7 @@ func TestAcceptanceLeavesCannotSpawn(t *testing.T) {
 	// leaf union PLUS Subagent (the per-tool permission assertions live in swarm_test.go).
 	primarySpawner := newSwarmSpawner(reg, deps, newScriptedSwarmLLM(), newModelFactory(), loader, NewRuntimeContextProvider())
 	primarySkill := buildLeafSkill(loader, operatorBuiltin(), deps, Config{})
-	primaryTS, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, primarySpawner, toolCatalog(reg), primarySkill)
+	primaryTS, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, primarySpawner, toolCatalog(reg), primarySkill, confine.Confinement{})
 	if err != nil {
 		t.Fatalf("operatorPrimaryToolSet() error = %v", err)
 	}

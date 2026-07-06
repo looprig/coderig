@@ -20,6 +20,7 @@ import (
 	"github.com/looprig/inference/auth"
 	"github.com/looprig/llm/auto"
 	"github.com/looprig/swe/agents/operator"
+	"github.com/looprig/swe/confine"
 )
 
 // errTurnInterrupted is the eval-harness sentinel for a turn whose context was
@@ -122,7 +123,7 @@ func (m modelCompleter) Complete(ctx context.Context, prompt string) (string, er
 // isolation, not its delegation behaviour (the production primary built by
 // operatorPrimaryConfig additionally carries Subagent + the delegation guidance).
 func newOperatorPrimary(ctx context.Context, client inference.Client, factory ModelFactory, root string) (*sessionAgent, error) {
-	toolSet, err := operator.BuildTools(root, newHTTPClient(), nil)
+	toolSet, err := operator.BuildTools(root, newHTTPClient(), nil, confine.Confinement{})
 	if err != nil {
 		return nil, err
 	}
