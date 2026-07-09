@@ -59,11 +59,11 @@ func (r operatorRunner) Run(ctx context.Context, input string) (string, error) {
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case ev, ok := <-sub.Events():
+		case d, ok := <-sub.Events():
 			if !ok {
 				return "", sub.Err() // hub-forced loss (or nil on intentional close)
 			}
-			switch e := ev.(type) {
+			switch e := d.Event.(type) {
 			case event.TurnStarted:
 				if e.Cause.CommandID == id {
 					turnID = e.TurnID

@@ -2,6 +2,7 @@ package swe
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"sync"
@@ -9,13 +10,12 @@ import (
 	"github.com/looprig/core/content"
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/event"
+	"github.com/looprig/harness/pkg/gate"
 	"github.com/looprig/harness/pkg/journal"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/session"
 	"github.com/looprig/harness/pkg/sessionstore"
 	"github.com/looprig/harness/pkg/tool"
-	"github.com/looprig/harness/pkg/transcript"
-	"github.com/looprig/harness/pkg/transcript/journalsource"
 )
 
 // sessionAgent is a thin wrapper over a session.Session that exposes the tui.Agent
@@ -51,14 +51,6 @@ type sessionAgent struct {
 	replayer              journal.EventReplayer
 	restoredSessionID     uuid.UUID
 	restoredPrimaryLoopID uuid.UUID
-
-	// recordReplayer is the full journal stream read side for transcript export. Unlike
-	// ReplayBacklog's EventReplayer, it includes command records so user gate decisions
-	// survive export. It is nil for headless/in-memory sessions.
-	recordReplayer      journal.RecordReplayer
-	exportSessionID     uuid.UUID
-	primarySystemPrompt string
-	primaryLoopID       uuid.UUID
 }
 
 // newSessionAgent constructs a sessionAgent from a finished primary loop.Config and
@@ -183,34 +175,6 @@ func (a *sessionAgent) ReplayBacklog(ctx context.Context) ([]event.Event, error)
 	}
 }
 
-// ExportSource returns the full journal stream and the live primary system prompt for
-// transcript export. Subagent prompts are built transiently at spawn time and are not
-// retained here, so the resolver intentionally degrades non-primary loops.
-func (a *sessionAgent) ExportSource(context.Context) (transcript.RecordSource, transcript.SystemPromptResolver, error) {
-	if a.recordReplayer == nil {
-		return nil, nil, &journalsource.ExportUnavailableError{}
-	}
-	src := journalsource.Open(a.recordReplayer, journal.ReplayRequest{
-		SessionID: a.exportSessionID,
-		LoopID:    uuid.UUID{},
-		From:      journal.Beginning(),
-		Follow:    false,
-	})
-	return src, primaryPromptResolver{loopID: a.primaryLoopID, prompt: a.primarySystemPrompt}, nil
-}
-
-type primaryPromptResolver struct {
-	loopID uuid.UUID
-	prompt string
-}
-
-func (r primaryPromptResolver) SystemPrompt(loopID uuid.UUID) (string, bool) {
-	if loopID == r.loopID {
-		return r.prompt, true
-	}
-	return "", false
-}
-
 // SessionID returns the underlying session's id — the composition root reads it to print
 // the session being resumed and to key the catalog/lease. It is read-only identity.
 func (a *sessionAgent) SessionID() uuid.UUID { return a.session.SessionID }
@@ -224,25 +188,98 @@ func (a *sessionAgent) Interrupt(ctx context.Context) (bool, error) {
 // from the primary spec at construction.
 func (a *sessionAgent) AcceptsImages() bool { return a.acceptsImages }
 
+// GateNotOpenError reports that no open gate matches the tool-execution id a gate
+// reply addressed. It is fail-secure: an Approve/Deny/ProvideAnswer for a call with
+// no live gate (already resolved, unknown, or never opened) touches nothing and
+// returns this rather than silently succeeding. It is errors.As-able.
+type GateNotOpenError struct{ ToolExecutionID uuid.UUID }
+
+func (e *GateNotOpenError) Error() string {
+	return "swe: no open gate for tool-execution id " + e.ToolExecutionID.String()
+}
+
+// gateIDForCall resolves the session gate.ID of the open gate whose subject matches
+// toolExecutionID. The harness mints a fresh gate.ID per gate (distinct from the
+// tool-execution id the TUI keys on), so the reply path must translate. A
+// tool-execution id is a per-call UUID unique across loops, so matching on it alone
+// is unambiguous (the loop id the TUI also carries is redundant here — RespondGate
+// routes by the gate's own stored route). The loop's install-before-emit ordering
+// guarantees the gate is listable by the time the TUI observes the request event, so
+// this lookup never races the open. An unmatched call fails secure with
+// *GateNotOpenError.
+func (a *sessionAgent) gateIDForCall(ctx context.Context, toolExecutionID uuid.UUID) (gate.ID, error) {
+	for _, g := range a.session.ListGates(ctx) {
+		if g.Subject.ToolExecutionID == toolExecutionID {
+			return g.ID, nil
+		}
+	}
+	return gate.ID{}, &GateNotOpenError{ToolExecutionID: toolExecutionID}
+}
+
 // Approve resolves a pending tool-call permission gate, granting it at scope. It
-// delegates to the session. loopID is the loop that opened the gate, so the reply
-// reaches the right loop in a multi-loop session.
+// resolves the gate.ID from callID (the tool-execution id) and submits a
+// user-sourced "approve" GateResponse to the session. loopID is retained for the
+// tui.Agent contract but is not needed for routing — RespondGate dispatches by the
+// gate's stored route.
 func (a *sessionAgent) Approve(ctx context.Context, loopID, callID uuid.UUID, scope tool.ApprovalScope) error {
-	return a.session.Approve(ctx, loopID, callID, scope)
+	_ = loopID
+	gateID, err := a.gateIDForCall(ctx, callID)
+	if err != nil {
+		return err
+	}
+	scopeValue, ok := tool.ApprovalScopeValue(scope)
+	if !ok {
+		return &GateNotOpenError{ToolExecutionID: callID}
+	}
+	rawScope, err := json.Marshal(scopeValue)
+	if err != nil {
+		return err
+	}
+	return a.session.RespondGate(ctx, gate.GateResponse{
+		GateID: gateID,
+		Action: "approve",
+		Values: map[string]json.RawMessage{"scope": rawScope},
+		Source: gate.ResponseSource{Kind: gate.ResponseFromUser},
+	})
 }
 
 // Deny resolves a pending tool-call permission gate by failing it closed
-// (fail-secure); nothing is persisted. It delegates to the session. loopID names the
-// gate-opening loop so the reply is dispatched there.
+// (fail-secure); nothing is persisted. It resolves the gate.ID from callID and
+// submits a user-sourced "deny" GateResponse. loopID is retained for the tui.Agent
+// contract but is not needed for routing.
 func (a *sessionAgent) Deny(ctx context.Context, loopID, callID uuid.UUID) error {
-	return a.session.Deny(ctx, loopID, callID)
+	_ = loopID
+	gateID, err := a.gateIDForCall(ctx, callID)
+	if err != nil {
+		return err
+	}
+	return a.session.RespondGate(ctx, gate.GateResponse{
+		GateID: gateID,
+		Action: "deny",
+		Source: gate.ResponseSource{Kind: gate.ResponseFromUser},
+	})
 }
 
-// ProvideAnswer supplies the user's reply to a pending AskUser request. It is the
-// TUI-facing name for the session's ProvideUserInput, to which it delegates. loopID
-// names the gate-opening loop so the answer reaches the right loop.
+// ProvideAnswer supplies the user's reply to a pending AskUser request. It resolves
+// the gate.ID from callID and submits a user-sourced "answer" GateResponse carrying
+// the reply. loopID is retained for the tui.Agent contract but is not needed for
+// routing.
 func (a *sessionAgent) ProvideAnswer(ctx context.Context, loopID, callID uuid.UUID, answer string) error {
-	return a.session.ProvideUserInput(ctx, loopID, callID, answer)
+	_ = loopID
+	gateID, err := a.gateIDForCall(ctx, callID)
+	if err != nil {
+		return err
+	}
+	rawAnswer, err := json.Marshal(answer)
+	if err != nil {
+		return err
+	}
+	return a.session.RespondGate(ctx, gate.GateResponse{
+		GateID: gateID,
+		Action: "answer",
+		Values: map[string]json.RawMessage{"answer": rawAnswer},
+		Source: gate.ResponseSource{Kind: gate.ResponseFromUser},
+	})
 }
 
 // Close gracefully shuts the session down and releases the session's root context.

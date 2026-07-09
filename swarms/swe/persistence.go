@@ -261,18 +261,6 @@ func (f *SessionStoreFactory) openNew(ctx context.Context, wiring operatorWiring
 	}
 	wiring.spawner.bind(agent.session) // late-bind before any turn runs
 
-	// A NEW session has no backlog to repaint: the event replayer stays nil → ReplayBacklog nil.
-	// The record replayer feeds transcript export; a failure to open it degrades export only (a
-	// nil recordReplayer → ExportUnavailableError), never the live session.
-	if rr, rerr := f.store.OpenRecordReplayer(sessionID, sessionstore.ReplayRequest{}); rerr != nil {
-		slog.Warn("swe: record replayer unavailable; transcript export disabled", "session", sessionID, "err", rerr)
-	} else {
-		agent.recordReplayer = rr
-	}
-	agent.exportSessionID = sessionID
-	agent.primarySystemPrompt = wiring.cfg.System
-	agent.primaryLoopID = agent.session.PrimaryLoopID()
-
 	agent.teardown = stopGCTeardown(f.scheduleGC(agent.rootCtx, sessionID, lease))
 	return agent, nil
 }
@@ -280,8 +268,8 @@ func (f *SessionStoreFactory) openNew(ctx context.Context, wiring operatorWiring
 // openResume RESTORES an existing session via session.Restore, which acquires the lease, opens
 // the journal, folds the durable log, materializes the last checkpointed workspace (because the
 // workspace store is wired), brings the primary loop up idle, and installs its own
-// lease-release-on-Shutdown hook. The resumed agent's replayers are wired so ReplayBacklog can
-// repaint the restored transcript and ExportSource can export the full stream.
+// lease-release-on-Shutdown hook. The resumed agent's event replayer is wired so ReplayBacklog
+// can repaint the restored transcript.
 func (f *SessionStoreFactory) openResume(ctx context.Context, wiring operatorWiring, sel SessionSelector, root string, fields session.ConfigFingerprintFields) (*sessionAgent, error) {
 	// Inject the SAME swarm-level fingerprint fields the original run stamped, so Restore's live
 	// fingerprint is computed identically; a different skill-trust mode or workspace then rejects
@@ -321,14 +309,6 @@ func (f *SessionStoreFactory) openResume(ctx context.Context, wiring operatorWir
 	}
 	agent.restoredSessionID = sel.Resume
 	agent.restoredPrimaryLoopID = agent.session.PrimaryLoopID()
-	if rr, rerr := f.store.OpenRecordReplayer(sel.Resume, sessionstore.ReplayRequest{}); rerr != nil {
-		slog.Warn("swe: record replayer unavailable; transcript export disabled", "session", sel.Resume, "err", rerr)
-	} else {
-		agent.recordReplayer = rr
-	}
-	agent.exportSessionID = sel.Resume
-	agent.primarySystemPrompt = wiring.cfg.System
-	agent.primaryLoopID = agent.session.PrimaryLoopID()
 	return agent, nil
 }
 
@@ -346,8 +326,8 @@ func watchSessionEvents(agent *sessionAgent) {
 	}
 	go func() {
 		defer func() { _ = sub.Close() }()
-		for ev := range sub.Events() {
-			if _, ok := ev.(event.SessionIdle); !ok {
+		for d := range sub.Events() {
+			if _, ok := d.Event.(event.SessionIdle); !ok {
 				continue
 			}
 			ctx, cancel := context.WithTimeout(agent.rootCtx, checkpointTimeout)

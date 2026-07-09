@@ -243,9 +243,9 @@ func newRecorder(t *testing.T, agent *sessionAgent) *recorder {
 	t.Cleanup(func() { _ = sub.Close() })
 	rec := &recorder{}
 	go func() {
-		for ev := range sub.Events() {
+		for d := range sub.Events() {
 			rec.mu.Lock()
-			rec.events = append(rec.events, ev)
+			rec.events = append(rec.events, d.Event)
 			rec.mu.Unlock()
 		}
 	}()
@@ -624,9 +624,9 @@ func newAllScopeRecorder(t *testing.T, agent *sessionAgent) *recorder {
 	t.Cleanup(func() { _ = sub.Close() })
 	rec := &recorder{}
 	go func() {
-		for ev := range sub.Events() {
+		for d := range sub.Events() {
 			rec.mu.Lock()
-			rec.events = append(rec.events, ev)
+			rec.events = append(rec.events, d.Event)
 			rec.mu.Unlock()
 		}
 	}()

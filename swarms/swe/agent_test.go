@@ -3,18 +3,13 @@ package swe
 import (
 	"context"
 	"errors"
-	"io"
 	"testing"
 
 	"github.com/looprig/cli/tui"
 	"github.com/looprig/core/uuid"
-	"github.com/looprig/harness/pkg/event"
-	"github.com/looprig/harness/pkg/journal"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/session"
 	"github.com/looprig/harness/pkg/tool"
-	"github.com/looprig/harness/pkg/transcript"
-	"github.com/looprig/harness/pkg/transcript/journalsource"
 	"github.com/looprig/inference"
 	"github.com/looprig/llm"
 )
@@ -146,114 +141,14 @@ func TestSessionAgentReplayBacklogNilForNewSession(t *testing.T) {
 	}
 }
 
-func TestSessionAgentExportSource(t *testing.T) {
-	t.Parallel()
-
-	sessionID := mustUUID(t)
-	primaryLoopID := mustUUID(t)
-	otherLoopID := mustUUID(t)
-	const primarySystemPrompt = "primary system prompt"
-
-	tests := []struct {
-		name          string
-		agent         *sessionAgent
-		wantErr       bool
-		wantOpen      bool
-		wantPrompt    string
-		wantPromptOK  bool
-		wantOtherOK   bool
-		wantSessionID uuid.UUID
-	}{
-		{
-			name:    "in-memory agent returns export unavailable",
-			agent:   &sessionAgent{},
-			wantErr: true,
-		},
-		{
-			name: "journal-backed agent returns source and primary-only prompt resolver",
-			agent: &sessionAgent{
-				recordReplayer:      &fakeRecordReplayer{records: []journal.JournalRecord{journal.NewEventRecord(event.SessionStarted{})}},
-				exportSessionID:     sessionID,
-				primaryLoopID:       primaryLoopID,
-				primarySystemPrompt: primarySystemPrompt,
-			},
-			wantOpen:      true,
-			wantPrompt:    primarySystemPrompt,
-			wantPromptOK:  true,
-			wantOtherOK:   false,
-			wantSessionID: sessionID,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			src, resolver, err := tt.agent.ExportSource(context.Background())
-
-			if tt.wantErr {
-				var unavailable *journalsource.ExportUnavailableError
-				if !errors.As(err, &unavailable) {
-					t.Fatalf("ExportSource() error = %v, want *journalsource.ExportUnavailableError", err)
-				}
-				if src != nil || resolver != nil {
-					t.Fatalf("ExportSource() returned src=%v resolver=%v with unavailable error", src, resolver)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("ExportSource() error = %v", err)
-			}
-			if src == nil {
-				t.Fatal("ExportSource() source is nil")
-			}
-			if resolver == nil {
-				t.Fatal("ExportSource() resolver is nil")
-			}
-
-			gotPrompt, gotOK := resolver.SystemPrompt(primaryLoopID)
-			if gotPrompt != tt.wantPrompt || gotOK != tt.wantPromptOK {
-				t.Errorf("SystemPrompt(primary) = (%q, %v), want (%q, %v)", gotPrompt, gotOK, tt.wantPrompt, tt.wantPromptOK)
-			}
-			if gotOther, gotOtherOK := resolver.SystemPrompt(otherLoopID); gotOther != "" || gotOtherOK != tt.wantOtherOK {
-				t.Errorf("SystemPrompt(other) = (%q, %v), want (\"\", %v)", gotOther, gotOtherOK, tt.wantOtherOK)
-			}
-
-			rec, err := src.Next(context.Background())
-			if err != nil {
-				t.Fatalf("source Next() error = %v", err)
-			}
-			if _, ok := rec.(transcript.EventRecord); !ok {
-				t.Fatalf("source Next() record = %T, want transcript.EventRecord", rec)
-			}
-			rr, ok := tt.agent.recordReplayer.(*fakeRecordReplayer)
-			if !ok {
-				t.Fatalf("recordReplayer = %T, want *fakeRecordReplayer", tt.agent.recordReplayer)
-			}
-			if rr.opens != 1 {
-				t.Errorf("recordReplayer opens = %d, want 1", rr.opens)
-			}
-			if rr.req.SessionID != tt.wantSessionID {
-				t.Errorf("ReplayRequest.SessionID = %v, want %v", rr.req.SessionID, tt.wantSessionID)
-			}
-			if !rr.req.LoopID.IsZero() {
-				t.Errorf("ReplayRequest.LoopID = %v, want zero for all loops", rr.req.LoopID)
-			}
-			if rr.req.From != journal.Beginning() {
-				t.Errorf("ReplayRequest.From = %#v, want Beginning", rr.req.From)
-			}
-			if rr.req.Follow {
-				t.Error("ReplayRequest.Follow = true, want false")
-			}
-		})
-	}
-}
-
-// TestSessionAgentGateTrioDelegatesToSession proves the three gate wrappers —
-// Approve, Deny, ProvideAnswer — each forward to the underlying session rather
-// than short-circuiting locally. The proof is deterministic: Close FIRST (blocks
-// until the actor exits and loop.Done is closed), then each call deterministically
-// routes onto the loop-exited path inside the session.
-func TestSessionAgentGateTrioDelegatesToSession(t *testing.T) {
+// TestSessionAgentGateTrioNoOpenGate proves the three gate wrappers — Approve,
+// Deny, ProvideAnswer — fail secure with *GateNotOpenError when no open gate matches
+// the tool-execution id, rather than silently succeeding. Each wrapper resolves the
+// gate.ID via the session's ListGates before responding; a closed session (Closed
+// FIRST, so the actor has exited and no gate is open) has no listable gate, so the
+// lookup returns *GateNotOpenError for a random call id. The happy-path forwarding to
+// RespondGate is covered end-to-end by the acceptance/runtime integration tests.
+func TestSessionAgentGateTrioNoOpenGate(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -287,9 +182,9 @@ func TestSessionAgentGateTrioDelegatesToSession(t *testing.T) {
 
 			err := tt.invoke(context.Background(), a)
 
-			var se *session.SessionError
-			if !errors.As(err, &se) || se.Kind != session.SessionLoopExited {
-				t.Fatalf("err = %v, want *session.SessionError{SessionLoopExited}", err)
+			var notOpen *GateNotOpenError
+			if !errors.As(err, &notOpen) {
+				t.Fatalf("err = %v, want *GateNotOpenError", err)
 			}
 		})
 	}
@@ -322,31 +217,3 @@ func mustUUID(t *testing.T) uuid.UUID {
 	}
 	return id
 }
-
-type fakeRecordReplayer struct {
-	records []journal.JournalRecord
-	req     journal.ReplayRequest
-	opens   int
-}
-
-func (f *fakeRecordReplayer) Open(_ context.Context, req journal.ReplayRequest) (journal.RecordCursor, error) {
-	f.opens++
-	f.req = req
-	return &fakeRecordCursor{records: f.records}, nil
-}
-
-type fakeRecordCursor struct {
-	records []journal.JournalRecord
-	index   int
-}
-
-func (c *fakeRecordCursor) Next(context.Context) (journal.JournalRecord, uint64, error) {
-	if c.index >= len(c.records) {
-		return nil, 0, io.EOF
-	}
-	rec := c.records[c.index]
-	c.index++
-	return rec, uint64(c.index), nil
-}
-
-func (c *fakeRecordCursor) Close() error { return nil }

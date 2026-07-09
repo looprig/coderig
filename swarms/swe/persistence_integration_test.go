@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +15,6 @@ import (
 	"github.com/looprig/fsstore"
 	"github.com/looprig/harness/pkg/event"
 	"github.com/looprig/harness/pkg/identity"
-	"github.com/looprig/harness/pkg/transcript"
 	"github.com/looprig/swe/agents/operator"
 )
 
@@ -62,11 +60,11 @@ func drainTurn(t *testing.T, a *sessionAgent, text string) {
 	timeout := time.After(20 * time.Second)
 	for {
 		select {
-		case ev, ok := <-sub.Events():
+		case d, ok := <-sub.Events():
 			if !ok {
 				t.Fatal("subscription closed before a terminal")
 			}
-			switch ev.(type) {
+			switch d.Event.(type) {
 			case event.TurnDone, event.TurnFailed, event.TurnInterrupted:
 				return
 			}
@@ -95,11 +93,11 @@ func drainUntilCheckpoint(t *testing.T, a *sessionAgent, text string) {
 	timeout := time.After(30 * time.Second)
 	for {
 		select {
-		case ev, ok := <-sub.Events():
+		case d, ok := <-sub.Events():
 			if !ok {
 				t.Fatal("subscription closed before a workspace checkpoint")
 			}
-			if _, ok := ev.(event.WorkspaceCheckpointed); ok {
+			if _, ok := d.Event.(event.WorkspaceCheckpointed); ok {
 				return
 			}
 		case <-timeout:
@@ -267,88 +265,6 @@ func TestSessionStoreWorkspaceRoundTrip(t *testing.T) {
 	}
 	if string(got) != body {
 		t.Errorf("materialized workspace file = %q, want %q", string(got), body)
-	}
-}
-
-func TestSessionStoreExportSource(t *testing.T) {
-	f := newIntegrationFactory(t)
-
-	tests := []struct {
-		name  string
-		setup func(t *testing.T) *sessionAgent
-	}{
-		{
-			name: "new persisted session exports full journal stream",
-			setup: func(t *testing.T) *sessionAgent {
-				t.Helper()
-				a, err := f.openWithClient(context.Background(),
-					&fakeLLM{chunks: []content.Chunk{textChunk("new reply")}}, newModelFactory(), SessionSelector{}, Config{})
-				if err != nil {
-					t.Fatalf("openWithClient (new): %v", err)
-				}
-				return a
-			},
-		},
-		{
-			name: "resumed persisted session exports full journal stream",
-			setup: func(t *testing.T) *sessionAgent {
-				t.Helper()
-				a, err := f.openWithClient(context.Background(),
-					&fakeLLM{chunks: []content.Chunk{textChunk("before resume")}}, newModelFactory(), SessionSelector{}, Config{})
-				if err != nil {
-					t.Fatalf("openWithClient (new): %v", err)
-				}
-				drainTurn(t, a, "seed")
-				sessionID := a.SessionID()
-				if err := a.Close(context.Background()); err != nil {
-					t.Fatalf("Close (original): %v", err)
-				}
-
-				resumed, err := f.openWithClient(context.Background(),
-					&fakeLLM{chunks: []content.Chunk{textChunk("after resume")}}, newModelFactory(), SessionSelector{Resume: sessionID}, Config{})
-				if err != nil {
-					t.Fatalf("openWithClient (resume): %v", err)
-				}
-				return resumed
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			a := tt.setup(t)
-			t.Cleanup(func() { _ = a.Close(context.Background()) })
-
-			src, resolver, err := a.ExportSource(context.Background())
-			if err != nil {
-				t.Fatalf("ExportSource() error = %v", err)
-			}
-			if src == nil {
-				t.Fatal("ExportSource() source is nil")
-			}
-			if resolver == nil {
-				t.Fatal("ExportSource() resolver is nil")
-			}
-			prompt, ok := resolver.SystemPrompt(a.PrimaryLoopID())
-			if !ok {
-				t.Fatal("SystemPrompt(primary) ok = false, want true")
-			}
-			if !strings.Contains(prompt, "<identity product=\"SWE\">") {
-				t.Errorf("SystemPrompt(primary) = %q, want SWE identity prompt", prompt)
-			}
-			if otherPrompt, otherOK := resolver.SystemPrompt(mustUUID(t)); otherPrompt != "" || otherOK {
-				t.Errorf("SystemPrompt(other) = (%q, %v), want (\"\", false)", otherPrompt, otherOK)
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			rec, err := src.Next(ctx)
-			if err != nil {
-				t.Fatalf("source Next() error = %v", err)
-			}
-			if _, ok := rec.(transcript.EventRecord); !ok {
-				t.Fatalf("source Next() record = %T, want transcript.EventRecord", rec)
-			}
-		})
 	}
 }
 
