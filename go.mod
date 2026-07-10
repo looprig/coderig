@@ -30,12 +30,17 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/dlclark/regexp2 v1.11.5 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-tdx-guest v0.3.1 // indirect
 	github.com/google/logger v1.1.1 // indirect
+	github.com/google/nftables v0.3.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
+	github.com/landlock-lsm/go-landlock v0.9.0 // indirect
 	github.com/looprig/storage v0.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
+	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
+	github.com/mdlayher/socket v0.5.0 // indirect
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
@@ -49,6 +54,7 @@ require (
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
+	kernel.org/pub/linux/libs/security/libcap/psx v1.2.77 // indirect
 )
 
 // Local, unpublished/private looprig modules resolved via sibling checkouts under
@@ -65,6 +71,3 @@ replace (
 	github.com/looprig/sandbox => ../sandbox
 	github.com/looprig/storage => ../storage
 )
-
-// The strand-fix Bubble Tea v2 fork, resolved from a sibling checkout for offline builds.
-replace charm.land/bubbletea/v2 => ../bubbletea-fork
