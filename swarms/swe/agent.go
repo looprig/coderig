@@ -127,6 +127,16 @@ func (a *sessionAgent) Submit(ctx context.Context, blocks []content.Block) (uuid
 	return a.session.Submit(ctx, blocks)
 }
 
+// SubmitToLoop is the loop-targeted counterpart of Submit: it delivers a user message
+// FIRE-AND-FORGET to a SPECIFIC loop (the modern viewport's focused loop) rather than the
+// primary, and returns the InputID the resulting Reply events carry (Cause.CommandID). As
+// with Submit the Go error is non-nil only when the command could not be handed to the
+// loop (loop gone, unknown loop id, or ctx done); the turn outcome is observed on the
+// Subscribe stream, never returned. Delegates to the session.
+func (a *sessionAgent) SubmitToLoop(ctx context.Context, loopID uuid.UUID, blocks []content.Block) (uuid.UUID, error) {
+	return a.session.SubmitToLoop(ctx, loopID, blocks)
+}
+
 // Subscribe attaches a whole-session event consumer to the session fan-in with
 // filter and returns its event.Subscription. It is the seam a TUI/CLI uses to
 // observe events across the whole session (every loop, spanning turns). The caller
