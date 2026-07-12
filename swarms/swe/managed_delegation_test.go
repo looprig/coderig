@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -15,11 +16,18 @@ import (
 
 	"github.com/looprig/core/content"
 	"github.com/looprig/core/uuid"
+	"github.com/looprig/harness/pkg/ceiling"
 	"github.com/looprig/harness/pkg/event"
+	"github.com/looprig/harness/pkg/journal"
+	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/rig"
 	"github.com/looprig/harness/pkg/session"
+	"github.com/looprig/harness/pkg/sessionstore"
+	"github.com/looprig/harness/pkg/tool"
+	"github.com/looprig/harness/pkg/tools"
 	"github.com/looprig/inference"
 	"github.com/looprig/storage/memstore"
+	"github.com/looprig/swe/agents/operator"
 )
 
 // managedScript is a deterministic provider fake that drives the model-facing Subagent
@@ -153,6 +161,97 @@ func toolNamesFromRequest(req inference.Request) []string {
 	return names
 }
 
+// TestOperatorPermissionAntiDrift binds the actual SWE primer and operator leaf
+// definitions and compares their private permission gates. The primer's wrapper may
+// add exactly the rig-owned Subagent approval; every ordinary tool decision and grant
+// must remain identical to the operator leaf's base policy.
+func TestOperatorPermissionAntiDrift(t *testing.T) {
+	t.Parallel()
+	defs := swarmDefs(t, Config{})
+	root := t.TempDir()
+	bind := func(def loop.Definition) loop.BoundDefinition {
+		t.Helper()
+		bound, err := def.Bind(context.Background(), tool.Bindings{
+			SessionID: mustBindingID(t),
+			LoopID:    mustBindingID(t),
+			Ceiling:   ceiling.New(),
+			Workspace: &tool.WorkspaceBinding{
+				Root:         root,
+				Coordinator:  &testWorkspaceCoordinator{},
+				Observations: tools.NewObservations(),
+			},
+		})
+		if err != nil {
+			t.Fatalf("Bind(%s): %v", def.Name(), err)
+		}
+		return bound
+	}
+	primer, leaf := bind(defs[0]), bind(defs[1])
+
+	primerTools := invokableToolsByName(t, primer.Tools())
+	leafTools := invokableToolsByName(t, leaf.Tools())
+	for _, tc := range []struct {
+		name string
+		args string
+	}{
+		{name: "Todo", args: `{"action":"list"}`},
+		{name: "Bash", args: `{"command":"git status --short"}`},
+		{name: "WriteFile", args: `{"path":"notes.txt","content":"x"}`},
+	} {
+		primerTool, primerOK := primerTools[tc.name]
+		leafTool, leafOK := leafTools[tc.name]
+		if !primerOK || !leafOK {
+			t.Fatalf("%s binding: primer=%v leaf=%v", tc.name, primerOK, leafOK)
+		}
+		beforePrimer := primer.Permission().Check(context.Background(), primerTool, tc.name, tc.args)
+		beforeLeaf := leaf.Permission().Check(context.Background(), leafTool, tc.name, tc.args)
+		if beforePrimer != beforeLeaf {
+			t.Errorf("%s pre-grant effect: primer=%v leaf=%v", tc.name, beforePrimer, beforeLeaf)
+		}
+		primerErr := primer.Permission().Grant(context.Background(), tc.name, tc.args, tool.ScopeSession)
+		leafErr := leaf.Permission().Grant(context.Background(), tc.name, tc.args, tool.ScopeSession)
+		if !sameError(primerErr, leafErr) {
+			t.Errorf("%s Grant errors: primer=%v leaf=%v", tc.name, primerErr, leafErr)
+		}
+		afterPrimer := primer.Permission().Check(context.Background(), primerTool, tc.name, tc.args)
+		afterLeaf := leaf.Permission().Check(context.Background(), leafTool, tc.name, tc.args)
+		if afterPrimer != afterLeaf {
+			t.Errorf("%s post-grant effect: primer=%v leaf=%v", tc.name, afterPrimer, afterLeaf)
+		}
+	}
+
+	ordinary := primerTools["Todo"]
+	if got := primer.Permission().Check(context.Background(), ordinary, managedSubagentToolName, `{}`); got != loop.EffectAutoApprove {
+		t.Errorf("primer Subagent effect = %v, want auto-approve", got)
+	}
+	if got := leaf.Permission().Check(context.Background(), leafTools["Todo"], managedSubagentToolName, `{}`); got == loop.EffectAutoApprove {
+		t.Errorf("operator leaf Subagent effect = %v, must not auto-approve", got)
+	}
+	if _, ok := leafTools[managedSubagentToolName]; ok {
+		t.Fatal("operator leaf received Subagent")
+	}
+}
+
+func invokableToolsByName(t *testing.T, invokables []tool.InvokableTool) map[string]tool.InvokableTool {
+	t.Helper()
+	result := make(map[string]tool.InvokableTool, len(invokables))
+	for _, invokable := range invokables {
+		info, err := invokable.Info(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[info.Name] = invokable
+	}
+	return result
+}
+
+func sameError(a, b error) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return reflect.TypeOf(a) == reflect.TypeOf(b) && a.Error() == b.Error()
+}
+
 // TestOperatorTopologyComposed proves the production primer is the sole delegation-capable
 // loop and compares what the provider actually receives on the primer and operator leaf.
 func TestOperatorTopologyComposed(t *testing.T) {
@@ -256,7 +355,7 @@ func TestAsyncDelegateComposed(t *testing.T) {
 	t.Parallel()
 	step := 0
 	var started, sent queuedHandle
-	var statusResult, waitResult, interruptResult string
+	var statusResult, startWaitResult, sendWaitResult, interruptResult string
 	childTurn := 0
 	client := &managedScript{}
 	client.fn = func(_ context.Context, req inference.Request) ([]content.Chunk, error) {
@@ -280,9 +379,13 @@ func TestAsyncDelegateComposed(t *testing.T) {
 		case 3:
 			sent = parseQueued(t, prior)
 			step++
-			return toolCall("async-wait", fmt.Sprintf(`{"action":"wait","delegate_id":%q,"request_id":%q}`, sent.DelegateID, sent.RequestID)), nil
+			return toolCall("async-wait-start", fmt.Sprintf(`{"action":"wait","delegate_id":%q,"request_id":%q}`, started.DelegateID, started.RequestID)), nil
 		case 4:
-			waitResult = prior
+			startWaitResult = prior
+			step++
+			return toolCall("async-wait-send", fmt.Sprintf(`{"action":"wait","delegate_id":%q,"request_id":%q}`, sent.DelegateID, sent.RequestID)), nil
+		case 5:
+			sendWaitResult = prior
 			step++
 			return toolCall("async-interrupt", fmt.Sprintf(`{"action":"interrupt","delegate_id":%q}`, started.DelegateID)), nil
 		default:
@@ -297,8 +400,11 @@ func TestAsyncDelegateComposed(t *testing.T) {
 	if started.DelegateID != sent.DelegateID || started.RequestID == sent.RequestID {
 		t.Fatalf("start=%+v send=%+v; want same child and independent requests", started, sent)
 	}
-	if !strings.Contains(statusResult, started.DelegateID) || !strings.Contains(waitResult, "child answer 2") {
-		t.Fatalf("status=%q wait=%q", statusResult, waitResult)
+	if !strings.Contains(statusResult, started.DelegateID) {
+		t.Fatalf("status=%q, want delegate %s", statusResult, started.DelegateID)
+	}
+	if !strings.Contains(startWaitResult, "child answer 1") || !strings.Contains(sendWaitResult, "child answer 2") {
+		t.Fatalf("start wait=%q send wait=%q", startWaitResult, sendWaitResult)
 	}
 	if !strings.Contains(interruptResult, started.DelegateID) {
 		t.Fatalf("interrupt result = %q", interruptResult)
@@ -398,9 +504,9 @@ func TestRestoredDelegateComposed(t *testing.T) {
 	}
 }
 
-// TestManagedSubagentLimitsComposed uses the production SWE definitions with only the rig
-// limits varied. Depth 2 admits primary->leaf; Depth 1 refuses before LoopStarted. Quota is
-// likewise a typed session refusal and leaves no durable child phantom.
+// TestManagedSubagentLimitsComposed captures the real parent-scoped controller that the rig
+// binds into a managed primer. Calling that controller directly observes typed session errors
+// before the model-facing Subagent tool intentionally renders them as text.
 func TestManagedSubagentLimitsComposed(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -412,64 +518,87 @@ func TestManagedSubagentLimitsComposed(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			client := &managedScript{}
-			calls := 0
-			var toolResult string
-			client.fn = func(_ context.Context, req inference.Request) ([]content.Chunk, error) {
-				calls++
-				if calls == 1 {
-					return toolCall("limited-start", `{"agent":"operator","message":"go"}`), nil
-				}
-				toolResult = lastToolText(req)
-				return finalText("done"), nil
+			agent, stores, controller := newTypedDelegateTestRig(t, tc.limits)
+			before := storedLoopStartedCount(t, stores.session, agent.SessionID())
+			_, err := controller.Execute(context.Background(), tool.DelegateRequest{
+				Operation: tool.DelegateStart,
+				Agent:     string(operator.Name),
+				Message:   "go",
+				Wait:      true,
+			})
+			var sessionErr *session.SessionError
+			if !errors.As(err, &sessionErr) || sessionErr.Kind != tc.want {
+				t.Fatalf("start error = %T %v, want *SessionError{%s}", err, err, tc.want)
 			}
-			agent := newTestAgentWithLimits(t, client, tc.limits)
-			_, observed := runManagedTurnObserved(t, agent, "go")
-			if !strings.Contains(toolResult, (&session.SessionError{Kind: tc.want}).Error()) {
-				t.Fatalf("tool result = %q, want typed %s refusal text", toolResult, tc.want)
-			}
-			if got := countLoopStarted(observed); got != 0 {
-				t.Fatalf("child LoopStarted count = %d, want 0", got)
+			if after := storedLoopStartedCount(t, stores.session, agent.SessionID()); after != before {
+				t.Fatalf("durable LoopStarted count = %d, want unchanged %d", after, before)
 			}
 		})
 	}
 
 	t.Run("quota one", func(t *testing.T) {
 		t.Parallel()
-		primaryStep := 0
-		var refusal string
-		client := &managedScript{}
-		client.fn = func(_ context.Context, req inference.Request) ([]content.Chunk, error) {
-			if !strings.Contains(req.System, operatorDelegation) {
-				return finalText("child done"), nil
-			}
-			switch primaryStep {
-			case 0:
-				primaryStep++
-				return toolCall("quota-first", `{"agent":"operator","message":"first"}`), nil
-			case 1:
-				primaryStep++
-				return toolCall("quota-second", `{"agent":"reviewer","message":"second"}`), nil
-			default:
-				refusal = lastToolText(req)
-				return finalText("done"), nil
-			}
+		agent, stores, controller := newTypedDelegateTestRig(t, rig.DelegationLimits{Depth: operatorSpawnDepth, Quota: 1})
+		before := storedLoopStartedCount(t, stores.session, agent.SessionID())
+		request := tool.DelegateRequest{
+			Operation: tool.DelegateStart,
+			Agent:     string(operator.Name),
+			Message:   "go",
+			Wait:      true,
 		}
-		agent := newTestAgentWithLimits(t, client, rig.DelegationLimits{Depth: operatorSpawnDepth, Quota: 1})
-		_, observed := runManagedTurnObserved(t, agent, "go")
-		want := (&session.SessionError{Kind: session.SessionLoopQuotaExceeded}).Error()
-		if !strings.Contains(refusal, want) {
-			t.Fatalf("tool result = %q, want typed quota refusal %q", refusal, want)
+		if _, err := controller.Execute(context.Background(), request); err != nil {
+			t.Fatalf("first start: %v", err)
 		}
-		if got := countLoopStarted(observed); got != 1 {
-			t.Fatalf("child LoopStarted count = %d, want exactly the admitted first child", got)
+		afterFirst := storedLoopStartedCount(t, stores.session, agent.SessionID())
+		if afterFirst != before+1 {
+			t.Fatalf("durable LoopStarted after first = %d, want %d", afterFirst, before+1)
+		}
+		_, err := controller.Execute(context.Background(), request)
+		var sessionErr *session.SessionError
+		if !errors.As(err, &sessionErr) || sessionErr.Kind != session.SessionLoopQuotaExceeded {
+			t.Fatalf("second start error = %T %v, want *SessionError{%s}", err, err, session.SessionLoopQuotaExceeded)
+		}
+		if after := storedLoopStartedCount(t, stores.session, agent.SessionID()); after != afterFirst {
+			t.Fatalf("refused start changed durable LoopStarted count to %d, want %d", after, afterFirst)
 		}
 	})
 }
 
-func newTestAgentWithLimits(t *testing.T, client inference.Client, limits rig.DelegationLimits) *sessionAgent {
+type typedDelegatePermission struct {
+	controller tool.DelegateController
+}
+
+func (*typedDelegatePermission) Check(context.Context, tool.InvokableTool, string, string) loop.Effect {
+	return loop.EffectAutoApprove
+}
+
+func (*typedDelegatePermission) Grant(context.Context, string, string, tool.ApprovalScope) error {
+	return nil
+}
+
+// newTypedDelegateTestRig composes the same SWE rig path with the smallest managed topology
+// needed to expose the public controller capability supplied in real primer bindings.
+func newTypedDelegateTestRig(t *testing.T, limits rig.DelegationLimits) (*sessionAgent, *swarmStores, tool.DelegateController) {
 	t.Helper()
-	definitions, err := swarmDefinitions(client, testModel(), Config{})
+	client := &managedScript{fn: func(context.Context, inference.Request) ([]content.Chunk, error) {
+		return finalText("child done"), nil
+	}}
+	permission := &typedDelegatePermission{}
+	primer, err := loop.Define(
+		loop.WithName(operatorPrimaryName),
+		loop.WithInference(client, testModel()),
+		loop.WithPermissionFactory(func(_ context.Context, bindings tool.Bindings) (loop.PermissionGate, error) {
+			permission.controller = bindings.Delegate
+			return permission, nil
+		}),
+		loop.WithPolicyRevision("typed-delegate-test"),
+		loop.WithDelegates(operator.Name),
+		loop.WithDelegation(loop.Delegation{Style: loop.DelegationManaged}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := loop.Define(loop.WithName(operator.Name), loop.WithInference(client, testModel()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +606,7 @@ func newTestAgentWithLimits(t *testing.T, client inference.Client, limits rig.De
 	if err != nil {
 		t.Fatal(err)
 	}
-	assembly, err := buildRigWithLimits(definitions, stores, t.TempDir(), Config{}, false, limits)
+	assembly, err := buildRigWithLimits([]loop.Definition{primer, leaf}, stores, t.TempDir(), Config{}, false, limits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +619,36 @@ func newTestAgentWithLimits(t *testing.T, client inference.Client, limits rig.De
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agent.Close(context.Background()) })
-	return agent
+	if permission.controller == nil {
+		t.Fatal("rig supplied no scoped delegate controller to primer permission binding")
+	}
+	return agent, stores, permission.controller
+}
+
+func storedLoopStartedCount(t *testing.T, store *sessionstore.Store, sessionID uuid.UUID) int {
+	t.Helper()
+	replayer, err := store.OpenEventReplayer(sessionID, sessionstore.ReplayRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor, err := replayer.Open(context.Background(), journal.ReplayRequest{From: journal.Beginning()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cursor.Close() }()
+	count := 0
+	for {
+		ev, _, err := cursor.Next(context.Background())
+		if errors.Is(err, io.EOF) {
+			return count
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := ev.(event.LoopStarted); ok {
+			count++
+		}
+	}
 }
 
 func countLoopStarted(events []event.Event) int {
