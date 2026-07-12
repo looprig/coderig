@@ -30,6 +30,10 @@ delegation and native workspace checkpoints. Adapt the resulting
 **Repository:** `github.com/looprig/harness` (not SWE)
 
 **Files:**
+- Create: `docs/plans/2026-07-12-rig-loop-display-and-offload-gc-design.md`
+- Create: `pkg/rig/offload_gc.go`
+- Create: `internal/sessionruntime/offload_gc.go`
+- Create: `internal/sessionruntime/offload_gc_test.go`
 - Modify: `pkg/loop/definition.go`
 - Modify: `pkg/loop/definition_test.go`
 - Modify: `pkg/event/event.go`
@@ -42,27 +46,32 @@ delegation and native workspace checkpoints. Adapt the resulting
 - Modify: `internal/sessionruntime/lifecycle.go`
 - Modify: `internal/sessionruntime/restore_constructor.go`
 - Modify: `internal/sessionruntime/session.go`
+- Modify: `internal/sessionruntime/command_journal.go`
 - Modify: `internal/sessionruntime/lifecycle_test.go`
 - Modify: `pkg/rig/options.go`
 - Modify: `pkg/rig/rig_test.go`
+- Modify: `pkg/sessionstore/gc.go`
+- Modify: `pkg/sessionstore/gc_test.go`
 
 Do not start SWE Task 1 until this harness task is implemented, reviewed, tagged, and its
 commit/tag is recorded here.
 
 **Step 1: Write failing definition metadata tests**
 
-Pin final names such as `loop.WithDisplayName` and `loop.WithDescription` in a short harness
-design amendment. Display/description are immutable, defensively copied, fingerprinted, and
+Pin `loop.WithDisplayName` and `loop.WithDescription` in the listed harness design amendment.
+Display/description are immutable, defensively copied, fingerprinted, and
 restored. `LoopStarted` carries display name while its existing agent name remains the topology
 key. Managed Subagent catalogs render target display names/descriptions and resolve a selected
-display name to the allowed definition key; duplicate display aliases fail definition.
+display name to the allowed definition key. Display aliases must be unique among one parent's
+allowed delegate targets, but the non-delegate primer and operator leaf may both display as
+`operator`.
 
 Prove an `operator-primary` key displays as `operator`, operator/reviewer descriptions reach
 `Subagent.Info`, old events fall back to the topology key, and leaves stay delegate-free.
 
 **Step 2: Write failing rig-owned offload-GC tests**
 
-Approve and pin an explicit policy API, for example:
+Pin this explicit policy API in the design amendment:
 
 ```go
 rig.WithOffloadGC(rig.OffloadGCPolicy{
@@ -72,9 +81,13 @@ rig.WithOffloadGC(rig.OffloadGCPolicy{
 ```
 
 Use a manual tick seam in tests. New and restored rig sessions must run
-`sessionstore.OpenObjectGC` only while their session lease is held, serialize with lease loss
-and shutdown, and stop/join before lease release. This is session offload GC, never workspace
-snapshot GC.
+`sessionstore.OpenObjectGC` only while their session lease is held. Introduce one internal
+reader/writer journal-admission gate shared by the complete event append/offload call, command
+append call, and GC scan/delete transaction. Ordinary appends take readers; GC takes the writer
+only after native `SessionIdle`. A forced test blocks an offload before its pointer append and
+proves GC cannot scan/delete until that append completes. Shutdown stops and joins GC before
+appending `SessionStopped` and before lease release; lease loss cancels it. This is session
+offload GC, never workspace snapshot GC.
 
 **Step 3: Verify RED**
 
@@ -86,15 +99,48 @@ Expected: missing metadata and GC policy/lifecycle APIs.
 
 **Step 4: Implement and verify**
 
-Run focused tests, full unit/integration race, vet/security, and trimpath build. Commit in the
-harness repository:
+Run:
 
 ```bash
+GOWORK=off go test -race ./pkg/loop ./pkg/event ./pkg/rig ./pkg/sessionstore ./internal/sessionruntime
+GOWORK=off go test -race ./...
+GOWORK=off go test -tags integration -race ./...
+GOWORK=off go vet ./...
+CGO_ENABLED=0 GOWORK=off go build -trimpath ./...
+git diff --check
+```
+
+Then commit in the harness repository:
+
+```bash
+git add docs/plans/2026-07-12-rig-loop-display-and-offload-gc-design.md pkg/loop pkg/event pkg/rig pkg/sessionstore internal/sessionruntime
 git commit -m "feat(rig): own loop metadata and session object gc"
 ```
 
 Release a harness tag containing this commit. Supporting restored-session collection is a new
 improvement: current SWE schedules its ticker only for new sessions.
+
+### Task 0.5: Amend and release CLI display-name rendering (CLI repository)
+
+**Files:**
+- Modify: `docs/plans/2026-07-11-harness-rig-migration-design.md`
+- Modify: `docs/plans/2026-07-11-harness-rig-migration-implementation.md`
+- Modify: `tui/transcript.go`
+- Modify: `tui/transcript_test.go`
+- Modify: `tui/sessioncore.go`
+- Modify: `tui/sessioncore_test.go`
+
+After Task 0's harness tag is selected, add failing CLI projection tests: `LoopStarted` with a
+display name renders/stores that name, missing display name falls back to `Header.AgentName`,
+and root/active/focus identity remains keyed by loop ID. Update the approved CLI plan, bump the
+harness dependency/vendor, implement the projection, run CLI unit/race/vendor gates, and commit:
+
+```bash
+git add docs/plans/2026-07-11-harness-rig-migration-*.md tui/transcript.go tui/transcript_test.go tui/sessioncore.go tui/sessioncore_test.go go.mod go.sum vendor
+git commit -m "feat(tui): render loop display identities"
+```
+
+Release CLI and record its tag before SWE Task 1.
 
 ### Task 1: Upgrade harness and CLI dependencies before using final symbols
 
@@ -112,6 +158,7 @@ var _ = rig.Define
 var _ = loop.Define
 var _ session.SessionController
 var _ = event.ActiveLoopChanged{}
+var _ = event.LoopStarted{DisplayName: "operator"}
 var _ tui.Agent
 var _ = loop.WithDisplayName
 var _ = rig.WithOffloadGC
@@ -316,8 +363,9 @@ Using actual fsstore integration fixtures, prove:
 - persistence paths outside the workspace pass; overlap fails at `rig.Define`;
 - close/shutdown releases leases exactly once;
 - list/catalog behavior remains unchanged.
-- exported `swe.New` uses the same rig builder over ephemeral memstore-backed session and
-  workspace stores; it neither calls a legacy constructor nor loses workspace tools.
+- exported `swe.New` uses the same rig builder over one process-shared ephemeral memstore
+  composite; it neither calls a legacy constructor nor loses workspace tools, and two
+  headless sessions contend on the same checkout until clean handoff.
 
 Add a deletion guard that rejects `watchSessionEvents`, `CheckpointWorkspace`, `session.New`, `session.Restore`, manual `Acquire`, and session lifecycle options in SWE production.
 
@@ -351,9 +399,11 @@ Keep only process-level fsstore close and catalog/list/replay reads not provided
 session contract. Delete `scheduleGC` only after the precondition's rig-owned replacement is
 verified for new and restored sessions.
 
-For `swe.New`, create an ephemeral `storage/memstore` composite and corresponding session and
+For `swe.New`, use a process-shared `storage/memstore` composite and corresponding session and
 workspace stores, then invoke the same rig builder with exclusive current-checkout placement.
-Delete the headless `session.New` path; update eval and runtime-skill tests to prove parity.
+This fencing is process-local, which matches the headless API's scope; durable CLI sessions use
+fsstore for cross-process exclusion. Delete the headless `session.New` path; update eval and
+runtime-skill tests to prove parity, contention, and release/handoff.
 
 **Step 4: Verify GREEN**
 
@@ -369,7 +419,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add swarms/swe/persistence.go swarms/swe/persistence_test.go swarms/swe/persistence_integration_test.go swarms/swe/swarm.go swarms/swe/fingerprint_test.go
+git add swarms/swe/persistence.go swarms/swe/persistence_test.go swarms/swe/persistence_integration_test.go swarms/swe/swarm.go swarms/swe/fingerprint_test.go swarms/swe/operator_eval_integration_test.go
 git commit -m "refactor(swe): let rig own session persistence"
 ```
 
@@ -392,9 +442,10 @@ Pin the approved CLI contract:
 - `AcceptsImages(loopID)` reads the current loop model; heterogeneous loops and `Controller.Change` update immediately;
 - replay preserves session order for the root transcript;
 - replay and the returned live subscription fold `GateOpened`/`GateResolved` into one
-  adapter-owned ToolExecutionID-to-GateID index before forwarding events;
+  adapter-owned `(LoopID, ToolExecutionID)`-to-GateID index plus reverse GateID removal map
+  before forwarding events;
 - gate responses use that index with `SessionController.RespondGate`, including restored
-  open gates and resolved-gate removal;
+  delegate-loop open gates, resolved-gate removal, and the same ToolExecutionID in two loops;
 - `Close` calls `Shutdown` once and does not cancel a second root or persistence watcher.
 
 **Step 2: Verify RED**
@@ -408,8 +459,9 @@ Expected: compile failures for cached primary/static image fields and pointer to
 **Step 3: Implement the adapter**
 
 Store a `session.SessionController`, replay dependency, stable root ID, and concurrency-safe
-gate index. Remove `rootCtx`, cancel, teardown ticker, cached image bool, restored primary ID,
-and direct constructor helpers.
+forward/reverse gate indexes. Restore opens one unnarrowed cold replay to fold gates for every
+loop, then filters/materializes the root transcript returned to CLI. Remove `rootCtx`, cancel,
+teardown ticker, cached image bool, restored primary ID, and direct constructor helpers.
 
 Map methods to final contracts. Image capability must be target-loop-specific and dynamic.
 `ActiveLoopID` is a direct controller query. Return one wrapping subscription that indexes gate

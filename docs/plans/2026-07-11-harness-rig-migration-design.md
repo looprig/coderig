@@ -68,7 +68,9 @@ The separate key prevents definition-wide delegation from accidentally giving a 
 operator another Subagent capability. A blocking harness prerequisite adds immutable display
 name and description metadata to definitions: the primer key is `operator-primary`, while its
 display name remains `operator`. `LoopStarted` exposes both values and CLI renders the display
-name. Managed delegate catalog entries use the target definition's display name and existing
+name. Display aliases need be unique only within one parent's allowed delegate catalog; the
+primer and operator leaf are deliberately allowed to share `operator`. Managed delegate
+catalog entries use the target definition's display name and existing
 operator/reviewer description. Tests compare primer-minus-managed-Subagent with the operator
 leaf so the two cannot drift.
 
@@ -206,15 +208,17 @@ SWE implements the approved CLI contract over `session.SessionController`:
   stream returned by SWE;
 - image capability: query `sess.Loop(loopID).Model().Caps.AcceptsImages` for the focused submission target each time;
 - `Submit` routes to active; `SubmitToLoop` routes to focus;
-- gate conveniences use an adapter-owned index: replay and the forwarded live stream fold
-  `GateOpened` (`Gate.ID` and `Gate.Subject.ToolExecutionID`) and `GateResolved`, then call
-  `SessionController.RespondGate` with the indexed ID;
+- gate conveniences use an adapter-owned index keyed by `(LoopID, ToolExecutionID)`: replay
+  and the forwarded live stream fold `GateOpened`, with a reverse `GateID` index for
+  `GateResolved`, then call `SessionController.RespondGate` with the indexed ID;
 - replay uses the journal-backed enduring stream and does not create a second live subscription;
 - `Close` maps to `Shutdown`.
 
 The adapter does not open a second subscription. Its subscription wrapper updates the gate
-index before forwarding each event; `ReplayBacklog` seeds the same index before returning
-history. Tests cover opened-before-request ordering and restored open/resolved gates.
+index before forwarding each event. Restore performs one unnarrowed cold replay to seed gates
+from every loop, then returns only the root transcript projection to CLI. Tests cover
+opened-before-request ordering, identical tool-execution IDs in different loops, and restored
+delegate-loop open/resolved gates.
 
 The CLI dependency/version migration lands first. SWE does not temporarily emulate removed
 `PrimaryLoopID` or static `AcceptsImages`.
@@ -222,10 +226,12 @@ The CLI dependency/version migration lands first. SWE does not temporarily emula
 ## Headless API
 
 The exported `swe.New` path remains supported for evals and tests. It uses the same definition
-and rig builder over an ephemeral `storage/memstore` composite, `sessionstore.Store`, and
-`workspacestore.Store`, with exclusive current-checkout placement. The returned owner shuts
-down the session; the in-memory stores need no process teardown. There is no direct
-`session.New` fallback and no second topology builder.
+and rig builder over a process-shared ephemeral `storage/memstore` composite,
+`sessionstore.Store`, and `workspacestore.Store`, with exclusive current-checkout placement.
+The shared leaser provides process-local contention across two headless sessions; it is not
+presented as cross-process fencing. The returned owner shuts down the session; the in-memory
+store needs no process teardown. There is no direct `session.New` fallback and no second
+topology builder.
 
 ## Error handling
 
