@@ -31,6 +31,7 @@ import (
 const skillToolName = "Skill"
 
 const managedSubagentToolName = "Subagent"
+const managedSubagentDecisionReason = "managed_subagent"
 
 // managedPrimerPermission adds the rig-injected Subagent capability to the operator
 // leaf's permission policy. Every non-Subagent decision and every persisted grant is
@@ -38,10 +39,46 @@ const managedSubagentToolName = "Subagent"
 type managedPrimerPermission struct{ loop.PermissionGate }
 
 func (p managedPrimerPermission) Check(ctx context.Context, invokable tool.InvokableTool, name, args string) loop.Effect {
-	if name == managedSubagentToolName {
+	if isManagedSubagent(invokable, name) {
 		return loop.EffectAutoApprove
 	}
 	return p.PermissionGate.Check(ctx, invokable, name, args)
+}
+
+// CheckDecision preserves the production checker's optional durable-reason capability.
+// The rig-owned Subagent gets an explicit reason; ordinary calls retain the base reason.
+func (p managedPrimerPermission) CheckDecision(ctx context.Context, invokable tool.InvokableTool, name, args string) loop.PermissionDecision {
+	if isManagedSubagent(invokable, name) {
+		return loop.PermissionDecision{Effect: loop.EffectAutoApprove, Reason: managedSubagentDecisionReason}
+	}
+	if gate, ok := p.PermissionGate.(interface {
+		CheckDecision(context.Context, tool.InvokableTool, string, string) loop.PermissionDecision
+	}); ok {
+		return gate.CheckDecision(ctx, invokable, name, args)
+	}
+	return loop.PermissionDecision{Effect: p.PermissionGate.Check(ctx, invokable, name, args)}
+}
+
+// ApprovedGrants preserves the production checker's optional grant re-mint capability.
+// Subagent never needs escalation grants; all ordinary tool calls forward unchanged.
+func (p managedPrimerPermission) ApprovedGrants(ctx context.Context, name, args string) []string {
+	if name == managedSubagentToolName {
+		return nil
+	}
+	if gate, ok := p.PermissionGate.(interface {
+		ApprovedGrants(context.Context, string, string) []string
+	}); ok {
+		return gate.ApprovedGrants(ctx, name, args)
+	}
+	return nil
+}
+
+func isManagedSubagent(invokable tool.InvokableTool, name string) bool {
+	if name != managedSubagentToolName {
+		return false
+	}
+	_, ok := invokable.(*tools.SubagentTool)
+	return ok
 }
 
 func managedPrimerPermissionFactory(base loop.PermissionFactory) loop.PermissionFactory {

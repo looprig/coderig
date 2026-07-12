@@ -44,9 +44,11 @@ func (*managedScript) Invoke(context.Context, inference.Request) (*inference.Res
 }
 
 func (s *managedScript) Stream(ctx context.Context, req inference.Request) (*inference.StreamReader[content.Chunk], error) {
-	s.mu.Lock()
-	chunks, err := s.fn(ctx, req)
-	s.mu.Unlock()
+	chunks, err := func() ([]content.Chunk, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.fn(ctx, req)
+	}()
 	if err != nil {
 		return nil, err
 	}
@@ -87,16 +89,15 @@ type queuedHandle struct {
 	RequestID  string `json:"request_id"`
 }
 
-func parseQueued(t *testing.T, text string) queuedHandle {
-	t.Helper()
+func parseQueued(text string) (queuedHandle, error) {
 	var got queuedHandle
 	if err := json.Unmarshal([]byte(text), &got); err != nil {
-		t.Fatalf("queued Subagent result %q: %v", text, err)
+		return queuedHandle{}, fmt.Errorf("queued Subagent result %q: %w", text, err)
 	}
 	if got.DelegateID == "" || got.RequestID == "" {
-		t.Fatalf("queued Subagent result missing ids: %q", text)
+		return queuedHandle{}, fmt.Errorf("queued Subagent result missing ids: %q", text)
 	}
-	return got
+	return got, nil
 }
 
 func runManagedTurn(t *testing.T, agent *sessionAgent, prompt string) string {
@@ -220,12 +221,10 @@ func TestOperatorPermissionAntiDrift(t *testing.T) {
 		}
 	}
 
-	ordinary := primerTools["Todo"]
-	if got := primer.Permission().Check(context.Background(), ordinary, managedSubagentToolName, `{}`); got != loop.EffectAutoApprove {
-		t.Errorf("primer Subagent effect = %v, want auto-approve", got)
-	}
-	if got := leaf.Permission().Check(context.Background(), leafTools["Todo"], managedSubagentToolName, `{}`); got == loop.EffectAutoApprove {
-		t.Errorf("operator leaf Subagent effect = %v, must not auto-approve", got)
+	primerSpoof := primer.Permission().Check(context.Background(), primerTools["Todo"], managedSubagentToolName, `{}`)
+	leafSpoof := leaf.Permission().Check(context.Background(), leafTools["Todo"], managedSubagentToolName, `{}`)
+	if primerSpoof != leafSpoof || primerSpoof == loop.EffectAutoApprove {
+		t.Errorf("name-spoofed Todo effect: primer=%v leaf=%v, want identical non-auto result", primerSpoof, leafSpoof)
 	}
 	if _, ok := leafTools[managedSubagentToolName]; ok {
 		t.Fatal("operator leaf received Subagent")
@@ -250,6 +249,100 @@ func sameError(a, b error) bool {
 		return a == nil && b == nil
 	}
 	return reflect.TypeOf(a) == reflect.TypeOf(b) && a.Error() == b.Error()
+}
+
+type permissionCapabilityProbe struct {
+	decision loop.PermissionDecision
+	grants   []string
+}
+
+func (p *permissionCapabilityProbe) Check(context.Context, tool.InvokableTool, string, string) loop.Effect {
+	return p.decision.Effect
+}
+
+func (p *permissionCapabilityProbe) CheckDecision(context.Context, tool.InvokableTool, string, string) loop.PermissionDecision {
+	return p.decision
+}
+
+func (*permissionCapabilityProbe) Grant(context.Context, string, string, tool.ApprovalScope) error {
+	return nil
+}
+
+func (p *permissionCapabilityProbe) ApprovedGrants(context.Context, string, string) []string {
+	return append([]string(nil), p.grants...)
+}
+
+type inertDelegateController struct{}
+
+func (inertDelegateController) Execute(context.Context, tool.DelegateRequest) (tool.DelegateResult, error) {
+	return tool.DelegateResult{}, nil
+}
+
+// TestManagedPrimerPermissionPreservesOptionalCapabilities guards the optional interfaces
+// used for durable decision reasons and escalation-grant re-minting. Only a structurally
+// genuine bound Subagent gets the primer-specific approval; a name-spoofed ordinary tool
+// follows the base gate.
+func TestManagedPrimerPermissionPreservesOptionalCapabilities(t *testing.T) {
+	t.Parallel()
+	base := &permissionCapabilityProbe{
+		decision: loop.PermissionDecision{Effect: loop.EffectAsk, Reason: "base-reason"},
+		grants:   []string{"grant-a", "grant-b"},
+	}
+	wrapped := managedPrimerPermission{PermissionGate: base}
+	ordinary := tools.NewTodo()
+
+	decision := wrapped.CheckDecision(context.Background(), ordinary, "Todo", `{"action":"list"}`)
+	if decision != base.decision {
+		t.Fatalf("ordinary decision = %+v, want %+v", decision, base.decision)
+	}
+	if grants := wrapped.ApprovedGrants(context.Background(), "Todo", `{"action":"list"}`); !slices.Equal(grants, base.grants) {
+		t.Fatalf("ordinary grants = %v, want %v", grants, base.grants)
+	}
+	if got := wrapped.Check(context.Background(), ordinary, managedSubagentToolName, `{}`); got != base.decision.Effect {
+		t.Fatalf("name-spoofed Todo effect = %v, want delegated %v", got, base.decision.Effect)
+	}
+
+	subagentDef := tools.Subagent(loop.DelegationManaged, nil)
+	primer, err := swarmDefs(t, Config{})[0].Bind(context.Background(), tool.Bindings{
+		SessionID: mustBindingID(t),
+		LoopID:    mustBindingID(t),
+		Ceiling:   ceiling.New(),
+		Workspace: &tool.WorkspaceBinding{
+			Root:         t.TempDir(),
+			Coordinator:  &testWorkspaceCoordinator{},
+			Observations: tools.NewObservations(),
+		},
+		Delegate:   inertDelegateController{},
+		ExtraTools: []tool.Definition{subagentDef},
+	})
+	if err != nil {
+		t.Fatalf("bind production primer with injected Subagent: %v", err)
+	}
+	subagent, ok := invokableToolsByName(t, primer.Tools())[managedSubagentToolName]
+	if !ok {
+		t.Fatal("production primer binding has no injected Subagent")
+	}
+	if got := primer.Permission().Check(context.Background(), subagent, managedSubagentToolName, `{}`); got != loop.EffectAutoApprove {
+		t.Fatalf("bound Subagent effect = %v, want auto-approve", got)
+	}
+	decisionGate, ok := primer.Permission().(interface {
+		CheckDecision(context.Context, tool.InvokableTool, string, string) loop.PermissionDecision
+	})
+	if !ok {
+		t.Fatal("production primer permission dropped CheckDecision")
+	}
+	if got := decisionGate.CheckDecision(context.Background(), subagent, managedSubagentToolName, `{}`); got.Effect != loop.EffectAutoApprove || got.Reason != managedSubagentDecisionReason {
+		t.Fatalf("bound Subagent decision = %+v, want explicit auto-approve reason", got)
+	}
+	grantGate, ok := primer.Permission().(interface {
+		ApprovedGrants(context.Context, string, string) []string
+	})
+	if !ok {
+		t.Fatal("production primer permission dropped ApprovedGrants")
+	}
+	if grants := grantGate.ApprovedGrants(context.Background(), managedSubagentToolName, `{}`); len(grants) != 0 {
+		t.Fatalf("bound Subagent grants = %v, want none", grants)
+	}
 }
 
 // TestOperatorTopologyComposed proves the production primer is the sole delegation-capable
@@ -369,7 +462,11 @@ func TestAsyncDelegateComposed(t *testing.T) {
 			step++
 			return toolCall("async-start", `{"action":"start","agent":"operator","message":"first","wait":false}`), nil
 		case 1:
-			started = parseQueued(t, prior)
+			var err error
+			started, err = parseQueued(prior)
+			if err != nil {
+				return nil, err
+			}
 			step++
 			return toolCall("async-status", fmt.Sprintf(`{"action":"status","delegate_id":%q}`, started.DelegateID)), nil
 		case 2:
@@ -377,7 +474,11 @@ func TestAsyncDelegateComposed(t *testing.T) {
 			step++
 			return toolCall("async-send", fmt.Sprintf(`{"action":"send","delegate_id":%q,"message":"second","wait":false}`, started.DelegateID)), nil
 		case 3:
-			sent = parseQueued(t, prior)
+			var err error
+			sent, err = parseQueued(prior)
+			if err != nil {
+				return nil, err
+			}
 			step++
 			return toolCall("async-wait-start", fmt.Sprintf(`{"action":"wait","delegate_id":%q,"request_id":%q}`, started.DelegateID, started.RequestID)), nil
 		case 4:
@@ -441,7 +542,7 @@ func TestRestoredDelegateComposed(t *testing.T) {
 			return toolCall("restore-send", fmt.Sprintf(`{"action":"send","delegate_id":%q,"message":"follow up","wait":true}`, childID.String())), nil
 		case 1:
 			if got := lastToolText(req); got != "restored follow-up final" {
-				t.Fatalf("restored follow-up result = %q", got)
+				return nil, fmt.Errorf("restored follow-up result = %q", got)
 			}
 			primaryStep++
 			return toolCall("restore-unrelated", fmt.Sprintf(`{"action":"send","delegate_id":%q,"message":"intrude","wait":true}`, uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").String())), nil
@@ -520,7 +621,9 @@ func TestManagedSubagentLimitsComposed(t *testing.T) {
 			t.Parallel()
 			agent, stores, controller := newTypedDelegateTestRig(t, tc.limits)
 			before := storedLoopStartedCount(t, stores.session, agent.SessionID())
-			_, err := controller.Execute(context.Background(), tool.DelegateRequest{
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, err := controller.Execute(ctx, tool.DelegateRequest{
 				Operation: tool.DelegateStart,
 				Agent:     string(operator.Name),
 				Message:   "go",
@@ -540,20 +643,22 @@ func TestManagedSubagentLimitsComposed(t *testing.T) {
 		t.Parallel()
 		agent, stores, controller := newTypedDelegateTestRig(t, rig.DelegationLimits{Depth: operatorSpawnDepth, Quota: 1})
 		before := storedLoopStartedCount(t, stores.session, agent.SessionID())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		request := tool.DelegateRequest{
 			Operation: tool.DelegateStart,
 			Agent:     string(operator.Name),
 			Message:   "go",
 			Wait:      true,
 		}
-		if _, err := controller.Execute(context.Background(), request); err != nil {
+		if _, err := controller.Execute(ctx, request); err != nil {
 			t.Fatalf("first start: %v", err)
 		}
 		afterFirst := storedLoopStartedCount(t, stores.session, agent.SessionID())
 		if afterFirst != before+1 {
 			t.Fatalf("durable LoopStarted after first = %d, want %d", afterFirst, before+1)
 		}
-		_, err := controller.Execute(context.Background(), request)
+		_, err := controller.Execute(ctx, request)
 		var sessionErr *session.SessionError
 		if !errors.As(err, &sessionErr) || sessionErr.Kind != session.SessionLoopQuotaExceeded {
 			t.Fatalf("second start error = %T %v, want *SessionError{%s}", err, err, session.SessionLoopQuotaExceeded)
