@@ -163,12 +163,15 @@ func TestGreetingFromRegistry(t *testing.T) {
 					t.Errorf("greeting missing embedded skill %q:\n%s", s, got)
 				}
 			}
+			if strings.Contains(got, string(operatorPrimaryName)) {
+				t.Errorf("greeting leaked internal topology key %q:\n%s", operatorPrimaryName, got)
+			}
 		})
 	}
 }
 
 // TestGreetingNotInModelContext is the "not in model context" gate at the config-assembly
-// seam (§5a): even with the greeting toggle ON, the primary operator's assembled system
+// seam (§5a): even with the greeting toggle ON, the root operator primer's assembled system
 // prompt (Identity + operator.Role + delegation + the trusted skill catalog) contains NONE
 // of the greeting text — the greeting flows only to the TUI banner, never into any
 // loop.Config.System. This holds because the greeting and the system prompt are built
@@ -180,7 +183,7 @@ func TestGreetingNotInModelContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("swarmDefinitions() error = %v", err)
 	}
-	// definitions[0] is the operator-primary primer; its effective system prompt is
+	// definitions[0] is the internal operator-primary root primer; its effective system prompt is
 	// Identity + operator.Role + delegation + the trusted skill catalog.
 	primerSystem := definitions[0].FingerprintInitial().EffectiveSystem
 

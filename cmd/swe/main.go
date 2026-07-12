@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -172,6 +173,11 @@ func printSessions(w io.Writer, metas []sessionstore.SessionMeta) error {
 	return nil
 }
 
+// sessionOpen is the SessionStoreFactory.Open-shaped process composition seam. Production
+// binds it directly to the shared factory; tests can observe selector decisions without
+// opening an on-disk store.
+type sessionOpen func(context.Context, swe.SessionSelector, swe.Config) (tui.Agent, error)
+
 // openThunk builds the tui.OpenAgent the runtime drives. It returns a closure that opens a
 // PERSISTED swarm session: the FIRST call honors resume (a non-zero id restores that
 // session); every later call (a /clear reopen) starts a fresh NEW session, so /clear never
@@ -180,17 +186,34 @@ func printSessions(w io.Writer, metas []sessionstore.SessionMeta) error {
 // every open, including a /clear reopen (the launch flag holds for the whole process). Every
 // open (or, on the first call, resume) addresses its session by name in the SHARED store, so a
 // /clear reopen's new session is independent of the one it replaces. The returned thunk yields
-// a tui.Agent (the persisted *sessionAgent satisfies it).
-func openThunk(factory *swe.SessionStoreFactory, resume uuid.UUID, cfg swe.Config) tui.OpenAgent {
-	var opened bool
+// a tui.Agent (the persisted session adapter satisfies the migrated root/active/focused-loop
+// CLI contract).
+func openThunk(openSession sessionOpen, resume uuid.UUID, cfg swe.Config) tui.OpenAgent {
+	var (
+		mu     sync.Mutex
+		opened bool
+	)
 	return func(c context.Context) (tui.Agent, error) {
+		mu.Lock()
 		sel := swe.SessionSelector{}
 		if !opened {
 			sel.Resume = resume // only the first open resumes; /clear reopens start fresh
 		}
 		opened = true
-		return factory.Open(c, sel, cfg)
+		mu.Unlock()
+		return openSession(c, sel, cfg)
 	}
+}
+
+// cliRunner is the cli.Run-shaped runtime seam used to prove process ownership order.
+type cliRunner func(context.Context, tui.OpenAgent, cli.Banner) int
+
+// runCLIWithStore runs the CLI while the shared session store is live. cli.Run closes its
+// current session before returning; the deferred store close therefore always happens after
+// session shutdown, including runtime-error exits.
+func runCLIWithStore(ctx context.Context, open tui.OpenAgent, banner cli.Banner, runCLI cliRunner, closeStore func() error) int {
+	defer func() { _ = closeStore() }()
+	return runCLI(ctx, open, banner)
 }
 
 // run is the testable composition root: it parses flags, resolves the store root, opens the
@@ -226,11 +249,10 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "persistence:", perr)
 		return exitFailed
 	}
-	defer func() { _ = factory.Close() }()
-
 	// --list: print the session list and exit (no TUI). It reads only the listing catalog, so
 	// it is cheap even with many sessions.
 	if flags.list {
+		defer func() { _ = factory.Close() }()
 		if err := listSessions(ctx, factory, out); err != nil {
 			fmt.Fprintln(errOut, "list:", err)
 			return exitFailed
@@ -245,8 +267,13 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	// turn, NOT a command, and never enters the model's context. cli.Run owns logging, signal
 	// teardown, the TUI, and bounded Close.
 	cfg := swe.Config{RuntimeSkills: flags.runtimeSkills, Greeting: flags.greeting, SecurityCeiling: flags.securityCeiling}
-	open := openThunk(factory, flags.resume, cfg)
-	return cli.Run(ctx, open, cli.Banner{Name: bannerName, Greeting: swe.Greeting(cfg)})
+	open := openThunk(func(ctx context.Context, sel swe.SessionSelector, cfg swe.Config) (tui.Agent, error) {
+		return factory.Open(ctx, sel, cfg)
+	}, flags.resume, cfg)
+	runCLI := func(ctx context.Context, open tui.OpenAgent, banner cli.Banner) int {
+		return cli.Run(ctx, open, banner)
+	}
+	return runCLIWithStore(ctx, open, cli.Banner{Name: bannerName, Greeting: swe.Greeting(cfg)}, runCLI, factory.Close)
 }
 
 func main() {

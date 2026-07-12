@@ -23,12 +23,12 @@ import (
 // cancelled (event.TurnInterrupted carries no typed cause to forward).
 var errTurnInterrupted = errors.New("turn interrupted")
 
-// operatorRunner adapts the live operator-as-primary sessionAgent to eval.Runner:
+// operatorRunner adapts the live operator root-primer sessionAgent to eval.Runner:
 // it runs one turn for the input prompt over the session subscription transport
 // and projects the terminal TurnDone.Message to text (reusing the aiMessageText
 // projection from text_test.go — this test is in package swe, so the unexported
 // helper is in scope). Salvaged from the prior coding agent's togoRunner; only the
-// agent type changed (the operator session primary, not the coding wrapper).
+// agent type changed (the operator session adapter, not the coding wrapper).
 type operatorRunner struct{ agent *sessionAgent }
 
 // Run subscribes to the session fan-in, submits a single turn fire-and-forget, and
@@ -109,27 +109,20 @@ func (m modelCompleter) Complete(ctx context.Context, prompt string) (string, er
 	return aiMessageText(resp.Message), nil
 }
 
-// newOperatorPrimary constructs the operator agent as a session PRIMARY loop, the
-// way the eval exercises it: the shared client, a model spec whose system prompt is
-// the swarm Identity prepended to the operator's Role (the swarm owns identity; the
-// agent owns its role), the operator's exact toolset, and its attribution name. It
-// runs under the same spawn caps the swarm applies to its primary. This is a SIMPLIFIED
-// primary — the operator's bare leaf toolset, with NO Subagent and NO delegation prompt
-// fragment — so the eval measures the operator's own investigate+implement craft in
-// isolation, not its delegation behaviour (the production primary built by
-// operatorPrimaryConfig additionally carries Subagent + the delegation guidance).
-func newOperatorPrimary(ctx context.Context, client inference.Client, factory ModelFactory) (*sessionAgent, error) {
-	// The production headless composition root: the full three-loop rig (operator-primary
-	// primer + operator/reviewer leaves) over the process-shared in-memory store with the
-	// current checkout as the exclusive workspace. The eval measures the operator-as-primary.
+// newOperatorRig constructs the production three-loop rig for the operator eval: the internal
+// operator-primary root primer plus operator/reviewer leaves, with the public operator identity
+// preserved by display metadata.
+func newOperatorRig(ctx context.Context, client inference.Client, factory ModelFactory) (*sessionAgent, error) {
+	// The eval uses the same headless rig composition as production over the process-shared
+	// in-memory store, with the current checkout as the exclusive workspace.
 	return newWithClient(ctx, client, factory, Config{})
 }
 
 // TestOperatorEvalIntegration runs the live operator agent — built as a session
-// PRIMARY loop — through the golden-set with the deterministic Contains metric and a
+// root primer — through the golden-set with the deterministic Contains metric and a
 // model-backed Judge. It is the Phase 7A migration of the prior coding agent's eval: the eval
 // engine (internal/eval) is reused unchanged; only the agent under test changed from
-// the coding agent to operator-as-primary. It skips cleanly when LLM_API_KEY is
+// the coding agent to the operator rig. It skips cleanly when LLM_API_KEY is
 // unset, so the default (untagged) suite and a tagged build without a key never
 // attempt a network call.
 func TestOperatorEvalIntegration(t *testing.T) {
@@ -145,9 +138,9 @@ func TestOperatorEvalIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildClient: %v", err)
 	}
-	agent, err := newOperatorPrimary(ctx, client, factory)
+	agent, err := newOperatorRig(ctx, client, factory)
 	if err != nil {
-		t.Fatalf("newOperatorPrimary: %v", err)
+		t.Fatalf("newOperatorRig: %v", err)
 	}
 	t.Cleanup(func() { _ = agent.Close(context.Background()) })
 

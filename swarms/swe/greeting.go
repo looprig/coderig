@@ -10,7 +10,7 @@ import (
 // feeds the Subagent catalog (§6b) so it can never drift from the actual wiring. It is
 // pure string-building — it never builds a session, never calls the model, and is NOT a
 // turn or a command. The TUI renders the returned string as its opening transcript
-// entry; the primary loop's history stays empty until the first real user message.
+// entry; every loop's history stays empty until the first real user message.
 
 // greetingLead is the opening line of the greeting. It is a plain capability statement,
 // never an assistant turn — the model never sees it.
@@ -18,8 +18,8 @@ const greetingLead = "SWE is a software-engineering swarm. It plans a task and d
 
 // Greeting returns the deterministic startup-greeting string for cfg, or the EMPTY
 // string when the greeting toggle is off (cfg.Greeting == false — the fail-secure
-// default). It is built from the swarm's wired spawnable roster (operator is the primary
-// AND a leaf, so it appears once) and the leaves' embedded skill names — the same source
+// default). It is built from the swarm's user-visible leaf roster (operator appears once,
+// independent of the internal operator-primary topology key) and the leaves' embedded skill names — the same source
 // of truth the Subagent catalog reads — so it costs nothing and never drifts from the
 // wiring. It performs NO I/O and NO model call: pure, side-effect-free string building,
 // safe to call at the composition root before any session exists.
@@ -30,9 +30,9 @@ func Greeting(cfg Config) string {
 	return buildGreeting(greetingCatalog(), greetingSkills())
 }
 
-// greetingCatalog returns every spawnable leaf in catalog order. operator is listed once
-// because it is also the primary loop (the roster already contains it), so there is no
-// separate primary line. It is derived from leafBuiltins — the SAME source the leaf
+// greetingCatalog returns every user-visible leaf in catalog order. operator is listed once;
+// the internal operator-primary primer is topology, not a second public agent identity. It is
+// derived from leafBuiltins — the SAME source the leaf
 // Registry and Subagent catalog read — so the greeting can never name an agent the swarm
 // does not wire.
 func greetingCatalog() []AgentCatalogEntry {
