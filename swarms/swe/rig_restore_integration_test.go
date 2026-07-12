@@ -4,21 +4,83 @@ package swe
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/looprig/core/content"
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/ceiling"
 	"github.com/looprig/harness/pkg/event"
+	"github.com/looprig/harness/pkg/identity"
 	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/harness/pkg/rig"
 	"github.com/looprig/harness/pkg/tool"
+	"github.com/looprig/harness/pkg/workspacestore"
 	"github.com/looprig/inference"
+	"github.com/looprig/storage"
 	"github.com/looprig/swe/agents/operator"
 )
+
+type failingSnapshotBlobs struct {
+	storage.Blobs
+	mu       sync.Mutex
+	fail     bool
+	attempts chan struct{}
+}
+
+func (b *failingSnapshotBlobs) Put(ctx context.Context, key string, r io.Reader) error {
+	b.mu.Lock()
+	fail := b.fail
+	b.mu.Unlock()
+	select {
+	case b.attempts <- struct{}{}:
+	default:
+	}
+	if fail {
+		return errors.New("injected workspace snapshot failure")
+	}
+	return b.Blobs.Put(ctx, key, r)
+}
+
+func (b *failingSnapshotBlobs) setFail(fail bool) {
+	b.mu.Lock()
+	b.fail = fail
+	b.mu.Unlock()
+}
+
+// concurrentManagedScript is the channel-controlled counterpart to managedScript. It
+// intentionally does not serialize Stream callbacks: async child inference must be able to
+// block while the parent continues issuing status/wait/interrupt actions.
+type concurrentManagedScript struct {
+	fn func(context.Context, inference.Request) ([]content.Chunk, error)
+}
+
+func (*concurrentManagedScript) Invoke(context.Context, inference.Request) (*inference.Response, error) {
+	return nil, errors.New("concurrentManagedScript.Invoke not used")
+}
+
+func (s *concurrentManagedScript) Stream(ctx context.Context, req inference.Request) (*inference.StreamReader[content.Chunk], error) {
+	chunks, err := s.fn(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	i := 0
+	return inference.NewStreamReader(func() (content.Chunk, error) {
+		if i == len(chunks) {
+			return nil, io.EOF
+		}
+		chunk := chunks[i]
+		i++
+		return chunk, nil
+	}, nil), nil
+}
 
 // TestRigRestoreStateWorkspaceAndContinuation exercises the CLI-shaped persistence path
 // with two genuinely distinct fsstore instances. It checks every restored projection before
@@ -239,14 +301,30 @@ func TestRigRestoreDelegateOwnership(t *testing.T) {
 func TestAsyncDelegatesFSStoreResolveIndependently(t *testing.T) {
 	t.Chdir(t.TempDir())
 	step := 0
-	childTurn := 0
 	var first, second queuedHandle
 	var firstWait, secondWait, firstStatus, interrupted string
-	client := &managedScript{}
-	client.fn = func(_ context.Context, req inference.Request) ([]content.Chunk, error) {
+	firstEntered := make(chan struct{})
+	secondEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	childCalls := 0
+	client := &concurrentManagedScript{}
+	client.fn = func(ctx context.Context, req inference.Request) ([]content.Chunk, error) {
 		if !strings.Contains(req.System, operatorDelegation) {
-			childTurn++
-			return finalText(fmt.Sprintf("independent child result %d", childTurn)), nil
+			childCalls++ // serialized by the parent barriers below: child 1 enters before child 2 starts
+			switch childCalls {
+			case 1:
+				close(firstEntered)
+				select {
+				case <-releaseFirst:
+					return finalText("independent first child result"), nil
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			default:
+				close(secondEntered)
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
 		}
 		prior := lastToolText(req)
 		switch step {
@@ -259,6 +337,11 @@ func TestAsyncDelegatesFSStoreResolveIndependently(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
+			select {
+			case <-firstEntered:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 			step++
 			return toolCall("fs-async-2", `{"action":"start","agent":"operator","message":"second","wait":false}`), nil
 		case 2:
@@ -267,22 +350,28 @@ func TestAsyncDelegatesFSStoreResolveIndependently(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
+			select {
+			case <-secondEntered:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 			step++
 			return toolCall("fs-status-1", fmt.Sprintf(`{"action":"status","delegate_id":%q}`, first.DelegateID)), nil
 		case 3:
 			firstStatus = prior
-			step++
-			return toolCall("fs-wait-2", fmt.Sprintf(`{"action":"wait","delegate_id":%q,"request_id":%q}`, second.DelegateID, second.RequestID)), nil
-		case 4:
-			secondWait = prior
+			close(releaseFirst)
 			step++
 			return toolCall("fs-wait-1", fmt.Sprintf(`{"action":"wait","delegate_id":%q,"request_id":%q}`, first.DelegateID, first.RequestID)), nil
-		case 5:
+		case 4:
 			firstWait = prior
 			step++
 			return toolCall("fs-interrupt-2", fmt.Sprintf(`{"action":"interrupt","delegate_id":%q}`, second.DelegateID)), nil
-		default:
+		case 5:
 			interrupted = prior
+			step++
+			return toolCall("fs-wait-2", fmt.Sprintf(`{"action":"wait","delegate_id":%q,"request_id":%q}`, second.DelegateID, second.RequestID)), nil
+		default:
+			secondWait = prior
 			return finalText("persisted async matrix complete"), nil
 		}
 	}
@@ -301,8 +390,11 @@ func TestAsyncDelegatesFSStoreResolveIndependently(t *testing.T) {
 	if !strings.Contains(firstStatus, first.DelegateID) {
 		t.Fatalf("first status = %q", firstStatus)
 	}
-	if firstWait == secondWait || !strings.Contains(firstWait, "independent child result") || !strings.Contains(secondWait, "independent child result") {
-		t.Fatalf("reversed waits crossed: first=%q second=%q", firstWait, secondWait)
+	if !strings.Contains(firstWait, "independent first child result") {
+		t.Fatalf("first wait = %q", firstWait)
+	}
+	if !strings.Contains(strings.ToLower(secondWait), "interrupt") {
+		t.Fatalf("interrupted second wait = %q", secondWait)
 	}
 	if !strings.Contains(interrupted, second.DelegateID) {
 		t.Fatalf("interrupt result = %q, want delegate %s", interrupted, second.DelegateID)
@@ -386,4 +478,340 @@ func mustCurrentDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return root
+}
+
+// TestRigRestoreSnapshotFailureAdmission composes the actual fsstore session journal and
+// leases with a deterministic failing workspace blob seam. This keeps the complete SWE
+// topology/bindings while proving the two documented snapshot priorities at admission.
+func TestRigRestoreSnapshotFailureAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		priority rig.SnapshotPriority
+		required bool
+	}{
+		{name: "required faults future admission", priority: rig.SnapshotRequired, required: true},
+		{name: "best effort permits admission and retries", priority: rig.SnapshotBestEffort},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Chdir(root)
+			f := newIntegrationFactory(t)
+			blobs := &failingSnapshotBlobs{Blobs: f.fs.Backend().Blobs, fail: true, attempts: make(chan struct{}, 4)}
+			workspace, err := workspacestore.Open(blobs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &managedScript{fn: func(context.Context, inference.Request) ([]content.Chunk, error) {
+				return finalText("snapshot turn complete"), nil
+			}}
+			definitions, err := swarmDefinitions(client, testModel(), Config{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assembly, err := rig.Define(
+				rig.WithLoops(definitions...),
+				rig.WithPrimers(string(operatorPrimaryName)),
+				rig.WithActivePrimer(string(operatorPrimaryName)),
+				rig.WithSessionStore(f.stores.session),
+				rig.WithExclusiveWorkspace(workspace, root, f.stores.leaser),
+				rig.WithSnapshots(rig.SnapshotPolicy{Trigger: rig.SnapshotOnIdle, Priority: tc.priority, Timeout: 5 * time.Second}),
+				rig.WithDelegationLimits(rig.DelegationLimits{Depth: operatorSpawnDepth, Quota: operatorSpawnQuota}),
+				rig.WithFingerprintFields(operatorFingerprintFields(Config{})),
+				rig.WithCeilingFactory(newCeilingFactory(0)),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			controller, err := assembly.NewSession(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, err := newSessionAgent(context.Background(), controller, f.stores.session, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = a.Close(context.Background()) })
+			runManagedTurn(t, a, "trigger failing snapshot")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			select {
+			case <-blobs.attempts:
+			case <-ctx.Done():
+				t.Fatalf("snapshot attempt not observed: %v", ctx.Err())
+			}
+			idle := a.sess.(interface{ WaitIdle(context.Context) error })
+			idleErr := idle.WaitIdle(ctx)
+			if tc.required {
+				if idleErr == nil {
+					t.Fatal("required snapshot failure did not fault WaitIdle")
+				}
+				if _, err := a.Submit(ctx, []content.Block{&content.TextBlock{Text: "must reject"}}); err == nil {
+					t.Fatal("required snapshot failure admitted a later submit")
+				}
+				return
+			}
+			if idleErr != nil {
+				t.Fatalf("best-effort WaitIdle = %v", idleErr)
+			}
+			blobs.setFail(false)
+			runManagedTurn(t, a, "retry snapshot")
+			select {
+			case <-blobs.attempts:
+			case <-ctx.Done():
+				t.Fatalf("best-effort snapshot did not retry: %v", ctx.Err())
+			}
+			if err := idle.WaitIdle(ctx); err != nil {
+				t.Fatalf("best-effort retry WaitIdle = %v", err)
+			}
+		})
+	}
+}
+
+// TestRigRestoreSiblingOwnershipScopes builds two managed primer parents over the same
+// real fsstore session. Each owns one worker. After a fresh-factory restore, parent A can
+// still address A's worker but cannot send, wait, or interrupt parent B's real worker.
+func TestRigRestoreSiblingOwnershipScopes(t *testing.T) {
+	dataDir, root := t.TempDir(), t.TempDir()
+	t.Chdir(root)
+	client := &managedScript{fn: func(context.Context, inference.Request) ([]content.Chunk, error) {
+		return finalText("scoped worker complete"), nil
+	}}
+	var parentA, parentB tool.DelegateController
+	definitions := func(t *testing.T) []loop.Definition {
+		t.Helper()
+		parent := func(name string, capture *tool.DelegateController) loop.Definition {
+			permission := &typedDelegatePermission{}
+			def, err := loop.Define(
+				loop.WithName(identity.AgentName(name)),
+				loop.WithInference(client, testModel()),
+				loop.WithPermissionFactory(func(_ context.Context, bindings tool.Bindings) (loop.PermissionGate, error) {
+					permission.controller = bindings.Delegate
+					*capture = bindings.Delegate
+					return permission, nil
+				}),
+				loop.WithPolicyRevision(name+"-v1"),
+				loop.WithDelegates("scoped-worker"),
+				loop.WithDelegation(loop.Delegation{Style: loop.DelegationManaged}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return def
+		}
+		worker, err := loop.Define(loop.WithName("scoped-worker"), loop.WithInference(client, testModel()), loop.WithPolicyRevision("scoped-worker-v1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return []loop.Definition{parent("parent-a", &parentA), parent("parent-b", &parentB), worker}
+	}
+	build := func(t *testing.T, f *SessionStoreFactory) *rig.Rig {
+		t.Helper()
+		assembly, err := rig.Define(
+			rig.WithLoops(definitions(t)...),
+			rig.WithPrimers("parent-a", "parent-b"),
+			rig.WithActivePrimer("parent-a"),
+			rig.WithSessionStore(f.stores.session),
+			rig.WithExclusiveWorkspace(f.stores.workspace, root, f.stores.leaser),
+			rig.WithSnapshots(rig.SnapshotPolicy{Trigger: rig.SnapshotOnIdle, Priority: rig.SnapshotBestEffort}),
+			rig.WithDelegationLimits(rig.DelegationLimits{Depth: 2, Quota: 8}),
+			rig.WithFingerprintFields(rig.ConfigFingerprintFields{AgentKind: "swe:scoped-ownership-test"}),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return assembly
+	}
+
+	f1, err := NewSessionStoreFactory(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1, err := build(t, f1).NewSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := s1.SessionID()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	aChild, err := parentA.Execute(ctx, tool.DelegateRequest{Operation: tool.DelegateStart, Agent: "scoped-worker", Message: "a", Wait: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bChild, err := parentB.Execute(ctx, tool.DelegateRequest{Operation: tool.DelegateStart, Agent: "scoped-worker", Message: "b", Wait: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aChild.DelegateID == bChild.DelegateID {
+		t.Fatal("distinct parents received the same child")
+	}
+	if err := s1.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	parentA, parentB = nil, nil
+	f2, err := NewSessionStoreFactory(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f2.Close() })
+	s2, err := build(t, f2).RestoreSession(ctx, sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s2.Shutdown(context.Background()) })
+	if parentA == nil || parentB == nil {
+		t.Fatal("restore did not rebind both scoped controllers")
+	}
+	if got, err := parentA.Execute(ctx, tool.DelegateRequest{Operation: tool.DelegateSend, DelegateID: aChild.DelegateID, Message: "owned", Wait: true}); err != nil || got.Output != "scoped worker complete" {
+		t.Fatalf("restored own child send = %+v, %v", got, err)
+	}
+	for _, request := range []tool.DelegateRequest{
+		{Operation: tool.DelegateSend, DelegateID: bChild.DelegateID, Message: "cross-owner", Wait: true},
+		{Operation: tool.DelegateWait, DelegateID: bChild.DelegateID, RequestID: &bChild.RequestID},
+		{Operation: tool.DelegateInterrupt, DelegateID: bChild.DelegateID},
+	} {
+		if _, err := parentA.Execute(ctx, request); err == nil || !strings.Contains(err.Error(), "not owned") {
+			t.Fatalf("parent A cross-owner %v error = %v, want ownership rejection", request.Operation, err)
+		}
+	}
+}
+
+// TestRigRestoreDelegateGateSandboxRoot restores an active production operator delegate,
+// then drives its real Bash tool through the restored ceiling-aware permission/sandbox
+// binding. The gate is persisted, routed by the delegate loop id, resolved through the
+// adapter, and removed; pwd proves the bound executor retained the restored checkout root.
+// This intentionally opens a NEW gate after restore. Gates that were open at a crash are
+// non-restorable by contract and restore closes them with CloseRestoreUnavailable because
+// their blocked in-process continuation no longer exists.
+func TestRigRestoreDelegateGateSandboxRoot(t *testing.T) {
+	dataDir, root := t.TempDir(), t.TempDir()
+	t.Chdir(root)
+	phase, primaryCalls, childCalls := "initial", 0, 0
+	var childID uuid.UUID
+	var bashResult string
+	client := &managedScript{}
+	client.fn = func(_ context.Context, req inference.Request) ([]content.Chunk, error) {
+		if strings.Contains(req.System, operatorDelegation) {
+			primaryCalls++
+			if primaryCalls == 1 {
+				return toolCall("sandbox-child", `{"agent":"operator","message":"prepare","wait":true}`), nil
+			}
+			return finalText("parent prepared"), nil
+		}
+		if phase == "initial" {
+			return finalText("child prepared"), nil
+		}
+		childCalls++
+		if childCalls == 1 {
+			return []content.Chunk{&content.ToolUseChunk{Index: 0, ID: "restored-pwd", Name: "Bash", InputJSON: `{"command":"pwd"}`}}, nil
+		}
+		bashResult = lastToolText(req)
+		return finalText("restored bash complete"), nil
+	}
+	f1, err := NewSessionStoreFactory(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a1, err := f1.openWithClient(context.Background(), client, newModelFactory(), SessionSelector{}, Config{SecurityCeiling: DefaultSecurityMode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := a1.SessionID()
+	_, events := runManagedTurnObserved(t, a1, "create delegate")
+	for _, ev := range events {
+		if started, ok := ev.(event.LoopStarted); ok && !started.Cause.Coordinates.LoopID.IsZero() {
+			childID = started.LoopID
+		}
+	}
+	if childID.IsZero() {
+		t.Fatal("delegate missing")
+	}
+	if err := a1.sess.SetActiveLoop(context.Background(), childID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a1.sess.SetSecurityCeiling(context.Background(), ceiling.Level(1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a1.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	phase = "restored"
+	f2, err := NewSessionStoreFactory(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f2.Close() })
+	a2, err := f2.openWithClient(context.Background(), client, newModelFactory(), SessionSelector{Resume: sid}, Config{SecurityCeiling: DefaultSecurityMode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a2.Close(context.Background()) })
+	if a2.ActiveLoopID() != childID {
+		t.Fatalf("restored active loop = %v, want %v", a2.ActiveLoopID(), childID)
+	}
+	if got := a2.sess.(interface{ CeilingSource() ceiling.Source }).CeilingSource().Current(); got != 1 {
+		t.Fatalf("restored ceiling = %d", got)
+	}
+	sub, err := a2.Subscribe(event.EventFilter{Enduring: event.LoopScope{All: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sub.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	commandID, err := a2.Submit(ctx, []content.Block{&content.TextBlock{Text: "show restored root"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var turnID, gateID, callID uuid.UUID
+	resolved := false
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("restored Bash timed out: %v", ctx.Err())
+		case delivery := <-sub.Events():
+			switch ev := delivery.Event.(type) {
+			case event.TurnStarted:
+				if ev.Cause.CommandID == commandID {
+					turnID = ev.TurnID
+				}
+			case event.GateOpened:
+				if ev.EventHeader().LoopID != childID {
+					t.Fatalf("gate loop = %v, want %v", ev.EventHeader().LoopID, childID)
+				}
+				gateID = ev.Gate.ID
+				callID = ev.Gate.Subject.ToolExecutionID
+				if err := a2.Approve(ctx, childID, callID, tool.ScopeOnce); err != nil {
+					t.Fatal(err)
+				}
+			case event.GateResolved:
+				if ev.GateID == gateID && !gateID.IsZero() {
+					resolved = true
+				}
+			case event.TurnFailed:
+				t.Fatalf("restored Bash turn failed: %v", ev.Err)
+			case event.TurnDone:
+				if ev.TurnID != turnID || turnID.IsZero() {
+					continue
+				}
+				if gateID.IsZero() || !resolved {
+					t.Fatalf("gate lifecycle incomplete: id=%v resolved=%v", gateID, resolved)
+				}
+				if !strings.Contains(bashResult, root) {
+					t.Fatalf("restored Bash pwd result = %q, want root %q", bashResult, root)
+				}
+				if _, err := a2.gateIDFor(childID, callID); err == nil {
+					t.Fatal("resolved gate remained indexed")
+				}
+				return
+			}
+		}
+	}
 }
