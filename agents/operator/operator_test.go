@@ -510,36 +510,12 @@ func TestBuildToolsFailsClosedOnUnresolvableHome(t *testing.T) {
 	if !errors.As(err, &hue) {
 		t.Fatalf("BuildTools() error does not unwrap to *tools.HomeUnresolvableError: %v", err)
 	}
+	// The shared leafrig error carries operator's name so its message keeps the leaf prefix.
+	if tse.Agent != string(Name) {
+		t.Errorf("ToolSetError.Agent = %q, want %q", tse.Agent, string(Name))
+	}
 	if tls.Definitions != nil || tls.Permission != nil || tls.PolicyRevision != "" {
 		t.Errorf("BuildTools() returned a non-zero Tools on failure (want fail-closed): %+v", tls)
-	}
-}
-
-// TestToolSetError proves the typed error's message (with and without a Cause) and
-// that Unwrap returns the wrapped cause so errors.As recovers it.
-func TestToolSetError(t *testing.T) {
-	t.Parallel()
-
-	cause := errors.New("home unresolvable")
-	tests := []struct {
-		name      string
-		err       *ToolSetError
-		wantMsg   string
-		wantCause error
-	}{
-		{name: "with cause", err: &ToolSetError{Cause: cause}, wantMsg: "operator: cannot build tool set: home unresolvable", wantCause: cause},
-		{name: "nil cause", err: &ToolSetError{}, wantMsg: "operator: cannot build tool set", wantCause: nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := tt.err.Error(); got != tt.wantMsg {
-				t.Errorf("Error() = %q, want %q", got, tt.wantMsg)
-			}
-			if got := tt.err.Unwrap(); got != tt.wantCause {
-				t.Errorf("Unwrap() = %v, want %v", got, tt.wantCause)
-			}
-		})
 	}
 }
 

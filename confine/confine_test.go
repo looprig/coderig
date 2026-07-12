@@ -71,7 +71,6 @@ func TestFactoryForContract(t *testing.T) {
 		{name: "propagates error", factory: stubFactory{err: errStub}, wantErr: true},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			conf, err := tt.factory.For(b)
@@ -115,7 +114,6 @@ func TestConfinementOptionProjection(t *testing.T) {
 		{name: "zero confinement -> empty option slices (no panic)", conf: zero, wantBash: 0, wantGrep: 0, wantChecker: 0},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if got := len(tt.conf.BashOptions()); got != tt.wantBash {
