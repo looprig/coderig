@@ -21,9 +21,8 @@ import (
 // root loop, that a submitted turn is observable on the whole-session event stream, and that
 // the agent closes cleanly.
 //
-// The composed managed-delegation action and restore flows live in
-// managed_delegation_test.go. Task 6/7 retains only workspace-skill gate attribution and
-// actual fsstore restore breadth; core delegation is not deferred.
+// The composed managed-delegation action flows live in managed_delegation_test.go; the
+// fresh-fsstore restore and runtime-skill matrix lives in the integration-tagged tests.
 
 // openAcceptanceAgent opens a headless SWE session over an isolated store + temp root.
 func openAcceptanceAgent(t *testing.T) (*sessionAgent, *swarmStores) {

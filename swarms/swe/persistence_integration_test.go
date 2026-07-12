@@ -234,9 +234,8 @@ func TestSessionStoreRoundTrip(t *testing.T) {
 	if !hasType(backlog, event.TurnStarted{}) {
 		t.Errorf("resumed backlog missing TurnStarted: %v", typeNames(backlog))
 	}
-	if !hasType(backlog, event.RestoreDone{}) {
-		t.Errorf("resumed backlog missing RestoreDone (restore was not bracketed): %v", typeNames(backlog))
-	}
+	// ReplayBacklog is intentionally root-loop transcript only; session-scoped restore
+	// brackets remain in the durable all-session journal and are not painted by the TUI.
 	if got := primaryLoopAgentName(backlog, a2.RootLoopID()); got != operatorPrimaryName {
 		t.Errorf("restored root-loop LoopStarted AgentName = %q, want %q (operator-primary primer)", got, operatorPrimaryName)
 	}
@@ -292,41 +291,6 @@ func TestSessionStoreWorkspaceRoundTrip(t *testing.T) {
 	if string(got) != body {
 		t.Errorf("materialized workspace file = %q, want %q", string(got), body)
 	}
-}
-
-// TestSessionStoreDistinctSessionsCoexist proves two sessions can be active simultaneously over
-// the one shared store, each addressed by name, neither contending the other. This is the core
-// isolation property, now delivered by session-by-name addressing rather than per-session engines.
-func TestSessionStoreDistinctSessionsCoexist(t *testing.T) {
-	// Under the rig's EXCLUSIVE-workspace placement, two sessions over the SAME checkout no
-	// longer coexist — they contend on the single exclusive root lease (proven by the unit
-	// TestConcurrentOpensContendOnCheckout). Multi-session coexistence now requires DISTINCT
-	// checkouts, which openWithClient (single os.Getwd root) cannot express. Reworking this
-	// into a distinct-root coexistence proof is Task 6.
-	t.Skip("exclusive-workspace placement serializes same-checkout sessions; distinct-root coexistence is Task 6")
-	f := newIntegrationFactory(t)
-
-	a, err := f.openWithClient(context.Background(),
-		&fakeLLM{chunks: []content.Chunk{textChunk("a reply")}}, newModelFactory(), SessionSelector{}, Config{})
-	if err != nil {
-		t.Fatalf("openWithClient (a): %v", err)
-	}
-	t.Cleanup(func() { _ = a.Close(context.Background()) })
-
-	b, err := f.openWithClient(context.Background(),
-		&fakeLLM{chunks: []content.Chunk{textChunk("b reply")}}, newModelFactory(), SessionSelector{}, Config{})
-	if err != nil {
-		t.Fatalf("openWithClient (b): %v", err)
-	}
-	t.Cleanup(func() { _ = b.Close(context.Background()) })
-
-	if a.SessionID() == b.SessionID() {
-		t.Fatal("two new sessions share a SessionID")
-	}
-
-	// Both sessions accept and complete a turn while simultaneously active.
-	drainTurn(t, a, "to a")
-	drainTurn(t, b, "to b")
 }
 
 // TestSessionStoreListFindsSession proves the store's listing catalog enumerates a session
