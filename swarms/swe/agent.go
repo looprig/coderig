@@ -7,245 +7,257 @@ import (
 	"io"
 	"sync"
 
+	"github.com/looprig/cli/tui"
 	"github.com/looprig/core/content"
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/event"
 	"github.com/looprig/harness/pkg/gate"
 	"github.com/looprig/harness/pkg/journal"
-	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/session"
 	"github.com/looprig/harness/pkg/sessionstore"
 	"github.com/looprig/harness/pkg/tool"
 )
 
-// sessionAgent is a thin wrapper over a session.Session that exposes the tui.Agent
-// surface (the streaming/lifecycle methods plus the Approve/Deny/ProvideAnswer gate
-// trio). It is salvaged from the prior coding agent's Coding wrapper, generalized over an
-// arbitrary primary loop.Config so the SAME wrapper drives the operator (the
-// swarm's primary) and any other primary configuration. The caller owns it and must
-// call Close to release the underlying actor goroutine.
-//
-// It holds no submit/gate/subscribe state of its own — every method delegates to
-// the session — so the wrapper's sole responsibility is lifetime ownership (the
-// agent-owned root cancel) and reporting the static AcceptsImages modality.
+// sessionAgent adapts a rig session.SessionController to the CLI's tui.Agent surface. It
+// owns three things and nothing else: the live session controller, a replay dependency used
+// for the one cold restore replay, and a concurrency-safe gate index that folds
+// GateOpened/GateResolved events into a (loopID, toolExecutionID)→GateID map so the CLI's
+// per-loop Approve/Deny/ProvideAnswer calls can resolve the harness-minted gate id. It holds
+// no root context or GC ticker — the rig owns the session lifetime, workspace snapshots, and
+// GC — so Close is a single session Shutdown.
 type sessionAgent struct {
-	session       *session.Session
-	rootCtx       context.Context    // the agent-owned root the session runs under; persistence schedules GC under it
-	cancel        context.CancelFunc // cancels the session's root context; called by Close
-	acceptsImages bool               // captured from the primary spec at construction; reported by AcceptsImages
+	sess     session.SessionController
+	replayer journal.EventReplayer // nil for a new/headless session with no replay
 
-	// teardown is the composition-root persistence teardown the persisted constructors
-	// install: it stops the GC ticker. It is nil for a non-persisted (headless / fake-only)
-	// agent, so Close is unchanged in that mode. Run AFTER session.Shutdown so the journal
-	// has finished its last append before teardown. The single-writer lease is released by
-	// the SESSION on Shutdown (the WithLeaseRelease hook for a new session, or the hook
-	// Restore installed), so teardown owns only the GC lifecycle. Idempotent (guarded by
-	// teardownOnce) so Close can safely be called more than once.
-	teardown     func(context.Context) error
-	teardownOnce sync.Once
+	// rootLoopID is the stable root loop used for transcript attribution: the first durable
+	// zero-parent LoopStarted (the active primer is started first). It is captured once at
+	// construction and never changes as the active loop is later re-selected or the session
+	// is restored.
+	rootLoopID uuid.UUID
+	isRestore  bool
+	backlog    []event.Event // restored root-loop Enduring transcript; nil for new/headless
 
-	// replayer is the journal-backed read side a RESTORED session's ReplayBacklog drains
-	// for the TUI's cold-restore repaint. It is nil for a NEW or headless session (no
-	// backlog to repaint → ReplayBacklog returns nil). restoredSessionID/
-	// restoredPrimaryLoopID scope the cold replay to the primary loop's session view.
-	replayer              journal.EventReplayer
-	restoredSessionID     uuid.UUID
-	restoredPrimaryLoopID uuid.UUID
+	// mu guards the gate indexes below. foldGate mutates them from the cold replay (at
+	// construction) and from every Subscribe forwarding goroutine; the gate-reply trio reads
+	// them. gateKey pairs the loop with the per-call tool-execution id so the SAME
+	// ToolExecutionID appearing in two loops resolves to two distinct gates.
+	mu      sync.Mutex
+	forward map[gateKey]gate.ID
+	reverse map[gate.ID]gateKey
+
+	shutdownOnce sync.Once
+	shutdownErr  error
 }
 
-// newSessionAgent constructs a sessionAgent from a finished primary loop.Config and
-// optional session options (e.g. session.WithLimits). It gives the session a root
-// context derived from context.Background() — INDEPENDENT of the caller's ctx — so a
-// request-scoped or timeout ctx passed in cannot later tear the session down; ctx
-// bounds only this construction call. Because the session root is background-derived,
-// session.New cannot observe a cancelled caller ctx, so newSessionAgent checks the
-// caller ctx itself and fails fast with a typed *session.SessionError on a cancelled
-// ctx (fail secure). On any session.New failure it cancels the root so nothing leaks.
-func newSessionAgent(ctx context.Context, primary loop.Config, opts ...session.Option) (*sessionAgent, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, &session.SessionError{Kind: session.SessionContextDone, Cause: err}
+// gateKey identifies an open gate by the loop that opened it plus the per-call
+// tool-execution id, so the same ToolExecutionID in two loops keys two distinct gates.
+type gateKey struct {
+	loopID          uuid.UUID
+	toolExecutionID uuid.UUID
+}
+
+// replayOpener is the narrow slice of the session store the adapter needs: open a durable
+// event replayer for one session. *sessionstore.Store satisfies it.
+type replayOpener interface {
+	OpenEventReplayer(uuid.UUID, sessionstore.ReplayRequest) (journal.EventReplayer, error)
+}
+
+// newSessionAgent wraps a live rig session controller as a tui.Agent. For a NEW session the
+// root loop is the active primer (started first), captured directly. For a RESTORED session
+// it performs ONE unnarrowed cold replay: it folds every loop's gate events into the index
+// (so a restored delegate loop's open gate is answerable), derives the root loop id from the
+// first zero-parent LoopStarted, and materializes the root loop's Enduring transcript for
+// ReplayBacklog. store supplies the replayer; ctx bounds the cold replay.
+func newSessionAgent(ctx context.Context, sess session.SessionController, store replayOpener, isRestore bool) (*sessionAgent, error) {
+	a := &sessionAgent{
+		sess:      sess,
+		isRestore: isRestore,
+		forward:   make(map[gateKey]gate.ID),
+		reverse:   make(map[gate.ID]gateKey),
 	}
-
-	// The session's root context — independent of the caller's ctx — owns the actor's
-	// lifetime (and, transitively, every sub-loop the session spawns).
-	rootCtx, cancel := context.WithCancel(context.Background())
-
-	sess, err := session.New(rootCtx, primary, opts...)
-	if err != nil {
-		cancel()
-		return nil, err
+	if replayer, err := store.OpenEventReplayer(sess.SessionID(), sessionstore.ReplayRequest{}); err != nil {
+		if isRestore {
+			return nil, err // a restore cannot fold gates or derive the root without the replay
+		}
+	} else {
+		a.replayer = replayer
 	}
-	return &sessionAgent{session: sess, rootCtx: rootCtx, cancel: cancel, acceptsImages: primary.Model.Caps.AcceptsImages}, nil
-}
-
-// newPersistentSessionAgent constructs a sessionAgent over a NEW persisted session: it is
-// the persisted counterpart to newSessionAgent (same agent-owned, background-derived root
-// + fail-fast on a cancelled caller ctx) that calls session.New with the composition
-// root's persistence options (the injected sessionID, event + command appenders, and the
-// lease-release hook) plus the spawn caps. It is the single place persistence.go turns a
-// finished primary cfg + persistence opts into the wrapper, so the new-vs-headless paths
-// cannot drift. The caller (persistence.go) installs the GC teardown after this returns.
-func newPersistentSessionAgent(ctx context.Context, primary loop.Config, opts ...session.Option) (*sessionAgent, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, &session.SessionError{Kind: session.SessionContextDone, Cause: err}
+	if isRestore {
+		if err := a.coldReplay(ctx); err != nil {
+			return nil, err
+		}
+		return a, nil
 	}
-	rootCtx, cancel := context.WithCancel(context.Background())
-	sess, err := session.New(rootCtx, primary, opts...)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	return &sessionAgent{session: sess, rootCtx: rootCtx, cancel: cancel, acceptsImages: primary.Model.Caps.AcceptsImages}, nil
+	a.rootLoopID = sess.ActiveLoop().ID()
+	return a, nil
 }
 
-// newRestoredSessionAgent constructs a sessionAgent over a RESTORED session via
-// session.Restore: it mirrors newSessionAgent's lifetime ownership (background-derived
-// root, fail-fast on a cancelled caller ctx, cancel-on-failure) but seeds the primary loop
-// from the durable log instead of minting a fresh one. Restore acquires + owns the
-// single-writer lease internally and installs its own lease-release-on-Shutdown hook. The
-// caller (persistence.go) wires the replayer + restored ids + GC teardown after this
-// returns so ReplayBacklog can repaint the restored transcript.
-func newRestoredSessionAgent(ctx context.Context, primary loop.Config, sessionID uuid.UUID, store *sessionstore.Store, opts ...session.Option) (*sessionAgent, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, &session.SessionError{Kind: session.SessionContextDone, Cause: err}
-	}
-	rootCtx, cancel := context.WithCancel(context.Background())
-	sess, err := session.Restore(rootCtx, primary, sessionID, store, opts...)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	return &sessionAgent{session: sess, rootCtx: rootCtx, cancel: cancel, acceptsImages: primary.Model.Caps.AcceptsImages}, nil
-}
-
-// Submit delivers a multimodal user message FIRE-AND-FORGET as a queueable
-// UserInput and returns the InputID — the Cause.CommandID the resulting Reply
-// events carry on the session fan-in. The Go error is non-nil only when the command
-// could not be handed to the loop (loop gone, or ctx done); the turn outcome is
-// observed on the Subscribe stream, never returned. Delegates to the session.
-func (a *sessionAgent) Submit(ctx context.Context, blocks []content.Block) (uuid.UUID, error) {
-	return a.session.Submit(ctx, blocks)
-}
-
-// SubmitToLoop is the loop-targeted counterpart of Submit: it delivers a user message
-// FIRE-AND-FORGET to a SPECIFIC loop (the modern viewport's focused loop) rather than the
-// primary, and returns the InputID the resulting Reply events carry (Cause.CommandID). As
-// with Submit the Go error is non-nil only when the command could not be handed to the
-// loop (loop gone, unknown loop id, or ctx done); the turn outcome is observed on the
-// Subscribe stream, never returned. Delegates to the session.
-func (a *sessionAgent) SubmitToLoop(ctx context.Context, loopID uuid.UUID, blocks []content.Block) (uuid.UUID, error) {
-	return a.session.SubmitToLoop(ctx, loopID, blocks)
-}
-
-// Subscribe attaches a whole-session event consumer to the session fan-in with
-// filter and returns its event.Subscription. It is the seam a TUI/CLI uses to
-// observe events across the whole session (every loop, spanning turns). The caller
-// Closes the returned subscription when done.
-func (a *sessionAgent) Subscribe(filter event.EventFilter) (event.Subscription, error) {
-	return a.session.SubscribeEvents(filter)
-}
-
-// PrimaryLoopID returns the session's primary loop id, so a subscriber can build its
-// EventFilter (primary-only Ephemeral + all-loop Enduring).
-func (a *sessionAgent) PrimaryLoopID() uuid.UUID { return a.session.PrimaryLoopID() }
-
-// ReplayBacklog returns the RESTORED session's historical Enduring events for the TUI's
-// cold-restore repaint, in session order. A NEW or headless session has no replayer wired
-// (a.replayer is nil), so this returns nil and the TUI skips the repaint — the
-// new/headless behavior is unchanged. A RESTORED session opens the primary loop's Enduring
-// view (session subject + that loop's event subject), drains the EventCursor to io.EOF into
-// a materialized slice, and surfaces the journal's typed fail-secure errors (a
-// missing/corrupt offload object) unchanged — the TUI shows a non-fatal restore-error
-// notice; the live stream is unaffected. ctx bounds the read.
-func (a *sessionAgent) ReplayBacklog(ctx context.Context) ([]event.Event, error) {
+// coldReplay drains the whole durable log once (all loops), folding every gate event into
+// the index, capturing the first zero-parent LoopStarted as the root loop id, and collecting
+// the root loop's Enduring events as the restore backlog.
+func (a *sessionAgent) coldReplay(ctx context.Context) error {
 	if a.replayer == nil {
-		return nil, nil // not a restore (new/headless session) — nothing to repaint
+		return nil
 	}
-	cursor, err := a.replayer.Open(ctx, journal.ReplayRequest{
-		SessionID: a.restoredSessionID,
-		LoopID:    a.restoredPrimaryLoopID,
-		From:      journal.Beginning(),
-		Follow:    false, // cold restore: io.EOF at the backlog end
-	})
+	cursor, err := a.replayer.Open(ctx, journal.ReplayRequest{From: journal.Beginning()})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = cursor.Close() }()
 
-	var out []event.Event
 	for {
 		ev, _, err := cursor.Next(ctx)
 		if errors.Is(err, io.EOF) {
-			return out, nil
+			return nil
 		}
 		if err != nil {
-			return nil, err // typed fail-secure error (object missing/corrupt) — surfaced unchanged
+			return err // typed fail-secure error (object missing/corrupt) — surfaced unchanged
 		}
-		out = append(out, ev)
+		a.foldGate(ev)
+		header := ev.EventHeader()
+		if started, ok := ev.(event.LoopStarted); ok && started.Cause.Coordinates.LoopID.IsZero() && a.rootLoopID.IsZero() {
+			a.rootLoopID = header.LoopID
+		}
+		if !a.rootLoopID.IsZero() && ev.Class() == event.Enduring && header.LoopID == a.rootLoopID {
+			a.backlog = append(a.backlog, ev)
+		}
 	}
 }
 
-// SessionID returns the underlying session's id — the composition root reads it to print
-// the session being resumed and to key the catalog/lease. It is read-only identity.
-func (a *sessionAgent) SessionID() uuid.UUID { return a.session.SessionID }
-
-// Interrupt cancels the running turn. Returns true if a turn was cancelled.
-func (a *sessionAgent) Interrupt(ctx context.Context) (bool, error) {
-	return a.session.Interrupt(ctx)
+// foldGate updates the gate index from a single event: a GateOpened inserts the
+// (loopID, toolExecutionID)→GateID forward entry and the reverse removal entry; a
+// GateResolved removes both by the resolved gate id. Any other event is ignored. It is
+// concurrency-safe (mu) so the cold replay and every Subscribe forwarder can call it.
+func (a *sessionAgent) foldGate(ev event.Event) {
+	switch e := ev.(type) {
+	case event.GateOpened:
+		key := gateKey{loopID: e.EventHeader().LoopID, toolExecutionID: e.Gate.Subject.ToolExecutionID}
+		a.mu.Lock()
+		a.forward[key] = e.Gate.ID
+		a.reverse[e.Gate.ID] = key
+		a.mu.Unlock()
+	case event.GateResolved:
+		a.mu.Lock()
+		if key, ok := a.reverse[e.GateID]; ok {
+			delete(a.forward, key)
+			delete(a.reverse, e.GateID)
+		}
+		a.mu.Unlock()
+	}
 }
 
-// AcceptsImages reports whether the underlying model accepts image blocks, captured
-// from the primary spec at construction.
-func (a *sessionAgent) AcceptsImages() bool { return a.acceptsImages }
+// Submit delivers a multimodal user message fire-and-forget to the ACTIVE loop and returns
+// the InputID the resulting Reply events carry (Cause.CommandID).
+func (a *sessionAgent) Submit(ctx context.Context, blocks []content.Block) (uuid.UUID, error) {
+	return a.sess.Submit(ctx, blocks)
+}
 
-// GateNotOpenError reports that no open gate matches the tool-execution id a gate
-// reply addressed. It is fail-secure: an Approve/Deny/ProvideAnswer for a call with
-// no live gate (already resolved, unknown, or never opened) touches nothing and
-// returns this rather than silently succeeding. It is errors.As-able.
-type GateNotOpenError struct{ ToolExecutionID uuid.UUID }
+// SubmitToLoop delivers a user message fire-and-forget to a SPECIFIC loop (the focused
+// loop) and returns the InputID the resulting Reply events carry.
+func (a *sessionAgent) SubmitToLoop(ctx context.Context, loopID uuid.UUID, blocks []content.Block) (uuid.UUID, error) {
+	return a.sess.SubmitToLoop(ctx, loopID, blocks)
+}
+
+// RootLoopID returns the stable root loop used for transcript attribution — the first
+// durable zero-parent LoopStarted, captured at construction and stable across active-loop
+// changes and restore.
+func (a *sessionAgent) RootLoopID() uuid.UUID { return a.rootLoopID }
+
+// ActiveLoopID returns the session's current default input target directly.
+func (a *sessionAgent) ActiveLoopID() uuid.UUID { return a.sess.ActiveLoop().ID() }
+
+// AcceptsImages reports whether the CURRENT model bound to loopID accepts image blocks. It
+// is dynamic and per-target (a multi-loop session runs heterogeneous models) and fails
+// closed (false) for an unknown loop.
+func (a *sessionAgent) AcceptsImages(loopID uuid.UUID) bool {
+	handle, ok := a.sess.Loop(loopID)
+	if !ok {
+		return false
+	}
+	return handle.Model().Caps.AcceptsImages
+}
+
+// Subscribe returns ONE wrapping subscription over the session fan-in that folds
+// GateOpened/GateResolved into the adapter's gate index BEFORE forwarding each event to the
+// consumer, so a live gate is answerable the instant the CLI observes its request. It never
+// opens a second subscription.
+func (a *sessionAgent) Subscribe(filter event.EventFilter) (event.Subscription, error) {
+	inner, err := a.sess.SubscribeEvents(filter)
+	if err != nil {
+		return nil, err
+	}
+	sub := &gateFoldingSubscription{inner: inner, out: make(chan event.Delivery), done: make(chan struct{})}
+	go func() {
+		defer close(sub.out)
+		for delivery := range inner.Events() {
+			a.foldGate(delivery.Event)
+			select {
+			case sub.out <- delivery:
+			case <-sub.done:
+				return
+			}
+		}
+	}()
+	return sub, nil
+}
+
+// ReplayBacklog returns the RESTORED session's root-loop Enduring transcript materialized at
+// construction, in session order. A NEW/headless session returns nil (the CLI skips the
+// repaint). ctx is accepted for the contract; the backlog was folded once at restore.
+func (a *sessionAgent) ReplayBacklog(_ context.Context) ([]event.Event, error) {
+	if !a.isRestore {
+		return nil, nil
+	}
+	return a.backlog, nil
+}
+
+// SessionID returns the underlying session's id (the composition root prints it and keys the
+// catalog on it).
+func (a *sessionAgent) SessionID() uuid.UUID { return a.sess.SessionID() }
+
+// Interrupt cancels the running turn, returning true if a turn was cancelled.
+func (a *sessionAgent) Interrupt(ctx context.Context) (bool, error) { return a.sess.Interrupt(ctx) }
+
+// GateNotOpenError reports that no open gate matches the (loop, tool-execution) a gate reply
+// addressed. It is fail-secure: an Approve/Deny/ProvideAnswer for a call with no live gate
+// touches nothing and returns this. It is errors.As-able.
+type GateNotOpenError struct {
+	LoopID          uuid.UUID
+	ToolExecutionID uuid.UUID
+}
 
 func (e *GateNotOpenError) Error() string {
-	return "swe: no open gate for tool-execution id " + e.ToolExecutionID.String()
+	return "swe: no open gate for loop " + e.LoopID.String() + " tool-execution " + e.ToolExecutionID.String()
 }
 
-// gateIDForCall resolves the session gate.ID of the open gate whose subject matches
-// toolExecutionID. The harness mints a fresh gate.ID per gate (distinct from the
-// tool-execution id the TUI keys on), so the reply path must translate. A
-// tool-execution id is a per-call UUID unique across loops, so matching on it alone
-// is unambiguous (the loop id the TUI also carries is redundant here — RespondGate
-// routes by the gate's own stored route). The loop's install-before-emit ordering
-// guarantees the gate is listable by the time the TUI observes the request event, so
-// this lookup never races the open. An unmatched call fails secure with
-// *GateNotOpenError.
-func (a *sessionAgent) gateIDForCall(ctx context.Context, toolExecutionID uuid.UUID) (gate.ID, error) {
-	for _, g := range a.session.ListGates(ctx) {
-		if g.Subject.ToolExecutionID == toolExecutionID {
-			return g.ID, nil
-		}
+// gateIDFor resolves the harness gate id of the open gate opened by loopID for callID (the
+// per-call tool-execution id), from the adapter-owned index. An unmatched call fails secure
+// with *GateNotOpenError.
+func (a *sessionAgent) gateIDFor(loopID, callID uuid.UUID) (gate.ID, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if id, ok := a.forward[gateKey{loopID: loopID, toolExecutionID: callID}]; ok {
+		return id, nil
 	}
-	return gate.ID{}, &GateNotOpenError{ToolExecutionID: toolExecutionID}
+	return gate.ID{}, &GateNotOpenError{LoopID: loopID, ToolExecutionID: callID}
 }
 
-// Approve resolves a pending tool-call permission gate, granting it at scope. It
-// resolves the gate.ID from callID (the tool-execution id) and submits a
-// user-sourced "approve" GateResponse to the session. loopID is retained for the
-// tui.Agent contract but is not needed for routing — RespondGate dispatches by the
-// gate's stored route.
+// Approve resolves a pending tool-call permission gate, granting it at scope. loopID names
+// the gate-opening loop; callID is the tool-execution id.
 func (a *sessionAgent) Approve(ctx context.Context, loopID, callID uuid.UUID, scope tool.ApprovalScope) error {
-	_ = loopID
-	gateID, err := a.gateIDForCall(ctx, callID)
+	gateID, err := a.gateIDFor(loopID, callID)
 	if err != nil {
 		return err
 	}
 	scopeValue, ok := tool.ApprovalScopeValue(scope)
 	if !ok {
-		return &GateNotOpenError{ToolExecutionID: callID}
+		return &GateNotOpenError{LoopID: loopID, ToolExecutionID: callID}
 	}
 	rawScope, err := json.Marshal(scopeValue)
 	if err != nil {
 		return err
 	}
-	return a.session.RespondGate(ctx, gate.GateResponse{
+	return a.sess.RespondGate(ctx, gate.GateResponse{
 		GateID: gateID,
 		Action: "approve",
 		Values: map[string]json.RawMessage{"scope": rawScope},
@@ -253,30 +265,22 @@ func (a *sessionAgent) Approve(ctx context.Context, loopID, callID uuid.UUID, sc
 	})
 }
 
-// Deny resolves a pending tool-call permission gate by failing it closed
-// (fail-secure); nothing is persisted. It resolves the gate.ID from callID and
-// submits a user-sourced "deny" GateResponse. loopID is retained for the tui.Agent
-// contract but is not needed for routing.
+// Deny resolves a pending tool-call permission gate by failing it closed (fail-secure).
 func (a *sessionAgent) Deny(ctx context.Context, loopID, callID uuid.UUID) error {
-	_ = loopID
-	gateID, err := a.gateIDForCall(ctx, callID)
+	gateID, err := a.gateIDFor(loopID, callID)
 	if err != nil {
 		return err
 	}
-	return a.session.RespondGate(ctx, gate.GateResponse{
+	return a.sess.RespondGate(ctx, gate.GateResponse{
 		GateID: gateID,
 		Action: "deny",
 		Source: gate.ResponseSource{Kind: gate.ResponseFromUser},
 	})
 }
 
-// ProvideAnswer supplies the user's reply to a pending AskUser request. It resolves
-// the gate.ID from callID and submits a user-sourced "answer" GateResponse carrying
-// the reply. loopID is retained for the tui.Agent contract but is not needed for
-// routing.
+// ProvideAnswer supplies the user's reply to a pending AskUser request.
 func (a *sessionAgent) ProvideAnswer(ctx context.Context, loopID, callID uuid.UUID, answer string) error {
-	_ = loopID
-	gateID, err := a.gateIDForCall(ctx, callID)
+	gateID, err := a.gateIDFor(loopID, callID)
 	if err != nil {
 		return err
 	}
@@ -284,7 +288,7 @@ func (a *sessionAgent) ProvideAnswer(ctx context.Context, loopID, callID uuid.UU
 	if err != nil {
 		return err
 	}
-	return a.session.RespondGate(ctx, gate.GateResponse{
+	return a.sess.RespondGate(ctx, gate.GateResponse{
 		GateID: gateID,
 		Action: "answer",
 		Values: map[string]json.RawMessage{"answer": rawAnswer},
@@ -292,27 +296,36 @@ func (a *sessionAgent) ProvideAnswer(ctx context.Context, loopID, callID uuid.UU
 	})
 }
 
-// Close gracefully shuts the session down and releases the session's root context.
-// It blocks until the actor exits (or ctx is done), then cancels the root as a
-// backstop so the actor goroutine cannot leak even if Shutdown timed out on ctx.
-// Cancelling the root also tears down every in-session sub-loop (they run under the
-// same session root). Safe to call more than once.
-//
-// For a PERSISTED agent it then runs the composition-root teardown ONCE (stopping the GC
-// ticker) — AFTER session.Shutdown so the journal has finished its last append before
-// teardown. The single-writer lease is released by the SESSION on Shutdown (the
-// WithLeaseRelease hook for a new session, or the hook Restore installed), so teardown
-// owns only the GC lifecycle. The teardown runs even when Shutdown returns an error. A
-// teardown error is joined onto the Shutdown error so neither is lost.
+// Close shuts the session down exactly once (the rig owns every other lifetime concern — the
+// workspace lease, snapshots, and GC — so there is no second root or watcher cancel).
 func (a *sessionAgent) Close(ctx context.Context) error {
-	err := a.session.Shutdown(ctx)
-	a.cancel()
-	if a.teardown != nil {
-		a.teardownOnce.Do(func() {
-			if terr := a.teardown(ctx); terr != nil {
-				err = errors.Join(err, terr)
-			}
-		})
-	}
-	return err
+	a.shutdownOnce.Do(func() { a.shutdownErr = a.sess.Shutdown(ctx) })
+	return a.shutdownErr
 }
+
+// gateFoldingSubscription is the single wrapping event.Subscription Subscribe returns. Its
+// forwarding goroutine folds each event's gate transitions into the adapter index before
+// handing the event to the consumer channel; Close tears down both the inner subscription
+// and the forwarder (via done) so a consumer that stops reading cannot leak the goroutine.
+type gateFoldingSubscription struct {
+	inner event.Subscription
+	out   chan event.Delivery
+	done  chan struct{}
+	once  sync.Once
+}
+
+func (s *gateFoldingSubscription) Events() <-chan event.Delivery { return s.out }
+
+func (s *gateFoldingSubscription) Close() error {
+	s.once.Do(func() { close(s.done) })
+	return s.inner.Close()
+}
+
+func (s *gateFoldingSubscription) Err() error { return s.inner.Err() }
+
+// compile-time assertions: the adapter satisfies the CLI's tui.Agent surface, and the
+// wrapping subscription satisfies event.Subscription.
+var (
+	_ tui.Agent          = (*sessionAgent)(nil)
+	_ event.Subscription = (*gateFoldingSubscription)(nil)
+)
