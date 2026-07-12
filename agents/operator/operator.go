@@ -10,7 +10,13 @@
 package operator
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
+	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/looprig/harness/pkg/identity"
 	"github.com/looprig/harness/pkg/loop"
@@ -72,64 +78,229 @@ func (e *ToolSetError) Unwrap() error { return e.Cause }
 // Info().Name exactly; the PermissionChecker matches on them.
 var autoApprovedTools = []string{"ReadFile", "Glob", "Grep", "Todo", "AskUser"}
 
-// BuildTools assembles operator's exact allowlist (ReadFile, Glob, Grep,
-// WriteFile, EditFile, Bash, WebSearch, Fetch, Todo, AskUser) behind a FRESH
-// fail-secure PermissionChecker. A fresh checker per call gives every spawned loop
-// independent approval state. Least privilege: the read/search tools get the
-// workspace root + the checker as their ReadGuard; WriteFile/EditFile/Bash get
-// only the root; the web tools (WebSearch/Fetch) get only the HTTP client and
-// never touch the filesystem; Todo/AskUser are self-contained. WriteFile,
-// EditFile, Bash, WebSearch, and Fetch all stay human-gated. There is deliberately
-// NO Subagent — operator is a leaf and cannot spawn.
+// MissingWorkspaceError reports that the fresh permission gate could not be built
+// because the loop binding carried no workspace (root). The checker's containment
+// root is mandatory, so the leaf refuses to build a gate rather than run with an
+// empty root — fail-secure.
+type MissingWorkspaceError struct{}
+
+func (*MissingWorkspaceError) Error() string {
+	return "operator: permission gate requires a workspace binding"
+}
+
+// Tools is operator's per-binding rig contribution: the immutable tool Definitions
+// (each builds fresh, workspace-bound concrete tools per loop binding), the
+// fresh-per-bind PermissionFactory that mints the gate from immutable policy + the
+// bound session ceiling, and a stable PolicyRevision digest. The composition root
+// feeds these into loop.Define via WithTools / WithPermissionFactory /
+// WithPolicyRevision. Nothing session-specific (root, checker, executor, observation
+// set) is captured here — every collaborator is constructed inside a factory that
+// reads tool.Bindings at bind time.
+type Tools struct {
+	Definitions    []tool.Definition
+	Permission     loop.PermissionFactory
+	PolicyRevision string
+}
+
+// Tool names the leaf's definitions declare (and their built tools' Info().Name must
+// match — loop.Bind enforces this). Kept as local constants because the harness
+// counterparts are unexported; a drift is caught loudly at bind time.
+const (
+	toolGlob      = "Glob"
+	toolGrep      = "Grep"
+	toolBash      = "Bash"
+	toolWebSearch = "WebSearch"
+	toolFetch     = "Fetch"
+	toolTodo      = "Todo"
+	toolSkill     = "Skill"
+)
+
+// BuildTools returns operator's per-binding tool Definitions (ReadFile, Glob, Grep,
+// WriteFile, EditFile, Bash, WebSearch, Fetch, Todo, AskUser — the investigate+
+// implement leaf, deliberately NO Subagent so a leaf cannot spawn) plus a
+// fresh-per-bind PermissionFactory and a stable PolicyRevision.
 //
-// skill is the OPTIONAL per-agent Skill tool the swarm wires when operator has
-// ≥1 allowed skill (nil otherwise). When non-nil it is added to the registry and
-// "Skill" is appended to the hard-approve set, so it auto-approves — a scoped,
-// side-effect-free read of trusted in-repo content, the same class as ReadFile.
+// EVERY factory reads tool.Bindings.Workspace.Root and constructs fresh mutable
+// collaborators at bind time — no root/tool/checker/executor/observation-set is
+// selected before the session exists. The read/search tools share ONE static
+// ReadGuard (the hard-deny read policy is immutable and root-independent), while the
+// permission GATE is a FRESH *tools.PermissionChecker per bind (independent approval
+// state per loop). confFactory is the composition root's per-bind OS-sandbox seam:
+// the Grep, Bash, and permission factories each call confFactory.For(bindings) to
+// obtain the confined runner / read-only view / ceiling-posture Option derived from
+// the SAME per-bind sandbox executor (SPEC §10.2) — so operator never imports the
+// sandbox module. httpCl backs the web tools (WebSearch/Fetch), which never touch the
+// filesystem.
 //
-// conf is the composition-root's per-spawn OS-sandbox wiring (confine.Confinement):
-// it routes Bash through the confined executor, Grep through the executor's read-only
-// view, and registers the ceiling-posture stage on the checker holding that SAME
-// executor. Under an enforcing backend at Write mode this auto-approves WriteFile/
-// EditFile (confined by in-process write-containment) and trivial Bash (interlock
-// passing); a zero Confinement leaves everything human-gated as before.
+// skill is the OPTIONAL per-agent Skill DEFINITION the swarm wires (nil otherwise);
+// when non-nil it is appended to the roster and "Skill" is added to the hard-approve
+// set so it auto-approves — a scoped, side-effect-free read of trusted in-repo
+// content, the same class as ReadFile. Its factory reads the bound root, so the Skill
+// tool is workspace-bound per bind like the file tools.
 //
-// It returns a typed *ToolSetError (never a nil, checker-less tool set) when the
-// fail-secure PermissionChecker cannot be constructed — e.g. $HOME is unresolvable
-// while a home-relative deny pattern is configured — so a leaf never runs unguarded.
-func BuildTools(root string, httpCl *http.Client, skill tool.InvokableTool, conf confine.Confinement) (loop.ToolSet, error) {
-	approved := autoApprovedTools
-	if skill != nil {
-		approved = append(append([]string(nil), autoApprovedTools...), "Skill")
-	}
-	policy := tools.PermissionPolicy{
-		WorkspaceRoot: root,
-		HardDeny:      tools.DefaultHardDeny(),
-		HardApprove:   tools.HardApproveRules{Tools: approved},
-	}
-	// conf carries the composition-root's OS-sandbox wiring: the checker gets the
-	// ceiling-posture stage (SPEC §10.2) holding the SAME executor Bash routes through,
-	// Bash runs confined, and Grep uses the read-only view. A zero Confinement leaves
-	// all three unset — the pre-sandbox behavior (direct exec, no posture, all gated).
-	pc, err := tools.NewPermissionChecker(policy, conf.CheckerOptions()...)
+// It returns a typed *ToolSetError (never a partial Tools) when the static read
+// guard's fail-secure PermissionChecker cannot be constructed — e.g. $HOME is
+// unresolvable while a home-relative deny pattern is configured — so a leaf never
+// runs unguarded.
+func BuildTools(confFactory confine.Factory, httpCl *http.Client, skill tool.Definition) (Tools, error) {
+	guard, err := tools.NewPermissionChecker(tools.PermissionPolicy{HardDeny: tools.DefaultHardDeny()})
 	if err != nil {
-		return loop.ToolSet{}, &ToolSetError{Cause: err}
+		return Tools{}, &ToolSetError{Cause: err}
 	}
 
-	registry := []tool.InvokableTool{
-		tools.NewReadFile(root, pc),
-		tools.NewGlob(root, pc),
-		tools.NewGrep(root, pc, conf.GrepOptions()...),
-		tools.NewWriteFile(root),
-		tools.NewEditFile(root),
-		tools.NewBash(root, conf.BashOptions()...),
-		tools.NewWebSearch(tools.NewDuckDuckGoProvider(httpCl)),
-		tools.NewFetch(httpCl),
-		tools.NewTodo(),
-		tools.NewAskUser(),
+	approved := append([]string(nil), autoApprovedTools...)
+	defs := []tool.Definition{
+		tools.Files(guard), // ReadFile + WriteFile + EditFile (shared observation set per bind)
+		globDefinition(guard),
+		grepDefinition(guard, confFactory),
+		bashDefinition(confFactory),
+		webSearchDefinition(httpCl),
+		fetchDefinition(httpCl),
+		todoDefinition(),
+		askUserDefinition(),
 	}
 	if skill != nil {
-		registry = append(registry, skill)
+		defs = append(defs, skill)
+		approved = append(approved, toolSkill)
 	}
-	return loop.ToolSet{Permission: pc, Registry: registry}, nil
+
+	return Tools{
+		Definitions:    defs,
+		Permission:     newPermissionFactory(confFactory, approved),
+		PolicyRevision: policyRevision(string(Name), approved, defs),
+	}, nil
+}
+
+// globDefinition builds a workspace-bound Glob per bind (fresh root + shared static
+// read guard).
+func globDefinition(guard loop.ReadGuard) tool.Definition {
+	return tool.NewDefinition(toolGlob, tool.RequiresWorkspace, func(_ context.Context, b tool.Bindings) ([]tool.InvokableTool, error) {
+		return []tool.InvokableTool{tools.NewGlob(b.Workspace.Root, guard)}, nil
+	})
+}
+
+// grepDefinition builds a workspace-bound Grep per bind, routing ripgrep through the
+// per-bind sandbox read-only view (confFactory.For), else direct execution.
+func grepDefinition(guard loop.ReadGuard, confFactory confine.Factory) tool.Definition {
+	return tool.NewDefinition(toolGrep, tool.RequiresWorkspace, func(_ context.Context, b tool.Bindings) ([]tool.InvokableTool, error) {
+		conf, err := confFactory.For(b)
+		if err != nil {
+			return nil, err
+		}
+		return []tool.InvokableTool{tools.NewGrep(b.Workspace.Root, guard, conf.GrepOptions()...)}, nil
+	})
+}
+
+// bashDefinition builds a workspace-bound Bash per bind: the confined runner + the
+// loop's workspace coordinator and shared observation set all come from the binding
+// (a Bash whole-workspace mutation invalidates exactly this loop's file observations).
+func bashDefinition(confFactory confine.Factory) tool.Definition {
+	return tool.NewDefinition(toolBash, tool.RequiresWorkspace, func(_ context.Context, b tool.Bindings) ([]tool.InvokableTool, error) {
+		conf, err := confFactory.For(b)
+		if err != nil {
+			return nil, err
+		}
+		opts := append(conf.BashOptions(),
+			tools.WithWorkspaceCoordinator(b.Workspace.Coordinator),
+			tools.WithObservations(b.Workspace.Observations),
+		)
+		return []tool.InvokableTool{tools.NewBash(b.Workspace.Root, opts...)}, nil
+	})
+}
+
+// webSearchDefinition builds a WebSearch per bind over the shared HTTP client; it is
+// filesystem-free (no workspace requirement).
+func webSearchDefinition(httpCl *http.Client) tool.Definition {
+	return tool.NewDefinition(toolWebSearch, 0, func(_ context.Context, _ tool.Bindings) ([]tool.InvokableTool, error) {
+		return []tool.InvokableTool{tools.NewWebSearch(tools.NewDuckDuckGoProvider(httpCl))}, nil
+	})
+}
+
+// fetchDefinition builds a Fetch per bind over the shared HTTP client (filesystem-free).
+func fetchDefinition(httpCl *http.Client) tool.Definition {
+	return tool.NewDefinition(toolFetch, 0, func(_ context.Context, _ tool.Bindings) ([]tool.InvokableTool, error) {
+		return []tool.InvokableTool{tools.NewFetch(httpCl)}, nil
+	})
+}
+
+// todoDefinition builds a self-contained Todo per bind (filesystem-free).
+func todoDefinition() tool.Definition {
+	return tool.NewDefinition(toolTodo, 0, func(_ context.Context, _ tool.Bindings) ([]tool.InvokableTool, error) {
+		return []tool.InvokableTool{tools.NewTodo()}, nil
+	})
+}
+
+// askUserDefinition builds a self-contained AskUser per bind (filesystem-free).
+func askUserDefinition() tool.Definition {
+	return tool.NewDefinition("AskUser", 0, func(_ context.Context, _ tool.Bindings) ([]tool.InvokableTool, error) {
+		return []tool.InvokableTool{tools.NewAskUser()}, nil
+	})
+}
+
+// newPermissionFactory returns the leaf's fresh-per-bind PermissionFactory: it mints
+// a NEW fail-secure *tools.PermissionChecker per bind from the immutable hard-deny/
+// hard-approve policy, the bound workspace root (containment), and the per-bind
+// ceiling-posture Option from confFactory.For (which carries min(role, bindings.Ceiling)
+// + the SAME sandbox executor as Bash/Grep). A missing workspace fails closed; a
+// checker-build failure threads up as a typed *ToolSetError so the loop never binds an
+// unguarded gate.
+func newPermissionFactory(confFactory confine.Factory, approved []string) loop.PermissionFactory {
+	hardApprove := append([]string(nil), approved...)
+	return func(_ context.Context, b tool.Bindings) (loop.PermissionGate, error) {
+		if b.Workspace == nil {
+			return nil, &MissingWorkspaceError{}
+		}
+		conf, err := confFactory.For(b)
+		if err != nil {
+			return nil, err
+		}
+		policy := tools.PermissionPolicy{
+			WorkspaceRoot: b.Workspace.Root,
+			HardDeny:      tools.DefaultHardDeny(),
+			HardApprove:   tools.HardApproveRules{Tools: append([]string(nil), hardApprove...)},
+		}
+		pc, err := tools.NewPermissionChecker(policy, conf.CheckerOptions()...)
+		if err != nil {
+			return nil, &ToolSetError{Cause: err}
+		}
+		return pc, nil
+	}
+}
+
+// policyRevision derives a stable, secret-free digest of the leaf's IMMUTABLE policy:
+// the agent name, the sorted hard-approve set, the sorted produced tool names, and the
+// hard-deny read/write/bash pattern set + read cap. It changes iff the policy changes
+// (e.g. the Skill tool is added) and is byte-identical across binds of the same
+// definition — the stable identity loop.WithPolicyRevision requires for an opaque
+// permission collaborator.
+func policyRevision(agent string, approved []string, defs []tool.Definition) string {
+	produced := make([]string, 0, len(defs))
+	for _, d := range defs {
+		produced = append(produced, d.ProducedToolNames()...)
+	}
+	sort.Strings(produced)
+	app := append([]string(nil), approved...)
+	sort.Strings(app)
+	deny := tools.DefaultHardDeny()
+
+	var b strings.Builder
+	writeField := func(label string, vals ...string) {
+		b.WriteString(label)
+		b.WriteByte('=')
+		for _, v := range vals {
+			b.WriteString(v)
+			b.WriteByte('\x1f') // unit separator
+		}
+		b.WriteByte('\x1e') // record separator
+	}
+	writeField("agent", agent)
+	writeField("approved", app...)
+	writeField("tools", produced...)
+	writeField("deniedRead", deny.DeniedReadPaths...)
+	writeField("deniedWrite", deny.DeniedWritePaths...)
+	writeField("deniedBash", deny.DeniedBashPrefixes...)
+	writeField("maxRead", strconv.FormatInt(deny.MaxReadBytes, 10))
+
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
 }

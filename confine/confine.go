@@ -14,6 +14,27 @@ import (
 	"github.com/looprig/harness/pkg/tools"
 )
 
+// Factory builds the per-loop-binding OS-sandbox Confinement. The composition root
+// (swarms/swe — the ONE swe package that couples harness + sandbox, SPEC §2)
+// implements it over the sandbox module, minting ONE dynamic Executor per bound loop
+// (keyed by bindings.LoopID) so the Bash tool's runner, Grep's read-only view, and
+// the permission checker's ceiling-posture Option in the SAME bind share the SAME
+// executor (SPEC §10.2 — posture selection and OS enforcement can never disagree),
+// while DISTINCT binds get FRESH executors (nothing session-specific is captured in
+// the immutable rig definition).
+//
+// A tool-building leaf (agents/operator, agents/reviewer) calls For inside EACH of
+// its per-bind tool and permission factories, reading the confined runners/option
+// from the returned Confinement; it NEVER constructs a sandbox Executor itself, so
+// the leaves depend only on this harness-typed seam and never import the sandbox
+// module (no import cycle back onto swarms/swe). For fails closed with a typed error
+// only when the composition root cannot even decide a posture; the unenforceable-
+// backend case is a graceful degrade (a Confinement with nil runners + a nil-runner
+// posture Option, so Bash/edits stay Ask), NOT an error.
+type Factory interface {
+	For(bindings tool.Bindings) (Confinement, error)
+}
+
 // Confinement is the OS-sandbox wiring for ONE tool-building leaf, built per spawn
 // by the composition root and applied inside the leaf's BuildTools. Its three fields
 // are derived from the SAME sandbox Executor instance so posture selection and OS

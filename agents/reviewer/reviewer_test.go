@@ -9,8 +9,12 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/looprig/core/content"
+	"github.com/looprig/core/uuid"
+	"github.com/looprig/harness/pkg/ceiling"
 	"github.com/looprig/harness/pkg/identity"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/tool"
@@ -18,20 +22,122 @@ import (
 	"github.com/looprig/swe/confine"
 )
 
-// fakeSkill is a minimal tool.InvokableTool named "Skill" used to prove the leaf
-// wiring: BuildTools adds the injected skill tool to the registry and lists
-// "Skill" in HardApprove (so it auto-approves) ONLY when the tool is non-nil.
-type fakeSkill struct{}
+// ---- test doubles -----------------------------------------------------------
 
-func (fakeSkill) Info(context.Context) (*tool.ToolInfo, error) {
+type fakeSkillTool struct{}
+
+func (fakeSkillTool) Info(context.Context) (*tool.ToolInfo, error) {
 	return &tool.ToolInfo{Name: "Skill", Desc: "fake", Schema: json.RawMessage(`{"type":"object"}`)}, nil
 }
 
-func (fakeSkill) InvokableRun(context.Context, string) (*tool.ToolResult, error) {
+func (fakeSkillTool) InvokableRun(context.Context, string) (*tool.ToolResult, error) {
 	return tool.TextResult("fake"), nil
 }
 
-// toolNames collects the sorted Info().Name of every tool in the registry.
+func fakeSkillDef() tool.Definition {
+	return tool.NewDefinition("Skill", tool.RequiresWorkspace, func(_ context.Context, b tool.Bindings) ([]tool.InvokableTool, error) {
+		_ = b.Workspace.Root
+		return []tool.InvokableTool{fakeSkillTool{}}, nil
+	})
+}
+
+type stubRunner struct{ loop uuid.UUID }
+
+func (stubRunner) RunCommand(context.Context, string, string) ([]byte, int, error) {
+	return nil, 0, nil
+}
+
+type stubArgv struct{ loop uuid.UUID }
+
+func (stubArgv) RunArgv(context.Context, string, []string) ([]byte, int, error) { return nil, 0, nil }
+
+type stubConfFactory struct {
+	mu      sync.Mutex
+	roots   []string
+	runners []tool.CommandRunner
+}
+
+func (f *stubConfFactory) For(b tool.Bindings) (confine.Confinement, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	root := ""
+	if b.Workspace != nil {
+		root = b.Workspace.Root
+	}
+	r := stubRunner{loop: b.LoopID}
+	f.roots = append(f.roots, root)
+	f.runners = append(f.runners, r)
+	return confine.Confinement{BashRunner: r, GrepRunner: stubArgv{loop: b.LoopID}}, nil
+}
+
+func (f *stubConfFactory) seenRoot(root string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.roots {
+		if r == root {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *stubConfFactory) distinctRunners() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	seen := make(map[tool.CommandRunner]struct{}, len(f.runners))
+	for _, r := range f.runners {
+		seen[r] = struct{}{}
+	}
+	return len(seen)
+}
+
+type fakePermit struct{}
+
+func (fakePermit) Release() {}
+
+type fakeCoordinator struct{}
+
+func (fakeCoordinator) Acquire(context.Context, tool.WorkspaceOperation, string) (tool.WorkspacePermit, error) {
+	return fakePermit{}, nil
+}
+func (fakeCoordinator) Healthy() error { return nil }
+
+func mustUUID(t *testing.T) uuid.UUID {
+	t.Helper()
+	id, err := uuid.New()
+	if err != nil {
+		t.Fatalf("uuid.New() error = %v", err)
+	}
+	return id
+}
+
+func bindingsFor(t *testing.T, root string) tool.Bindings {
+	t.Helper()
+	return tool.Bindings{
+		SessionID: mustUUID(t),
+		LoopID:    mustUUID(t),
+		Ceiling:   ceiling.New(),
+		Workspace: &tool.WorkspaceBinding{
+			Root:         root,
+			Coordinator:  fakeCoordinator{},
+			Observations: tools.NewObservations(),
+		},
+	}
+}
+
+func bindAll(t *testing.T, defs []tool.Definition, b tool.Bindings) []tool.InvokableTool {
+	t.Helper()
+	var out []tool.InvokableTool
+	for _, d := range defs {
+		built, err := d.Build(context.Background(), b)
+		if err != nil {
+			t.Fatalf("Build(%s) error = %v", d.Name(), err)
+		}
+		out = append(out, built...)
+	}
+	return out
+}
+
 func toolNames(t *testing.T, reg []tool.InvokableTool) []string {
 	t.Helper()
 	names := make([]string, 0, len(reg))
@@ -46,7 +152,6 @@ func toolNames(t *testing.T, reg []tool.InvokableTool) []string {
 	return names
 }
 
-// byName indexes a registry by Info().Name for per-tool Check assertions.
 func byName(t *testing.T, reg []tool.InvokableTool) map[string]tool.InvokableTool {
 	t.Helper()
 	m := make(map[string]tool.InvokableTool, len(reg))
@@ -72,33 +177,44 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// TestBuildToolSetAllowlist proves reviewer wires EXACTLY its allowlist
-// (Glob, Grep, ReadFile, Bash, Todo, AskUser) — critique with the ability to run
-// tests/build via Bash — and that the auto-approve set is everything EXCEPT Bash
-// (Bash runs a shell, so it stays human-gated). It also proves NO Subagent tool
-// is wired (a leaf cannot spawn) and NO write/edit tool is present (reviewer
-// critiques, it never mutates).
-func TestBuildToolSetAllowlist(t *testing.T) {
+func resultText(res *tool.ToolResult) string {
+	if res == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, blk := range res.Content {
+		if tb, ok := blk.(*content.TextBlock); ok {
+			b.WriteString(tb.Text)
+		}
+	}
+	return b.String()
+}
+
+// ---- roster / read-only tests ----------------------------------------------
+
+// TestBuildToolsRoster proves reviewer defines EXACTLY its allowlist (ReadFile,
+// Glob, Grep, Bash, Todo, AskUser) — critique with the ability to run tests/build
+// via Bash — with NO write/edit tool (it never mutates) and NO Subagent (a leaf
+// cannot spawn).
+func TestBuildToolsRoster(t *testing.T) {
 	t.Parallel()
 
-	ts, err := BuildTools("/tmp/workspace-root", nil, confine.Confinement{})
+	tls, err := BuildTools(&stubConfFactory{}, nil)
 	if err != nil {
 		t.Fatalf("BuildTools() error = %v", err)
 	}
-	if ts.Permission == nil {
-		t.Fatal("BuildTools() ToolSet.Permission = nil, want non-nil PermissionChecker")
+	if tls.Permission == nil {
+		t.Fatal("BuildTools() Tools.Permission = nil, want a PermissionFactory")
+	}
+	if strings.TrimSpace(tls.PolicyRevision) == "" {
+		t.Fatal("BuildTools() Tools.PolicyRevision is empty, want a stable revision")
 	}
 
-	wantTools := []string{"AskUser", "Bash", "Glob", "Grep", "ReadFile", "Todo"}
-	got := toolNames(t, ts.Registry)
-	if !equalStrings(got, wantTools) {
-		t.Errorf("registry tool names = %v, want %v", got, wantTools)
+	got := toolNames(t, bindAll(t, tls.Definitions, bindingsFor(t, t.TempDir())))
+	want := []string{"AskUser", "Bash", "Glob", "Grep", "ReadFile", "Todo"}
+	if !equalStrings(got, want) {
+		t.Errorf("bound tool names = %v, want %v", got, want)
 	}
-	if l := len(ts.Registry); l != len(wantTools) {
-		t.Errorf("len(registry) = %d, want %d", l, len(wantTools))
-	}
-
-	// Reviewer must not spawn and must not mutate the filesystem.
 	for _, n := range got {
 		switch n {
 		case "Subagent":
@@ -107,21 +223,176 @@ func TestBuildToolSetAllowlist(t *testing.T) {
 			t.Errorf("reviewer wired %q; it critiques, it must not mutate", n)
 		}
 	}
+}
 
-	// Auto-approve allowlist is everything EXCEPT Bash.
-	assertAutoApproveSet(t, []string{"AskUser", "Glob", "Grep", "ReadFile", "Todo"})
+// TestProducedNamesMatchBuilt proves every definition's declared ProducedToolNames
+// exactly equals the Info().Name set it builds (catches stale bundle metadata) —
+// including the read-only ReadFile definition that wraps tools.Files and returns
+// ONLY ReadFile.
+func TestProducedNamesMatchBuilt(t *testing.T) {
+	t.Parallel()
 
-	// Behavioral proof through the wired PermissionChecker against a REAL root:
-	// the read/todo/ask tools auto-approve; Bash stays Ask.
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("seed file: %v", err)
-	}
-	tsReal, err := BuildTools(root, nil, confine.Confinement{})
+	tls, err := BuildTools(&stubConfFactory{}, fakeSkillDef())
 	if err != nil {
 		t.Fatalf("BuildTools() error = %v", err)
 	}
-	reg := byName(t, tsReal.Registry)
+	b := bindingsFor(t, t.TempDir())
+	for _, d := range tls.Definitions {
+		built, err := d.Build(context.Background(), b)
+		if err != nil {
+			t.Fatalf("Build(%s) error = %v", d.Name(), err)
+		}
+		declared := append([]string(nil), d.ProducedToolNames()...)
+		sort.Strings(declared)
+		actual := toolNames(t, built)
+		if !equalStrings(declared, actual) {
+			t.Errorf("definition %q produced names %v, built %v", d.Name(), declared, actual)
+		}
+	}
+}
+
+// TestReadOnlyReadFile proves the read-only ReadFile definition (which wraps
+// tools.Files because harness has no read-only files definition) builds a WORKING
+// ReadFile bound to the workspace root and never exposes Write/Edit.
+func TestReadOnlyReadFile(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tls, err := BuildTools(&stubConfFactory{}, nil)
+	if err != nil {
+		t.Fatalf("BuildTools() error = %v", err)
+	}
+	reg := byName(t, bindAll(t, tls.Definitions, bindingsFor(t, root)))
+	rf, ok := reg["ReadFile"]
+	if !ok {
+		t.Fatal("ReadFile not wired")
+	}
+	res, err := rf.InvokableRun(context.Background(), `{"path":"f.txt"}`)
+	if err != nil {
+		t.Fatalf("ReadFile run error = %v", err)
+	}
+	if !strings.Contains(resultText(res), "hello") {
+		t.Errorf("ReadFile did not return the file contents: %q", resultText(res))
+	}
+	if _, ok := reg["WriteFile"]; ok {
+		t.Error("reviewer exposed WriteFile")
+	}
+	if _, ok := reg["EditFile"]; ok {
+		t.Error("reviewer exposed EditFile")
+	}
+}
+
+// TestBindingIsolation binds every workspace definition twice and proves each
+// ReadFile uses its own bound root, the confine.Factory is read per bind (fresh
+// executor per binding), and the permission factory yields a fresh gate per bind.
+func TestBindingIsolation(t *testing.T) {
+	t.Parallel()
+
+	confFactory := &stubConfFactory{}
+	tls, err := BuildTools(confFactory, nil)
+	if err != nil {
+		t.Fatalf("BuildTools() error = %v", err)
+	}
+	rootA, rootB := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootA, "a.txt"), []byte("AAA"), 0o600); err != nil {
+		t.Fatalf("seed a: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rootB, "b.txt"), []byte("BBB"), 0o600); err != nil {
+		t.Fatalf("seed b: %v", err)
+	}
+	bindA, bindB := bindingsFor(t, rootA), bindingsFor(t, rootB)
+	regA := byName(t, bindAll(t, tls.Definitions, bindA))
+	regB := byName(t, bindAll(t, tls.Definitions, bindB))
+
+	readOK := func(reg map[string]tool.InvokableTool, path, want string) bool {
+		res, err := reg["ReadFile"].InvokableRun(context.Background(), `{"path":"`+path+`"}`)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", path, err)
+		}
+		return strings.Contains(resultText(res), want)
+	}
+	if !readOK(regA, "a.txt", "AAA") {
+		t.Error("bindA ReadFile did not read its own root")
+	}
+	if readOK(regA, "b.txt", "BBB") {
+		t.Error("bindA ReadFile read bindB's file — roots are not isolated")
+	}
+	if !readOK(regB, "b.txt", "BBB") {
+		t.Error("bindB ReadFile did not read its own root")
+	}
+	if !confFactory.seenRoot(rootA) || !confFactory.seenRoot(rootB) {
+		t.Errorf("confine.Factory was not consulted per bound root (saw %v)", confFactory.roots)
+	}
+	if n := confFactory.distinctRunners(); n < 2 {
+		t.Errorf("confine.Factory returned %d distinct runners across two binds, want >= 2", n)
+	}
+
+	gateA, err := tls.Permission(context.Background(), bindA)
+	if err != nil {
+		t.Fatalf("Permission(bindA) error = %v", err)
+	}
+	gateB, err := tls.Permission(context.Background(), bindB)
+	if err != nil {
+		t.Fatalf("Permission(bindB) error = %v", err)
+	}
+	if gateA == nil || gateB == nil {
+		t.Fatal("permission factory returned a nil gate")
+	}
+	if gateA == gateB {
+		t.Error("permission factory returned the SAME gate for two binds (must be fresh per bind)")
+	}
+}
+
+// TestMissingWorkspaceFailsClosed proves a workspace-required definition fails
+// closed with a typed *tool.MissingBindingError when no workspace binding exists.
+func TestMissingWorkspaceFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	tls, err := BuildTools(&stubConfFactory{}, nil)
+	if err != nil {
+		t.Fatalf("BuildTools() error = %v", err)
+	}
+	noWS := tool.Bindings{SessionID: mustUUID(t), LoopID: mustUUID(t), Ceiling: ceiling.New()}
+	var checked bool
+	for _, d := range tls.Definitions {
+		if d.Requirements()&tool.RequiresWorkspace == 0 {
+			continue
+		}
+		checked = true
+		_, err := d.Build(context.Background(), noWS)
+		var missing *tool.MissingBindingError
+		if !errors.As(err, &missing) {
+			t.Errorf("Build(%s) with no workspace = %v, want *tool.MissingBindingError", d.Name(), err)
+		}
+	}
+	if !checked {
+		t.Fatal("no workspace-required definition found")
+	}
+}
+
+// TestGateAutoApprove proves the fresh gate auto-approves the read/todo/ask tools
+// and keeps Bash at Ask (reviewer runs a shell only under human approval), with no
+// sandbox posture in play.
+func TestGateAutoApprove(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "f.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	tls, err := BuildTools(&stubConfFactory{}, nil)
+	if err != nil {
+		t.Fatalf("BuildTools() error = %v", err)
+	}
+	b := bindingsFor(t, root)
+	reg := byName(t, bindAll(t, tls.Definitions, b))
+	gate, err := tls.Permission(context.Background(), b)
+	if err != nil {
+		t.Fatalf("Permission() error = %v", err)
+	}
 	cases := []struct {
 		tool string
 		args string
@@ -137,51 +408,81 @@ func TestBuildToolSetAllowlist(t *testing.T) {
 	for _, tc := range cases {
 		tl, ok := reg[tc.tool]
 		if !ok {
-			t.Fatalf("tool %q not in registry", tc.tool)
+			t.Fatalf("tool %q not bound", tc.tool)
 		}
-		if eff := tsReal.Permission.Check(context.Background(), tl, tc.tool, tc.args); eff != tc.want {
-			t.Errorf("Check(%q) effect = %v, want %v", tc.tool, eff, tc.want)
+		if eff := gate.Check(context.Background(), tl, tc.tool, tc.args); eff != tc.want {
+			t.Errorf("Check(%q) = %v, want %v", tc.tool, eff, tc.want)
 		}
+	}
+	assertAutoApproveSet(t, []string{"AskUser", "Glob", "Grep", "ReadFile", "Todo"})
+}
+
+// TestSkillWiring proves an injected Skill definition joins the roster and auto-
+// approves; a nil skill wires neither.
+func TestSkillWiring(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	withSkill, err := BuildTools(&stubConfFactory{}, fakeSkillDef())
+	if err != nil {
+		t.Fatalf("BuildTools(skill) error = %v", err)
+	}
+	b := bindingsFor(t, root)
+	reg := byName(t, bindAll(t, withSkill.Definitions, b))
+	if _, ok := reg["Skill"]; !ok {
+		t.Fatal("Skill definition not wired")
+	}
+	gate, err := withSkill.Permission(context.Background(), b)
+	if err != nil {
+		t.Fatalf("Permission() error = %v", err)
+	}
+	if eff := gate.Check(context.Background(), reg["Skill"], "Skill", `{"name":"code-style"}`); eff != loop.EffectAutoApprove {
+		t.Errorf("Check(Skill) = %v, want %v", eff, loop.EffectAutoApprove)
+	}
+
+	noSkill, err := BuildTools(&stubConfFactory{}, nil)
+	if err != nil {
+		t.Fatalf("BuildTools(nil) error = %v", err)
+	}
+	b2 := bindingsFor(t, root)
+	regNo := byName(t, bindAll(t, noSkill.Definitions, b2))
+	if _, ok := regNo["Skill"]; ok {
+		t.Fatal("nil skill still wired a Skill tool")
 	}
 }
 
-// TestBuildToolSetWithSkill proves that when a non-nil Skill tool is injected,
-// BuildTools adds it to the registry AND it auto-approves through the wired
-// PermissionChecker — a scoped, side-effect-free read, the same class as
-// ReadFile. The base allowlist is otherwise unchanged.
-func TestBuildToolSetWithSkill(t *testing.T) {
+// TestPolicyRevisionStable proves the revision is deterministic across identical
+// builds and changes when the policy changes (adding Skill).
+func TestPolicyRevisionStable(t *testing.T) {
 	t.Parallel()
 
-	ts, err := BuildTools("/tmp/workspace-root", fakeSkill{}, confine.Confinement{})
+	a, err := BuildTools(&stubConfFactory{}, nil)
 	if err != nil {
 		t.Fatalf("BuildTools() error = %v", err)
 	}
-	wantTools := []string{"AskUser", "Bash", "Glob", "Grep", "ReadFile", "Skill", "Todo"}
-	got := toolNames(t, ts.Registry)
-	if !equalStrings(got, wantTools) {
-		t.Errorf("registry tool names = %v, want %v (Skill added)", got, wantTools)
+	b, err := BuildTools(&stubConfFactory{}, nil)
+	if err != nil {
+		t.Fatalf("BuildTools() error = %v", err)
 	}
-	reg := byName(t, ts.Registry)
-	tl, ok := reg["Skill"]
-	if !ok {
-		t.Fatal("Skill tool not in registry")
+	if a.PolicyRevision != b.PolicyRevision {
+		t.Errorf("policy revision not stable: %q vs %q", a.PolicyRevision, b.PolicyRevision)
 	}
-	if eff := ts.Permission.Check(context.Background(), tl, "Skill", `{"name":"code-style"}`); eff != loop.EffectAutoApprove {
-		t.Errorf("Check(Skill) effect = %v, want %v (Skill must auto-approve)", eff, loop.EffectAutoApprove)
+	withSkill, err := BuildTools(&stubConfFactory{}, fakeSkillDef())
+	if err != nil {
+		t.Fatalf("BuildTools(skill) error = %v", err)
+	}
+	if withSkill.PolicyRevision == a.PolicyRevision {
+		t.Error("policy revision did not change when the Skill tool was added")
 	}
 }
 
-// TestBuildToolsFailsClosedOnUnresolvableHome proves the Part-B security contract: when the
-// fail-secure PermissionChecker cannot be constructed — because $HOME is unresolvable while
-// DefaultHardDeny's home-relative ("~/…") deny patterns require it — BuildTools fails CLOSED.
-// It returns a typed *ToolSetError whose Unwrap chain reaches the underlying
-// *tools.HomeUnresolvableError, and the returned tool set is the ZERO value (no checker-less,
-// half-built set ever leaks out). This is the "thread the error up, never fail open" behavior.
+// TestBuildToolsFailsClosedOnUnresolvableHome proves BuildTools fails CLOSED with a
+// typed *ToolSetError unwrapping *tools.HomeUnresolvableError when the read guard's
+// checker cannot be built ($HOME unresolvable while "~/…" deny patterns require it).
 func TestBuildToolsFailsClosedOnUnresolvableHome(t *testing.T) {
-	// NOT t.Parallel(): HOME is process-global and t.Setenv panics under t.Parallel.
 	t.Setenv("HOME", "")
 
-	ts, err := BuildTools(t.TempDir(), nil, confine.Confinement{})
+	tls, err := BuildTools(&stubConfFactory{}, nil)
 
 	var tse *ToolSetError
 	if !errors.As(err, &tse) {
@@ -191,13 +492,11 @@ func TestBuildToolsFailsClosedOnUnresolvableHome(t *testing.T) {
 	if !errors.As(err, &hue) {
 		t.Fatalf("BuildTools() error does not unwrap to *tools.HomeUnresolvableError: %v", err)
 	}
-	if ts.Permission != nil || ts.Registry != nil {
-		t.Errorf("BuildTools() returned a non-zero tool set on failure (want fail-closed): Permission=%v Registry=%v", ts.Permission, ts.Registry)
+	if tls.Definitions != nil || tls.Permission != nil || tls.PolicyRevision != "" {
+		t.Errorf("BuildTools() returned a non-zero Tools on failure: %+v", tls)
 	}
 }
 
-// TestToolSetError proves the typed error's message (with and without a Cause — exercising the
-// nil-Cause guard) and that Unwrap returns the wrapped cause so errors.As recovers it.
 func TestToolSetError(t *testing.T) {
 	t.Parallel()
 
@@ -224,8 +523,6 @@ func TestToolSetError(t *testing.T) {
 	}
 }
 
-// assertAutoApproveSet proves the package-level hard-approve allowlist is
-// exactly want (order-independent).
 func assertAutoApproveSet(t *testing.T, want []string) {
 	t.Helper()
 	got := append([]string(nil), autoApprovedTools...)
@@ -237,7 +534,8 @@ func assertAutoApproveSet(t *testing.T, want []string) {
 	}
 }
 
-// TestName pins the attribution name.
+// ---- immutable-boundary tests ----------------------------------------------
+
 func TestName(t *testing.T) {
 	t.Parallel()
 	if Name != identity.AgentName("reviewer") {
@@ -245,7 +543,6 @@ func TestName(t *testing.T) {
 	}
 }
 
-// TestDescriptionNonEmpty proves the catalog description is present.
 func TestDescriptionNonEmpty(t *testing.T) {
 	t.Parallel()
 	if strings.TrimSpace(Description) == "" {
@@ -253,8 +550,6 @@ func TestDescriptionNonEmpty(t *testing.T) {
 	}
 }
 
-// TestRoleContent proves the role carries reviewer's defining duties: critique
-// (don't fix), may run tests/build, report findings (don't mutate).
 func TestRoleContent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -276,7 +571,6 @@ func TestRoleContent(t *testing.T) {
 	}
 }
 
-// TestRoleIsWellFormedXML proves the role is a single <role name="reviewer">.
 func TestRoleIsWellFormedXML(t *testing.T) {
 	t.Parallel()
 	var probe struct {
