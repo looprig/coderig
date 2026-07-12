@@ -21,9 +21,9 @@ import (
 // root loop, that a submitted turn is observable on the whole-session event stream, and that
 // the agent closes cleanly.
 //
-// TODO(task6): the multi-agent delegation end-to-end flows (operator-primary emits a managed
-// Subagent tool call → a delegate operator/reviewer loop starts and runs; a delegate's gate is
-// attributed to its own loop) are heavier integration flows deferred to Task 6/7.
+// The composed managed-delegation action and restore flows live in
+// managed_delegation_test.go. Task 6/7 retains only workspace-skill gate attribution and
+// actual fsstore restore breadth; core delegation is not deferred.
 
 // openAcceptanceAgent opens a headless SWE session over an isolated store + temp root.
 func openAcceptanceAgent(t *testing.T) (*sessionAgent, *swarmStores) {

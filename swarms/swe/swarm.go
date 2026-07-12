@@ -30,6 +30,30 @@ import (
 // which checks a built tool's Info().Name against its definition's declared name).
 const skillToolName = "Skill"
 
+const managedSubagentToolName = "Subagent"
+
+// managedPrimerPermission adds the rig-injected Subagent capability to the operator
+// leaf's permission policy. Every non-Subagent decision and every persisted grant is
+// delegated unchanged, keeping the two operator faces on one policy source of truth.
+type managedPrimerPermission struct{ loop.PermissionGate }
+
+func (p managedPrimerPermission) Check(ctx context.Context, invokable tool.InvokableTool, name, args string) loop.Effect {
+	if name == managedSubagentToolName {
+		return loop.EffectAutoApprove
+	}
+	return p.PermissionGate.Check(ctx, invokable, name, args)
+}
+
+func managedPrimerPermissionFactory(base loop.PermissionFactory) loop.PermissionFactory {
+	return func(ctx context.Context, bindings tool.Bindings) (loop.PermissionGate, error) {
+		permission, err := base(ctx, bindings)
+		if err != nil {
+			return nil, err
+		}
+		return managedPrimerPermission{PermissionGate: permission}, nil
+	}
+}
+
 // operatorPrimaryName is the PRIMER loop's identity: distinct from the operator leaf so
 // definition-wide delegation never hands a spawned operator another Subagent. It DISPLAYS as
 // "operator" (WithDisplayName) so the UI and attribution read as the operator identity.
@@ -128,11 +152,13 @@ func skillDefinitionFor(loader tools.SkillLoader, b leafBuiltin, cfg Config) too
 
 // swarmDefinitions assembles the three immutable loop.Definitions for one rig: the
 // operator-primary primer (operator tools + managed delegation to the two leaves), the
-// operator leaf (the SAME tool policy + prompt identity as the primer MINUS delegation), and
+// operator leaf (the SAME base tool policy + prompt identity as the primer MINUS managed
+// Subagent), and
 // the reviewer leaf (read-only critique tools, no delegation). The primer and operator leaf
-// are built from the SAME operator.BuildTools result, so their tool policy (Definitions +
-// PolicyRevision) is byte-identical and cannot drift; the ONLY prompt difference is the
-// primer's appended operatorDelegation guidance. Every collaborator is root-free — the
+// are built from the SAME operator.BuildTools result, so their declared tools and permission
+// base cannot drift; the primer wraps that permission gate to approve only the rig-injected
+// Subagent and records that additive capability in its policy revision. The ONLY prompt
+// difference is the primer's appended operatorDelegation guidance. Every collaborator is root-free — the
 // workspace root is a rig placement concern read per bind, never captured here.
 func swarmDefinitions(client inference.Client, model inference.Model, cfg Config) ([]loop.Definition, error) {
 	httpCl := newHTTPClient()
@@ -176,8 +202,8 @@ func swarmDefinitions(client inference.Client, model inference.Model, cfg Config
 		loop.WithInference(client, model),
 		loop.WithSystem(operatorPrimerSystem),
 		loop.WithTools(opTools.Definitions...),
-		loop.WithPermissionFactory(opTools.Permission),
-		loop.WithPolicyRevision(opTools.PolicyRevision),
+		loop.WithPermissionFactory(managedPrimerPermissionFactory(opTools.Permission)),
+		loop.WithPolicyRevision(opTools.PolicyRevision+":"+managedSubagentToolName),
 		loop.WithRuntimeContext(runtimeCtx),
 		loop.WithDelegates(operator.Name, reviewer.Name),
 		loop.WithDelegation(loop.Delegation{Style: loop.DelegationManaged}),

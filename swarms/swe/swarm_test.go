@@ -85,8 +85,8 @@ func TestSwarmDefinitionsTopology(t *testing.T) {
 	}
 }
 
-// TestSwarmDefinitionsAntiDrift proves the primer and operator leaf share ONE tool policy
-// (byte-identical PolicyRevision) and one prompt identity: the operator leaf's effective
+// TestSwarmDefinitionsAntiDrift proves the primer and operator leaf share one base tool policy
+// and one prompt identity: the operator leaf's effective
 // system equals the primer's with the primer-only operatorDelegation guidance removed. This
 // is the guard that the two operator faces cannot silently diverge.
 func TestSwarmDefinitionsAntiDrift(t *testing.T) {
@@ -105,6 +105,9 @@ func TestSwarmDefinitionsAntiDrift(t *testing.T) {
 	sort.Strings(leafTools)
 	if !slices.Equal(primerTools, leafTools) {
 		t.Errorf("primer tool set %v != operator leaf %v — tool policy drifted", primerTools, leafTools)
+	}
+	if primer.PolicyRevision() == operatorLeaf.PolicyRevision() {
+		t.Error("primer PolicyRevision equals operator leaf, want managed Subagent capability recorded")
 	}
 
 	primerSys := primer.FingerprintInitial().EffectiveSystem
