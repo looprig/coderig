@@ -12,10 +12,8 @@ import (
 
 	"github.com/looprig/core/content"
 	"github.com/looprig/core/uuid"
-	"github.com/looprig/fsstore"
 	"github.com/looprig/harness/pkg/event"
 	"github.com/looprig/harness/pkg/identity"
-	"github.com/looprig/swe/agents/operator"
 )
 
 // textChunk wraps s as a streamed text chunk for the fake LLM. (The fake_test fakeLLM is
@@ -29,14 +27,9 @@ func textChunk(s string) content.Chunk { return &content.TextChunk{Text: s} }
 // seam the integration tests drive with an injected fake client via openWithClient.
 func newIntegrationFactory(t *testing.T) *SessionStoreFactory {
 	t.Helper()
-	fs, err := fsstore.Open(fsstore.Options{Root: t.TempDir()})
+	f, err := NewSessionStoreFactory(t.TempDir())
 	if err != nil {
-		t.Fatalf("fsstore.Open: %v", err)
-	}
-	f, err := newSessionStoreFactory(fs)
-	if err != nil {
-		_ = fs.Close()
-		t.Fatalf("newSessionStoreFactory: %v", err)
+		t.Fatalf("NewSessionStoreFactory: %v", err)
 	}
 	t.Cleanup(func() { _ = f.Close() })
 	return f
@@ -211,8 +204,8 @@ func TestSessionStoreRoundTrip(t *testing.T) {
 	if !hasType(backlog, event.RestoreDone{}) {
 		t.Errorf("resumed backlog missing RestoreDone (restore was not bracketed): %v", typeNames(backlog))
 	}
-	if got := primaryLoopAgentName(backlog, a2.PrimaryLoopID()); got != operator.Name {
-		t.Errorf("restored primary-loop LoopStarted AgentName = %q, want %q (operator-as-primary)", got, operator.Name)
+	if got := primaryLoopAgentName(backlog, a2.RootLoopID()); got != operatorPrimaryName {
+		t.Errorf("restored root-loop LoopStarted AgentName = %q, want %q (operator-primary primer)", got, operatorPrimaryName)
 	}
 
 	drainTurn(t, a2, "continue")
@@ -272,6 +265,12 @@ func TestSessionStoreWorkspaceRoundTrip(t *testing.T) {
 // the one shared store, each addressed by name, neither contending the other. This is the core
 // isolation property, now delivered by session-by-name addressing rather than per-session engines.
 func TestSessionStoreDistinctSessionsCoexist(t *testing.T) {
+	// Under the rig's EXCLUSIVE-workspace placement, two sessions over the SAME checkout no
+	// longer coexist — they contend on the single exclusive root lease (proven by the unit
+	// TestConcurrentOpensContendOnCheckout). Multi-session coexistence now requires DISTINCT
+	// checkouts, which openWithClient (single os.Getwd root) cannot express. Reworking this
+	// into a distinct-root coexistence proof is Task 6.
+	t.Skip("exclusive-workspace placement serializes same-checkout sessions; distinct-root coexistence is Task 6")
 	f := newIntegrationFactory(t)
 
 	a, err := f.openWithClient(context.Background(),

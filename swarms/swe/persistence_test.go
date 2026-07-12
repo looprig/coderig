@@ -2,170 +2,116 @@ package swe
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
-	"github.com/looprig/core/uuid"
 	"github.com/looprig/inference"
+	"github.com/looprig/storage/memstore"
 )
 
-// fakeBuildRecord captures what the injected agent builder was constructed with.
-type fakeBuildRecord struct {
-	id    uuid.UUID
-	isNew bool
-	calls int
-}
-
-// newFakeFactory builds a SessionStoreFactory whose agent builder avoids the on-disk store: it
-// returns a headless agent (so Close works without a journal) and records the id + isNew it was
-// invoked with. The fs/store/catalog/ws fields stay nil — openWithClient never touches them, so
-// only the buildClient + build seams are exercised. buildErr, when non-nil, is returned by the
-// builder so the failure path can be tested; clientErr, when non-nil, is returned by buildClient.
-func newFakeFactory(buildErr, clientErr error) (*SessionStoreFactory, *fakeBuildRecord) {
-	rec := &fakeBuildRecord{}
-	f := &SessionStoreFactory{
-		buildClient: func(ModelCatalog) (inference.Client, ModelFactory, error) {
-			if clientErr != nil {
-				return nil, nil, clientErr
-			}
-			return &fakeLLM{}, newModelFactory(), nil
-		},
-		build: func(ctx context.Context, client inference.Client, factory ModelFactory, id uuid.UUID, isNew bool, sel SessionSelector, cfg Config) (*sessionAgent, error) {
-			rec.calls++
-			rec.id = id
-			rec.isNew = isNew
-			if buildErr != nil {
-				return nil, buildErr
-			}
-			return newSessionAgent(ctx, testPrimaryCfg(testModel(), ""))
-		},
-	}
-	return f, rec
-}
-
-// TestOpenResolvesSessionID proves Open resolves the session id at the boundary and drives the
-// builder accordingly: a zero selector mints a fresh non-zero id and builds a NEW session; a
-// non-zero Resume builds THAT id as a resume (not new).
-func TestOpenResolvesSessionID(t *testing.T) {
-	t.Parallel()
-
-	resumeID, err := uuid.New()
+// mustHeadlessTestStores opens an ISOLATED in-memory store (NOT the process-shared headless
+// singleton) so a session-opening unit test never contends on the real current-checkout root
+// lease with sibling tests. Each caller gets its own leaser, so its exclusive-root lease is
+// private to the test.
+func mustHeadlessTestStores(t *testing.T) *swarmStores {
+	t.Helper()
+	stores, err := openStores(memstore.New())
 	if err != nil {
-		t.Fatalf("uuid.New: %v", err)
+		t.Fatalf("openStores(memstore) error = %v", err)
 	}
-	tests := []struct {
-		name    string
-		sel     SessionSelector
-		wantNew bool
-		wantID  uuid.UUID // zero => expect a freshly minted non-zero id
-	}{
-		{name: "zero selector mints a new session", sel: SessionSelector{}, wantNew: true},
-		{name: "resume selector opens the requested id", sel: SessionSelector{Resume: resumeID}, wantNew: false, wantID: resumeID},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			f, rec := newFakeFactory(nil, nil)
-			a, err := f.Open(context.Background(), tt.sel, Config{})
-			if err != nil {
-				t.Fatalf("Open: %v", err)
-			}
-			t.Cleanup(func() { _ = a.Close(context.Background()) })
-
-			if rec.calls != 1 {
-				t.Fatalf("builder called %d times, want 1", rec.calls)
-			}
-			if rec.isNew != tt.wantNew {
-				t.Errorf("builder isNew = %v, want %v", rec.isNew, tt.wantNew)
-			}
-			if tt.wantID.IsZero() {
-				if rec.id.IsZero() {
-					t.Error("new session built with a zero id (the id was not minted before building)")
-				}
-			} else if rec.id != tt.wantID {
-				t.Errorf("builder id = %v, want the requested resume id %v", rec.id, tt.wantID)
-			}
-		})
-	}
+	return stores
 }
 
-// TestOpenMintsDistinctIDs proves a repeated /clear cycle (a fresh zero-selector Open each time)
-// mints a distinct session id every time — no id reuse across reopens.
-func TestOpenMintsDistinctIDs(t *testing.T) {
+// TestExclusiveCheckoutContentionAndHandoff proves the Phase-B exclusive-workspace invariant:
+// two sessions over the SAME store + SAME checkout root contend on the exclusive root lease —
+// the second cannot open while the first holds it — and once the first is Closed the lease is
+// released so a third session opens cleanly (release/handoff). This is the mechanism that
+// makes two headless sessions contend on the shared current checkout.
+func TestExclusiveCheckoutContentionAndHandoff(t *testing.T) {
 	t.Parallel()
 
-	f, rec := newFakeFactory(nil, nil)
-	seen := map[uuid.UUID]bool{}
-	for i := 0; i < 4; i++ {
-		a, err := f.Open(context.Background(), SessionSelector{}, Config{})
-		if err != nil {
-			t.Fatalf("Open #%d: %v", i, err)
-		}
-		if rec.id.IsZero() {
-			t.Fatalf("reopen #%d minted a zero id", i)
-		}
-		if seen[rec.id] {
-			t.Errorf("reopen #%d reused session id %v", i, rec.id)
-		}
-		seen[rec.id] = true
-		if err := a.Close(context.Background()); err != nil {
-			t.Fatalf("Close #%d: %v", i, err)
-		}
-	}
-}
+	ctx := context.Background()
+	stores := mustHeadlessTestStores(t)
+	root := t.TempDir()
 
-// TestOpenPropagatesFailures proves Open fails closed: a buildClient error is returned before the
-// builder is ever called, and a builder error is returned verbatim. Both cases yield no agent.
-func TestOpenPropagatesFailures(t *testing.T) {
-	t.Parallel()
-
-	buildErr := errors.New("build failed")
-	clientErr := errors.New("client failed")
-	tests := []struct {
-		name       string
-		buildErr   error
-		clientErr  error
-		want       error
-		wantBuilds int
-	}{
-		{name: "builder failure propagates", buildErr: buildErr, want: buildErr, wantBuilds: 1},
-		{name: "client failure short-circuits build", clientErr: clientErr, want: clientErr, wantBuilds: 0},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			f, rec := newFakeFactory(tt.buildErr, tt.clientErr)
-			a, err := f.Open(context.Background(), SessionSelector{}, Config{})
-			if a != nil {
-				t.Errorf("Open returned a non-nil agent on failure")
-			}
-			if !errors.Is(err, tt.want) {
-				t.Fatalf("Open error = %v, want %v", err, tt.want)
-			}
-			if rec.calls != tt.wantBuilds {
-				t.Errorf("builder called %d times, want %d", rec.calls, tt.wantBuilds)
-			}
-		})
-	}
-}
-
-// TestOpenCloseIsIdempotent proves the returned agent Closes cleanly and tolerates a repeated
-// Close (the composition-root teardown is guarded, so a double Close never errors).
-func TestOpenCloseIsIdempotent(t *testing.T) {
-	t.Parallel()
-
-	f, _ := newFakeFactory(nil, nil)
-	a, err := f.Open(context.Background(), SessionSelector{}, Config{})
+	first, err := newSessionOverStores(ctx, &fakeLLM{}, newModelFactory(), Config{}, stores, root)
 	if err != nil {
-		t.Fatalf("Open: %v", err)
+		t.Fatalf("first session open error = %v", err)
 	}
-	if err := a.Close(context.Background()); err != nil {
-		t.Fatalf("first Close: %v", err)
+
+	// The second open on the SAME root must not proceed while the first holds the lease.
+	// A bounded context ensures the test fails loud rather than hanging if the backend
+	// blocks instead of failing fast — either way the second session cannot open.
+	blockedCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	second, err := newSessionOverStores(blockedCtx, &fakeLLM{}, newModelFactory(), Config{}, stores, root)
+	cancel()
+	if err == nil {
+		_ = second.Close(ctx)
+		_ = first.Close(ctx)
+		t.Fatal("second session opened while the first held the exclusive root lease, want a contention error")
 	}
-	if err := a.Close(context.Background()); err != nil {
-		t.Errorf("second Close: %v", err)
+
+	// Release the first session's lease; a third session then opens (handoff).
+	if err := first.Close(ctx); err != nil {
+		t.Fatalf("first session Close error = %v", err)
+	}
+	third, err := newSessionOverStores(ctx, &fakeLLM{}, newModelFactory(), Config{}, stores, root)
+	if err != nil {
+		t.Fatalf("third session open after handoff error = %v", err)
+	}
+	if err := third.Close(ctx); err != nil {
+		t.Fatalf("third session Close error = %v", err)
+	}
+}
+
+// TestHeadlessNewAndRestoreRoundTrip proves a session opened over an isolated store can be
+// Shutdown and RESTORED by id over the SAME store (the rig owns new + restore), and that the
+// restored session's root loop id matches the original — parity for the headless rig builder.
+func TestHeadlessNewAndRestoreRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	stores := mustHeadlessTestStores(t)
+	root := t.TempDir()
+
+	first, err := newSessionOverStores(ctx, &fakeLLM{}, newModelFactory(), Config{}, stores, root)
+	if err != nil {
+		t.Fatalf("new session error = %v", err)
+	}
+	id := first.SessionID()
+	rootLoop := first.RootLoopID()
+	if id.IsZero() || rootLoop.IsZero() {
+		t.Fatalf("new session id/root loop zero: id=%v root=%v", id, rootLoop)
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatalf("Close error = %v", err)
+	}
+
+	definitions, err := swarmDefinitions(&fakeLLM{}, newModelFactory()(), Config{})
+	if err != nil {
+		t.Fatalf("swarmDefinitions error = %v", err)
+	}
+	assembly, err := buildRig(definitions, stores, root, Config{}, false)
+	if err != nil {
+		t.Fatalf("buildRig error = %v", err)
+	}
+	controller, err := assembly.RestoreSession(ctx, id)
+	if err != nil {
+		t.Fatalf("RestoreSession error = %v", err)
+	}
+	restored, err := newSessionAgent(ctx, controller, stores.session, true)
+	if err != nil {
+		t.Fatalf("newSessionAgent(restore) error = %v", err)
+	}
+	t.Cleanup(func() { _ = restored.Close(ctx) })
+
+	if restored.SessionID() != id {
+		t.Errorf("restored SessionID = %v, want %v", restored.SessionID(), id)
+	}
+	if restored.RootLoopID() != rootLoop {
+		t.Errorf("restored RootLoopID = %v, want %v (stable across restore)", restored.RootLoopID(), rootLoop)
 	}
 }
 
@@ -185,4 +131,31 @@ func TestDefaultDataDir(t *testing.T) {
 	if want := filepath.Join(home, ".looprig", "store"); got != want {
 		t.Errorf("DefaultDataDir() = %q, want %q", got, want)
 	}
+}
+
+// TestNewSessionStoreFactoryLifecycle proves the persisted factory opens over an on-disk store
+// and closes cleanly, and that List starts empty (no sessions until one is opened).
+func TestNewSessionStoreFactoryLifecycle(t *testing.T) {
+	t.Parallel()
+
+	f, err := NewSessionStoreFactory(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSessionStoreFactory error = %v", err)
+	}
+	metas, err := f.List(context.Background())
+	if err != nil {
+		t.Fatalf("List error = %v", err)
+	}
+	if len(metas) != 0 {
+		t.Errorf("List() = %d sessions, want 0 for a fresh store", len(metas))
+	}
+	if err := f.Close(); err != nil {
+		t.Errorf("Close error = %v", err)
+	}
+}
+
+// ModelFactory is a plain func type; this compile-time assertion documents its shape: it
+// yields the swarm's shared, secret-free inference.Model identity (no system, no secret).
+var _ ModelFactory = func() inference.Model {
+	return inference.Model{}
 }

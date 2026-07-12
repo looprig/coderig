@@ -14,13 +14,9 @@ import (
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/eval"
 	"github.com/looprig/harness/pkg/event"
-	"github.com/looprig/harness/pkg/loop"
-	"github.com/looprig/harness/pkg/session"
 	"github.com/looprig/inference"
 	"github.com/looprig/inference/auth"
 	"github.com/looprig/llm/auto"
-	"github.com/looprig/swe/agents/operator"
-	"github.com/looprig/swe/confine"
 )
 
 // errTurnInterrupted is the eval-harness sentinel for a turn whose context was
@@ -122,22 +118,11 @@ func (m modelCompleter) Complete(ctx context.Context, prompt string) (string, er
 // fragment — so the eval measures the operator's own investigate+implement craft in
 // isolation, not its delegation behaviour (the production primary built by
 // operatorPrimaryConfig additionally carries Subagent + the delegation guidance).
-func newOperatorPrimary(ctx context.Context, client inference.Client, factory ModelFactory, root string) (*sessionAgent, error) {
-	toolSet, err := operator.BuildTools(root, newHTTPClient(), nil, confine.Confinement{})
-	if err != nil {
-		return nil, err
-	}
-	cfg := loop.Config{
-		Client:    client,
-		Model:     factory(),
-		System:    Identity + operator.Role,
-		Tools:     toolSet,
-		AgentName: operator.Name,
-	}
-	return newSessionAgent(ctx, cfg, session.WithLimits(session.Limits{
-		Depth: operatorSpawnDepth,
-		Quota: operatorSpawnQuota,
-	}))
+func newOperatorPrimary(ctx context.Context, client inference.Client, factory ModelFactory) (*sessionAgent, error) {
+	// The production headless composition root: the full three-loop rig (operator-primary
+	// primer + operator/reviewer leaves) over the process-shared in-memory store with the
+	// current checkout as the exclusive workspace. The eval measures the operator-as-primary.
+	return newWithClient(ctx, client, factory, Config{})
 }
 
 // TestOperatorEvalIntegration runs the live operator agent — built as a session
@@ -160,12 +145,7 @@ func TestOperatorEvalIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildClient: %v", err)
 	}
-	root, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
-	}
-
-	agent, err := newOperatorPrimary(ctx, client, factory, root)
+	agent, err := newOperatorPrimary(ctx, client, factory)
 	if err != nil {
 		t.Fatalf("newOperatorPrimary: %v", err)
 	}
