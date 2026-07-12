@@ -82,17 +82,19 @@ rig.WithOffloadGC(rig.OffloadGCPolicy{
 
 Use a manual tick seam in tests. New and restored rig sessions must run
 `sessionstore.OpenObjectGC` only while their session lease is held. Introduce one internal
-reader/writer journal-admission gate shared by the complete event append/offload call, command
-append call, and GC scan/delete transaction. Ordinary appends take readers; GC takes the writer
+reader/writer journal-admission gate at the common `SessionJournal.Append` wrapper, covering
+the complete event, command, `GatePreparedRecord`, `GateOpened`, and `GateResolved`
+append/offload calls plus the GC scan/delete transaction. Every append takes a reader; GC takes the writer
 only after native `SessionIdle`. A forced test blocks an offload before its pointer append and
-proves GC cannot scan/delete until that append completes. Shutdown stops and joins GC before
+proves GC cannot scan/delete until that append completes; a second forced gate-record offload
+proves the same barrier. Shutdown stops and joins GC before
 appending `SessionStopped` and before lease release; lease loss cancels it. This is session
 offload GC, never workspace snapshot GC.
 
 **Step 3: Verify RED**
 
 ```bash
-GOWORK=off go test -race ./pkg/loop ./pkg/rig ./internal/sessionruntime -run 'Test.*Display|Test.*DelegateCatalog|Test.*OffloadGC'
+GOWORK=off go test -race ./pkg/loop ./pkg/event ./pkg/tools ./pkg/rig ./pkg/sessionstore ./internal/sessionruntime -run 'Test.*Display|Test.*DelegateCatalog|Test.*OffloadGC'
 ```
 
 Expected: missing metadata and GC policy/lifecycle APIs.
