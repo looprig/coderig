@@ -1,8 +1,6 @@
 package swe
 
 import (
-	"net/http"
-	"sort"
 	"testing"
 
 	"github.com/looprig/harness/pkg/identity"
@@ -10,14 +8,8 @@ import (
 	"github.com/looprig/swe/agents/reviewer"
 )
 
-// testLeafDeps is a minimal LeafToolDeps for registry-shape tests: a throwaway
-// root and a fresh http.Client. The tools are never invoked, only built.
-func testLeafDeps() LeafToolDeps {
-	return LeafToolDeps{Root: "/tmp/workspace-root", HTTPCl: &http.Client{}}
-}
-
-// equalStringSlice reports element-wise equality, treating nil and empty as equal
-// (a skill-less agent's Skills is nil; the expectation is also nil).
+// equalStringSlice reports element-wise equality, treating nil and empty as equal (a
+// skill-less agent's Skills is nil; the expectation is also nil).
 func equalStringSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -30,16 +22,17 @@ func equalStringSlice(a, b []string) bool {
 	return true
 }
 
-// TestLeafRegistryHasExactlyTheTwoLeaves proves leafRegistry registers EXACTLY
-// the two spawnable leaf agents — operator, reviewer — in that order. operator is also
-// the swarm's primary loop (sourced from the shared operatorBuiltin), but the leaf it
-// registers here has no Subagent tool, so a spawned operator cannot itself spawn.
-func TestLeafRegistryHasExactlyTheTwoLeaves(t *testing.T) {
+// TestSwarmRegistryHasExactlyTheTwoLeaves proves swarmRegistry registers EXACTLY the two
+// roster agents — operator, reviewer — in that order. operator is also the primer's identity
+// (sourced from the shared operatorBuiltin), but the operator leaf declares no delegates, so a
+// spawned operator cannot itself spawn. The Registry is now pure metadata: it no longer builds
+// tools or runs children.
+func TestSwarmRegistryHasExactlyTheTwoLeaves(t *testing.T) {
 	t.Parallel()
 
-	reg, _, err := leafRegistry(testLeafDeps(), Config{})
+	reg, err := swarmRegistry()
 	if err != nil {
-		t.Fatalf("leafRegistry() error = %v", err)
+		t.Fatalf("swarmRegistry() error = %v", err)
 	}
 
 	catalog := reg.Catalog()
@@ -58,31 +51,34 @@ func TestLeafRegistryHasExactlyTheTwoLeaves(t *testing.T) {
 	}
 }
 
-// TestLeafRegistryNoOrphanPrimary proves the retired "orchestrator" agent is NOT in the
-// leaf registry: the primary loop is now an operator (which IS a leaf), and no separate
-// primary-only agent lingers in the spawnable roster.
-func TestLeafRegistryNoOrphanPrimary(t *testing.T) {
+// TestSwarmRegistryNoOrphanPrimary proves the retired "orchestrator" agent is NOT in the
+// roster: the primer is an operator (which IS a leaf), and no separate primary-only agent
+// lingers. It also proves the primer key "operator-primary" is NOT itself a registered roster
+// agent — the roster is the spawnable delegate set, the primer is a topology concern.
+func TestSwarmRegistryNoOrphanPrimary(t *testing.T) {
 	t.Parallel()
 
-	reg, _, err := leafRegistry(testLeafDeps(), Config{})
+	reg, err := swarmRegistry()
 	if err != nil {
-		t.Fatalf("leafRegistry() error = %v", err)
+		t.Fatalf("swarmRegistry() error = %v", err)
 	}
 	if _, ok := reg.Lookup(identity.AgentName("orchestrator")); ok {
-		t.Error(`Lookup("orchestrator") = found, want absent (the retired orchestrator agent is not a leaf)`)
+		t.Error(`Lookup("orchestrator") = found, want absent`)
+	}
+	if _, ok := reg.Lookup(operatorPrimaryName); ok {
+		t.Error(`Lookup("operator-primary") = found, want absent (primer key is not a roster agent)`)
 	}
 }
 
-// TestLeafRegistryLookupCarriesLeafData proves each registered leaf carries its
-// own package's Name/Description/Role verbatim and a non-nil BuildTools that
-// produces a tool set with a non-nil PermissionChecker.
-func TestLeafRegistryLookupCarriesLeafData(t *testing.T) {
+// TestSwarmRegistryCarriesLeafMetadata proves each roster agent carries its own package's
+// Name/Description/Role verbatim, its allowed embedded-skill set, and its §7a runtime-skills
+// eligibility (operator eligible, reviewer not).
+func TestSwarmRegistryCarriesLeafMetadata(t *testing.T) {
 	t.Parallel()
 
-	deps := testLeafDeps()
-	reg, _, err := leafRegistry(deps, Config{})
+	reg, err := swarmRegistry()
 	if err != nil {
-		t.Fatalf("leafRegistry() error = %v", err)
+		t.Fatalf("swarmRegistry() error = %v", err)
 	}
 
 	tests := []struct {
@@ -90,31 +86,28 @@ func TestLeafRegistryLookupCarriesLeafData(t *testing.T) {
 		agent             identity.AgentName
 		wantDesc          string
 		wantRole          string
-		wantTools         []string
-		wantSkills        []string // the agent's allowed-skill names (nil = none)
-		wantRuntimeSkills bool     // §7a eligibility — true for the operator (extended), false for reviewer
+		wantSkills        []string
+		wantRuntimeSkills bool
 	}{
 		{
 			name:              "operator",
 			agent:             operator.Name,
 			wantDesc:          operator.Description,
 			wantRole:          operator.Role,
-			wantTools:         []string{"AskUser", "Bash", "EditFile", "Fetch", "Glob", "Grep", "ReadFile", "Skill", "Todo", "WebSearch", "WriteFile"},
 			wantSkills:        []string{"code-style"},
 			wantRuntimeSkills: true,
 		},
 		{
-			name:      "reviewer",
-			agent:     reviewer.Name,
-			wantDesc:  reviewer.Description,
-			wantRole:  reviewer.Role,
-			wantTools: []string{"AskUser", "Bash", "Glob", "Grep", "ReadFile", "Todo"},
+			name:     "reviewer",
+			agent:    reviewer.Name,
+			wantDesc: reviewer.Description,
+			wantRole: reviewer.Role,
 		},
 	}
 	for _, tt := range tests {
+		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-
 			a, ok := reg.Lookup(tt.agent)
 			if !ok {
 				t.Fatalf("Lookup(%q) not found", tt.agent)
@@ -126,37 +119,10 @@ func TestLeafRegistryLookupCarriesLeafData(t *testing.T) {
 				t.Errorf("Role = %q, want %q", a.Role, tt.wantRole)
 			}
 			if a.AllowsRuntimeSkills != tt.wantRuntimeSkills {
-				t.Errorf("AllowsRuntimeSkills = %v, want %v (§7a: operator eligible, reviewer not)", a.AllowsRuntimeSkills, tt.wantRuntimeSkills)
+				t.Errorf("AllowsRuntimeSkills = %v, want %v (§7a)", a.AllowsRuntimeSkills, tt.wantRuntimeSkills)
 			}
 			if !equalStringSlice(a.Skills, tt.wantSkills) {
 				t.Errorf("Skills = %v, want %v", a.Skills, tt.wantSkills)
-			}
-			if a.BuildTools == nil {
-				t.Fatal("BuildTools = nil, want non-nil")
-			}
-			ts, err := a.BuildTools(deps)
-			if err != nil {
-				t.Fatalf("BuildTools() error = %v", err)
-			}
-			if ts.Permission == nil {
-				t.Error("BuildTools().Permission = nil, want non-nil PermissionChecker")
-			}
-			got := make([]string, 0, len(ts.Registry))
-			for _, tl := range ts.Registry {
-				info, err := tl.Info(t.Context())
-				if err != nil {
-					t.Fatalf("Info() error = %v", err)
-				}
-				got = append(got, info.Name)
-			}
-			sort.Strings(got)
-			if len(got) != len(tt.wantTools) {
-				t.Fatalf("tool names = %v, want %v", got, tt.wantTools)
-			}
-			for i := range tt.wantTools {
-				if got[i] != tt.wantTools[i] {
-					t.Fatalf("tool names = %v, want %v", got, tt.wantTools)
-				}
 			}
 		})
 	}

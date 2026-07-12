@@ -2,21 +2,18 @@ package swe
 
 import (
 	"errors"
-	"net/http"
 	"testing"
 
 	"github.com/looprig/harness/pkg/identity"
-	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/inference"
 )
 
-// stubAgent builds a minimal Agent with a no-op BuildTools so the table rows are terse.
+// stubAgent builds a minimal metadata Agent so the table rows are terse.
 func stubAgent(name identity.AgentName, desc string) Agent {
 	return Agent{
 		Name:        name,
 		Description: desc,
 		Role:        "role for " + string(name),
-		BuildTools:  func(LeafToolDeps) (loop.ToolSet, error) { return loop.ToolSet{}, nil },
 	}
 }
 
@@ -173,49 +170,6 @@ func TestRegistryCatalogOrder(t *testing.T) {
 				t.Errorf("call %d: Catalog()[%d] = %+v, want %+v", call, i, got[i], want[i])
 			}
 		}
-	}
-}
-
-// TestAgentBuildTools verifies a registered agent's BuildTools is invokable and
-// receives its LeafToolDeps (Root + HTTPCl) — documenting the leaf construction
-// contract (no Spawner is reachable).
-func TestAgentBuildTools(t *testing.T) {
-	t.Parallel()
-
-	var gotRoot string
-	var gotClient *http.Client
-	a := Agent{
-		Name:        "coding",
-		Description: "writes code",
-		Role:        "code",
-		BuildTools: func(d LeafToolDeps) (loop.ToolSet, error) {
-			gotRoot = d.Root
-			gotClient = d.HTTPCl
-			return loop.ToolSet{MaxToolIterations: 7}, nil
-		},
-	}
-	r, err := NewRegistry(a)
-	if err != nil {
-		t.Fatalf("NewRegistry() unexpected error: %v", err)
-	}
-	got, ok := r.Lookup("coding")
-	if !ok {
-		t.Fatal("Lookup(coding) missed a registered agent")
-	}
-
-	client := &http.Client{}
-	ts, err := got.BuildTools(LeafToolDeps{Root: "/repo", HTTPCl: client})
-	if err != nil {
-		t.Fatalf("BuildTools() error = %v", err)
-	}
-	if gotRoot != "/repo" {
-		t.Errorf("BuildTools got Root = %q, want %q", gotRoot, "/repo")
-	}
-	if gotClient != client {
-		t.Errorf("BuildTools got HTTPCl = %p, want %p", gotClient, client)
-	}
-	if ts.MaxToolIterations != 7 {
-		t.Errorf("BuildTools returned ToolSet.MaxToolIterations = %d, want 7", ts.MaxToolIterations)
 	}
 }
 

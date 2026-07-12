@@ -2,183 +2,86 @@ package swe
 
 import (
 	"github.com/looprig/harness/pkg/identity"
-	"github.com/looprig/harness/pkg/loop"
-	"github.com/looprig/harness/pkg/tool"
-	"github.com/looprig/harness/pkg/tools"
+	"github.com/looprig/swe/agents/operator"
 	"github.com/looprig/swe/agents/reviewer"
-	"github.com/looprig/swe/confine"
 )
 
-// operatorSkills is the operator leaf's closed set of allowed embedded skills. The
-// implementer gets the coding-style checklist; the other leaves start with none in
-// this cut. This is the single source of truth the loader's allow-map AND the
-// agent's <available_skills> catalog are both derived from.
+// operatorSkills is the operator's closed set of allowed embedded skills (the primer and the
+// operator leaf share it). The implementer gets the coding-style checklist; the reviewer
+// starts with none in this cut. This is the single source of truth the loader's allow-map AND
+// the agent's <available_skills> catalog are both derived from.
 var operatorSkills = []string{"code-style"}
 
-// leafBuiltin describes each spawnable leaf the swarm wires: its package-exported
-// boundary (Name/Description/Role + allowed Skills + runtime-skills eligibility) and
-// a raw binder that adapts the leaf package's BuildTools(root[, http], skill) into
-// the swe.Agent shape. It is the ONE place the per-agent skill set, the runtime-skills
-// eligibility, and the leaf wiring are declared, so the loader's allow-map, the
-// per-agent Skill tool, and the catalog all stay in sync.
+// leafBuiltin is each agent's package-exported boundary as pure metadata: Name/Description/
+// Role plus allowed embedded Skills, runtime-skills eligibility, and the static per-role
+// security mode. It no longer carries a tool builder — the composition root (swarm.go) builds
+// each loop.Definition directly from the leaf package's BuildTools — so this struct is the ONE
+// place the per-agent skill set, runtime-skills eligibility, and role prompt are declared for
+// the greeting, the skill loader allow-map, and the <available_skills> catalog.
 type leafBuiltin struct {
 	name        identity.AgentName
 	description string
 	role        string
 	skills      []string
-	// allowsRuntimeSkills marks a leaf eligible for the untrusted, human-gated
-	// workspace skill source (§7a). True ONLY for the operator (the approved decision
-	// extended eligibility to it once the operator merged write/exec capability); the
-	// reviewer stays false. operator is write/exec/network-capable, but the added attack
-	// surface is bounded, not just asserted-by-authority: a workspace load is
-	// load-a-skill-by-a-name-you-already-know, after a human Ask, with NO description
-	// injected into the prompt and NO new auto-execution — and only a NON-embedded
-	// workspace load is Ask-gated (an embedded name like code-style auto-approves via
-	// embedded-wins). So extending eligibility to a write+shell+network agent stays
-	// contained — the untrusted source is never auto-trusted. It is the per-agent half of
-	// the gate; the swarm-wide RuntimeSkills mode is the other half — BOTH must be true to
-	// wire the source.
+	// allowsRuntimeSkills marks a leaf eligible for the untrusted, human-gated workspace
+	// skill source (§7a). True ONLY for the operator (the approved decision extended
+	// eligibility to it once the operator merged write/exec capability); the reviewer stays
+	// false. Both this per-agent gate AND the swarm-wide cfg.RuntimeSkills mode must be true
+	// to wire the workspace source.
 	allowsRuntimeSkills bool
-	// securityMode is the leaf's STATIC per-role security mode (SPEC §8): the fixed
-	// ordinal its effective mode is clamped up to (never exceeded), before the session
-	// ceiling clamps it further. operator → Write (2, workspace write/edit + gated
-	// bash), reviewer → ReadOnly (1, broad read, no write, all gated). The composition
-	// root reads it per spawn to build the leaf's confinement (min(this, ceiling)).
+	// securityMode is the leaf's STATIC per-role security mode (SPEC §8): operator → Write
+	// (workspace write/edit + gated bash), reviewer → ReadOnly. The per-role confine.Factory
+	// clamps the effective mode to min(this, session ceiling).
 	securityMode uint8
-	// build adapts the leaf's raw BuildTools, threading the OPTIONAL per-agent Skill
-	// tool (nil when the agent has neither embedded skills nor a wired workspace
-	// source) AND the per-spawn OS-sandbox Confinement (built by the composition root
-	// from securityMode + the shared ceiling) into the leaf's allowlist. It returns a
-	// typed error (never a nil, checker-less tool set) when the fail-secure
-	// PermissionChecker cannot be built.
-	build func(d LeafToolDeps, skill tool.InvokableTool, conf confine.Confinement) (loop.ToolSet, error)
 }
 
-// leafBuiltins is the fixed roster of spawnable leaves, in deterministic catalog
-// order: operator then reviewer. The operator entry is sourced from the shared
-// operatorBuiltin() so the spawnable operator leaf and the swarm's PRIMARY loop (an
-// operator carrying the Subagent tool, assembled in swarm.go) cannot drift — they are
-// the ONE operator definition. A spawned operator leaf has no Subagent tool, so it
-// cannot itself spawn.
+// operatorBuiltin is the single operator definition, shared by the operator-primary primer
+// and the operator leaf (via their shared operator.BuildTools call in swarm.go) so their
+// skills/eligibility/role cannot drift. A spawned operator leaf has no delegates, so it cannot
+// itself spawn.
+func operatorBuiltin() leafBuiltin {
+	return leafBuiltin{
+		name:                operator.Name,
+		description:         operator.Description,
+		role:                operator.Role,
+		skills:              operatorSkills,
+		allowsRuntimeSkills: true, // §7a: extended to operator (approved) — bounded, human-gated workspace load.
+		securityMode:        operatorRoleMode,
+	}
+}
+
+// reviewerBuiltin is the reviewer leaf definition: read-only critique, no embedded skills, no
+// runtime-skills eligibility.
+func reviewerBuiltin() leafBuiltin {
+	return leafBuiltin{
+		name:         reviewer.Name,
+		description:  reviewer.Description,
+		role:         reviewer.Role,
+		securityMode: reviewerRoleMode,
+	}
+}
+
+// leafBuiltins is the fixed roster in deterministic catalog order: operator then reviewer.
+// operator appears once (it is the primer's identity AND the spawnable operator leaf).
 func leafBuiltins() []leafBuiltin {
-	return []leafBuiltin{
-		operatorBuiltin(),
-		{
-			name:         reviewer.Name,
-			description:  reviewer.Description,
-			role:         reviewer.Role,
-			securityMode: reviewerRoleMode, // §8: reviewer is read-only (critique, never mutates)
-			build: func(d LeafToolDeps, s tool.InvokableTool, conf confine.Confinement) (loop.ToolSet, error) {
-				return reviewer.BuildTools(d.Root, s, conf)
-			},
-		},
-	}
+	return []leafBuiltin{operatorBuiltin(), reviewerBuiltin()}
 }
 
-// leafRegistry builds the SWE-Swarm's registry of spawnable LEAF agents from the
-// leaf builtins (operator + reviewer), adapting each leaf's raw-signature BuildTools
-// into the swe.Agent shape (func(LeafToolDeps) loop.ToolSet) at the composition root —
-// so the leaf packages never import swarms/swe (no import cycle). The primary loop (an
-// operator carrying the Subagent tool) is assembled in swarm.go, not here, and shares
-// the operator leaf's definition (operatorBuiltin) so the two cannot drift. Each leaf's
-// AllowsRuntimeSkills is carried through from its builtin definition (§7a: true for the
-// operator, false for the reviewer). A duplicate name fails secure with a
-// *DuplicateAgentError.
-//
-// It also returns the ONE per-agent-scoped skill loader (built over the embedded
-// SkillsFS + the allow-map derived from every leaf's Skills), TYPED as the combined
-// skillLoaderDescriber: the spawner + catalog read it as a tools.SkillDescriber, while
-// the composition root also builds the primary operator's own code-style Skill tool from
-// its tools.SkillLoader half (so the primary's Skill matches the operator leaf's). The
-// loader is wired multiple ways: a per-agent tools.Skill tool — built here from the
-// loader's Load capability — is captured in each skilled leaf's BuildTools closure (so
-// the leaf gets the Skill tool, which auto-approves by being named in HardApprove for an
-// embedded name), and the spawner uses the SkillDescriber to append the
-// <available_skills> catalog to a skilled leaf's system prompt.
-//
-// RUNTIME (WORKSPACE) SKILLS — §7a. A leaf gets a Skill tool when it has ≥1 embedded
-// skill OR it is workspace-eligible AND the cfg.RuntimeSkills mode is on (BOTH gates).
-// When the leaf is workspace-eligible and the mode is on, its Skill tool is built
-// WORKSPACE-ENABLED (tools.WithWorkspaceRoot(deps.Root), the same root the file tools
-// use): an embedded name still auto-approves (embedded-wins), a non-embedded name is a
-// human-gated workspace load. The eligible agent (operator) ALSO has the embedded
-// code-style skill, so its workspace Skill tool still carries the trusted
-// <available_skills> catalog for that embedded name (embedded-wins on load); a
-// non-embedded workspace name is never injected into the system prompt — workspace skill
-// descriptions are untrusted (§7a) and the model loads such a skill by a name it already
-// knows. A leaf that is neither skilled nor (eligible+mode-on) gets a nil Skill tool —
-// neither the tool nor a HardApprove entry.
-//
-// The deps parameter IS now read to source the workspace root for an enabled leaf's
-// Skill tool, but it is still NOT captured by the build adapters: each adapter
-// re-invokes the leaf's BuildTools with the deps the swarm passes PER SPAWN (the
-// registry stores the closure, not its result), so every spawn gets a FRESH
-// PermissionChecker — the per-loop approval-isolation guarantee. The Skill tool is
-// the one captured value: it is immutable + side-effect-free (loader + agent name +
-// the fixed workspace root), so sharing one instance across a leaf's spawns is safe.
-func leafRegistry(deps LeafToolDeps, cfg Config) (*Registry, skillLoaderDescriber, error) {
+// swarmRegistry builds the swarm's metadata Registry (agent name/description/role/skills) from
+// the roster. It is pure data + lookup — the source the catalog/greeting read — and no longer
+// creates loop configs or runs children (the rig owns delegation). A duplicate name fails
+// secure with a *DuplicateAgentError.
+func swarmRegistry() (*Registry, error) {
 	builtins := leafBuiltins()
-
-	scopes := make([]skillScope, 0, len(builtins))
-	for _, b := range builtins {
-		scopes = append(scopes, skillScope{name: b.name, skills: b.skills})
-	}
-	loader := tools.NewEmbeddedSkillLoader(SkillsFS, buildSkillAllow(scopes))
-
 	agents := make([]Agent, 0, len(builtins))
 	for _, b := range builtins {
-		b := b
-		skill := buildLeafSkill(loader, b, deps, cfg)
 		agents = append(agents, Agent{
 			Name:                b.name,
 			Description:         b.description,
 			Role:                b.role,
 			Skills:              b.skills,
 			AllowsRuntimeSkills: b.allowsRuntimeSkills,
-			// Per SPAWN: build the leaf's OS-sandbox confinement from its static role
-			// mode + the ceiling the spawner passes in d.Ceiling (the PARENT's effective
-			// source for a child — the non-escalation clamp), then thread it (and the
-			// captured Skill tool) into the leaf's fresh-checker tool set.
-			BuildTools: func(d LeafToolDeps) (loop.ToolSet, error) {
-				conf := buildConfinement(d.Root, b.securityMode, d.Ceiling)
-				return b.build(d, skill, conf)
-			},
 		})
 	}
-
-	reg, err := NewRegistry(agents...)
-	if err != nil {
-		return nil, nil, err
-	}
-	return reg, loader, nil
-}
-
-// skillLoaderDescriber is the embedded skill loader's full surface: both the Skill
-// tool's tools.SkillLoader (Load/Allowed) and the catalog builder's tools.SkillDescriber
-// (Describe). leafRegistry returns it (the concrete embeddedSkillLoader satisfies both)
-// so the composition root can build BOTH a Skill tool (needs SkillLoader — the leaves AND
-// the primary operator) and the <available_skills> catalog (needs SkillDescriber) from
-// the one loader, while every consumer narrows to the half it needs.
-type skillLoaderDescriber interface {
-	tools.SkillLoader
-	tools.SkillDescriber
-}
-
-// buildLeafSkill constructs the per-agent Skill tool for one leaf, honoring BOTH
-// halves of the §7a gate. It returns nil — the leaf gets no Skill tool — unless the
-// leaf either has ≥1 embedded skill or is workspace-eligible with the RuntimeSkills
-// mode on. When the leaf is workspace-eligible and the mode is on, the tool is
-// WORKSPACE-ENABLED at deps.Root (embedded-wins; a non-embedded name is Ask-gated);
-// otherwise it is the embedded-only tool (auto-approve). Returning a typed nil
-// tool.InvokableTool (not a typed-nil *tools.Skill) keeps the caller's nil check
-// correct — the build closure passes nil straight through to the leaf.
-func buildLeafSkill(loader tools.SkillLoader, b leafBuiltin, deps LeafToolDeps, cfg Config) tool.InvokableTool {
-	workspaceEnabled := cfg.RuntimeSkills && b.allowsRuntimeSkills
-	if len(b.skills) == 0 && !workspaceEnabled {
-		return nil // neither embedded skills nor a wired workspace source: no Skill tool.
-	}
-	if workspaceEnabled {
-		return tools.NewSkill(loader, b.name, tools.WithWorkspaceRoot(deps.Root))
-	}
-	return tools.NewSkill(loader, b.name)
+	return NewRegistry(agents...)
 }

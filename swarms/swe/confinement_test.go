@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/ceiling"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/tool"
@@ -11,6 +12,92 @@ import (
 	"github.com/looprig/sandbox"
 	"github.com/looprig/swe/confine"
 )
+
+// mustBindingID mints a fresh loop id for a tool.Bindings fixture.
+func mustBindingID(t *testing.T) uuid.UUID {
+	t.Helper()
+	id, err := uuid.New()
+	if err != nil {
+		t.Fatalf("uuid.New() error = %v", err)
+	}
+	return id
+}
+
+// bindingFor builds a tool.Bindings for a bound loop with the given id, an uncapped session
+// ceiling, and a workspace root — the shape a leaf's per-bind factory hands confineFactory.For.
+func bindingFor(id uuid.UUID, root string) tool.Bindings {
+	return tool.Bindings{
+		SessionID: id,
+		LoopID:    id,
+		Ceiling:   ceiling.New(),
+		Workspace: &tool.WorkspaceBinding{Root: root},
+	}
+}
+
+// TestConfineFactoryMemoizesPerLoopID is the companion test deferred from Task 2: the
+// composition root's confine.Factory memoizes ONE Confinement per bindings.LoopID, so three
+// For(sameLoopID) calls reuse it (the SAME executor within a process) while a different LoopID
+// mints a fresh one. The memo is bounded by the spawn quota so a runaway bind loop cannot grow
+// it without bound.
+func TestConfineFactoryMemoizesPerLoopID(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	f := newConfineFactory(operatorRoleMode)
+
+	id1 := mustBindingID(t)
+	b1 := bindingFor(id1, root)
+	c1a, err := f.For(b1)
+	if err != nil {
+		t.Fatalf("For(id1) error = %v", err)
+	}
+	c1b, err := f.For(b1)
+	if err != nil {
+		t.Fatalf("For(id1) again error = %v", err)
+	}
+	c1c, err := f.For(b1)
+	if err != nil {
+		t.Fatalf("For(id1) third error = %v", err)
+	}
+	if got := len(f.memo); got != 1 {
+		t.Fatalf("memo size after 3 For(sameLoopID) = %d, want 1 (memoized)", got)
+	}
+	// The reused Confinement carries the SAME executor instance (interface identity). When the
+	// backend enforces nothing the runner is nil for every call — the memo is still proven by
+	// the size assertion above, so the runner-identity check is gated on a real executor.
+	if c1a.BashRunner != c1b.BashRunner || c1b.BashRunner != c1c.BashRunner {
+		t.Error("For(sameLoopID) returned different executors (memo not reused)")
+	}
+
+	id2 := mustBindingID(t)
+	c2, err := f.For(bindingFor(id2, root))
+	if err != nil {
+		t.Fatalf("For(id2) error = %v", err)
+	}
+	if got := len(f.memo); got != 2 {
+		t.Fatalf("memo size after a new LoopID = %d, want 2 (fresh entry)", got)
+	}
+	if c1a.BashRunner != nil && c1a.BashRunner == c2.BashRunner {
+		t.Error("different LoopIDs shared the SAME executor, want distinct")
+	}
+}
+
+// TestConfineFactoryMemoBoundedByQuota proves the per-LoopID memo never grows past the spawn
+// quota, so a pathological number of distinct binds cannot grow it without bound.
+func TestConfineFactoryMemoBoundedByQuota(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	f := newConfineFactory(operatorRoleMode)
+	for range operatorSpawnQuota + 8 {
+		if _, err := f.For(bindingFor(mustBindingID(t), root)); err != nil {
+			t.Fatalf("For() error = %v", err)
+		}
+	}
+	if got := len(f.memo); got > operatorSpawnQuota {
+		t.Errorf("memo size = %d, want ≤ quota %d (bounded)", got, operatorSpawnQuota)
+	}
+}
 
 // confinement_test.go is the Task-22 wiring-invariant suite: it proves the
 // effective-mode clamp (min(role, ceiling)), the SAME-executor wiring at a build
@@ -65,9 +152,9 @@ func TestEffectiveModeSourceIsMinOfRoleAndCeiling(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			st := ceiling.New()
-			st.Set(tt.ceiling)
+			st.Set(ceiling.Level(tt.ceiling))
 			e := effectiveModeSource{role: tt.role, ceiling: st}
-			if got := e.Current(); got != tt.want {
+			if got := uint8(e.Current()); got != tt.want {
 				t.Errorf("effectiveModeSource{role:%d}.Current() @ ceiling %d = %d, want %d", tt.role, tt.ceiling, got, tt.want)
 			}
 		})
@@ -80,7 +167,7 @@ func TestEffectiveModeSourceNilCeilingFailsClosed(t *testing.T) {
 	t.Parallel()
 
 	e := effectiveModeSource{role: operatorRoleMode, ceiling: nil}
-	if got := e.Current(); got != uint8(sandbox.ZeroTrust) {
+	if got := uint8(e.Current()); got != uint8(sandbox.ZeroTrust) {
 		t.Errorf("effectiveModeSource with nil ceiling = %d, want ZeroTrust (0)", got)
 	}
 }
@@ -94,7 +181,7 @@ func TestConfinementForWiresSameExecutor(t *testing.T) {
 
 	root := t.TempDir()
 	st := ceiling.New()
-	st.Set(uint8(sandbox.Write))
+	st.Set(ceiling.Level(sandbox.Write))
 	conf := confinementFor(root, effectiveModeSource{role: operatorRoleMode, ceiling: st})
 
 	if conf.BashRunner == nil {
@@ -136,7 +223,7 @@ func TestConfinedCheckerAutoApprovesTrivialBashAtWrite(t *testing.T) {
 
 	root := t.TempDir()
 	st := ceiling.New()
-	st.Set(uint8(sandbox.Write))
+	st.Set(ceiling.Level(sandbox.Write))
 	conf := confinementFor(root, effectiveModeSource{role: operatorRoleMode, ceiling: st})
 
 	lv, ok := conf.BashRunner.(leveled)
@@ -165,7 +252,7 @@ func TestConfinementForFallbackShapeOnExecutorError(t *testing.T) {
 	t.Setenv("HOME", "")
 
 	st := ceiling.New()
-	st.Set(uint8(sandbox.Write))
+	st.Set(ceiling.Level(sandbox.Write))
 	conf := confinementFor(t.TempDir(), effectiveModeSource{role: operatorRoleMode, ceiling: st})
 
 	if conf.BashRunner != nil {
@@ -188,7 +275,7 @@ func TestFallbackConfinementKeepsBashGated(t *testing.T) {
 
 	root := t.TempDir()
 	st := ceiling.New()
-	st.Set(uint8(sandbox.Write))
+	st.Set(ceiling.Level(sandbox.Write))
 	effSrc := effectiveModeSource{role: operatorRoleMode, ceiling: st}
 	// The exact fallback shape confinementFor returns on a build error: posture present,
 	// runner nil.
@@ -244,13 +331,13 @@ func TestWriteModeEditAutoApproveIsOSGated(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
 			st := ceiling.New()
-			st.Set(uint8(sandbox.Write))
+			st.Set(ceiling.Level(sandbox.Write))
 			effSrc := effectiveModeSource{role: operatorRoleMode, ceiling: st}
 			// The exact confinement shape a build site produces, but with a chosen fake
 			// runner so the edit interlock is exercised deterministically on any host.
 			conf := confine.Confinement{CheckerOption: tools.WithCeilingPostures(effSrc, postureTable(), tt.runner)}
 			pc := newConfinedChecker(t, root, conf)
-			edit := tools.NewEditFile(root)
+			edit := boundEditFile(t, root)
 			// a.txt is inside the workspace, so containment clears and ONLY the posture
 			// edit interlock decides auto-approve vs Ask.
 			if eff := pc.Check(context.Background(), edit, "EditFile", `{"path":"a.txt"}`); eff != tt.want {
@@ -269,7 +356,7 @@ func TestCeilingChangeClampsCheckerLive(t *testing.T) {
 
 	root := t.TempDir()
 	st := ceiling.New() // no cap: Set(Write) then Set(ReadOnly)
-	st.Set(uint8(sandbox.Write))
+	st.Set(ceiling.Level(sandbox.Write))
 	conf := confinementFor(root, effectiveModeSource{role: operatorRoleMode, ceiling: st})
 
 	lv, ok := conf.BashRunner.(leveled)
@@ -285,7 +372,7 @@ func TestCeilingChangeClampsCheckerLive(t *testing.T) {
 	}
 	// Lower the SHARED ceiling to ReadOnly: the SAME checker's next Check must now Ask
 	// (posture[readonly] auto-approves no Bash), proving the live clamp.
-	st.Set(uint8(sandbox.ReadOnly))
+	st.Set(ceiling.Level(sandbox.ReadOnly))
 	if eff := pc.Check(context.Background(), bash, "Bash", `{"command":"ls"}`); eff == loop.EffectAutoApprove {
 		t.Error("Check(Bash ls) after lowering ceiling to ReadOnly = EffectAutoApprove, want Ask (live clamp)")
 	}
@@ -300,9 +387,9 @@ func TestSubagentClampBoundsChildToParentEffective(t *testing.T) {
 	// Session ceiling ReadOnly makes the primary operator's effective mode ReadOnly
 	// (min(Write, ReadOnly)) — the parent-effective source the spawner threads down.
 	st := ceiling.New()
-	st.Set(uint8(sandbox.ReadOnly))
+	st.Set(ceiling.Level(sandbox.ReadOnly))
 	parentEff := effectiveModeSource{role: operatorRoleMode, ceiling: st}
-	if got := parentEff.Current(); got != uint8(sandbox.ReadOnly) {
+	if got := uint8(parentEff.Current()); got != uint8(sandbox.ReadOnly) {
 		t.Fatalf("parent effective = %d, want ReadOnly (min(Write, ReadOnly))", got)
 	}
 
@@ -310,36 +397,8 @@ func TestSubagentClampBoundsChildToParentEffective(t *testing.T) {
 	// is the parent's effective source, so its effective is min(Write, ReadOnly) =
 	// ReadOnly — the child cannot exceed the parent even though its role is Write.
 	childEff := effectiveModeSource{role: operatorRoleMode, ceiling: parentEff}
-	if got := childEff.Current(); got != uint8(sandbox.ReadOnly) {
+	if got := uint8(childEff.Current()); got != uint8(sandbox.ReadOnly) {
 		t.Errorf("child (role Write) effective under a ReadOnly-effective parent = %d, want ReadOnly (clamped, no escalation)", got)
-	}
-}
-
-// TestBuildOperatorWiringSharesCeilingWithSession proves the composition root wires
-// the SAME ceiling into the session (via session.WithCeiling): the session's
-// CeilingSource reports the configured launch ceiling, and a journaled
-// SetSecurityCeiling lowering it is visible on the session's source (the SAME state
-// every checker reads).
-func TestBuildOperatorWiringSharesCeilingWithSession(t *testing.T) {
-	t.Parallel()
-
-	ctx := context.Background()
-	agent, err := newWithClient(ctx, &fakeLLM{}, newModelFactory(), Config{SecurityCeiling: operatorRoleMode})
-	if err != nil {
-		t.Fatalf("newWithClient() error = %v", err)
-	}
-	t.Cleanup(func() { _ = agent.Close(ctx) })
-
-	if got := agent.session.CeilingSource().Current(); got != operatorRoleMode {
-		t.Errorf("session ceiling at launch = %d, want the configured %d (Write)", got, operatorRoleMode)
-	}
-
-	// Lowering the journaled ceiling is visible on the SAME source (fail-secure tighten).
-	if err := agent.session.SetSecurityCeiling(ctx, reviewerRoleMode); err != nil {
-		t.Fatalf("SetSecurityCeiling() error = %v", err)
-	}
-	if got := agent.session.CeilingSource().Current(); got != reviewerRoleMode {
-		t.Errorf("session ceiling after lowering = %d, want %d (ReadOnly)", got, reviewerRoleMode)
 	}
 }
 
@@ -371,6 +430,55 @@ func TestParseSecurityMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+// testWorkspaceCoordinator is a no-op tool.WorkspaceCoordinator for direct-Build unit tests
+// (the real one is supplied by the rig at bind time). testWorkspacePermit satisfies the
+// permit contract it returns.
+type testWorkspaceCoordinator struct{}
+
+func (*testWorkspaceCoordinator) Acquire(context.Context, tool.WorkspaceOperation, string) (tool.WorkspacePermit, error) {
+	return testWorkspacePermit{}, nil
+}
+func (*testWorkspaceCoordinator) Healthy() error { return nil }
+
+type testWorkspacePermit struct{}
+
+func (testWorkspacePermit) Release() {}
+
+// boundEditFile builds a real EditFile the way the harness now requires — bound through the
+// tools.Files bundle with a fresh observation set — since NewEditFile's observation argument
+// is unexported. Only the tool's "EditFile" identity + workspace root matter to the posture
+// edit-interlock the caller exercises.
+func boundEditFile(t *testing.T, root string) tool.InvokableTool {
+	t.Helper()
+	guard, err := tools.NewPermissionChecker(tools.PermissionPolicy{HardDeny: tools.DefaultHardDeny()})
+	if err != nil {
+		t.Fatalf("NewPermissionChecker(guard) error = %v", err)
+	}
+	id, err := uuid.New()
+	if err != nil {
+		t.Fatalf("uuid.New() error = %v", err)
+	}
+	built, err := tools.Files(guard).Build(context.Background(), tool.Bindings{
+		SessionID: id,
+		LoopID:    id,
+		Workspace: &tool.WorkspaceBinding{Root: root, Coordinator: &testWorkspaceCoordinator{}, Observations: tools.NewObservations()},
+	})
+	if err != nil {
+		t.Fatalf("tools.Files().Build() error = %v", err)
+	}
+	for _, tl := range built {
+		info, err := tl.Info(context.Background())
+		if err != nil {
+			t.Fatalf("Info() error = %v", err)
+		}
+		if info.Name == "EditFile" {
+			return tl
+		}
+	}
+	t.Fatal("tools.Files produced no EditFile")
+	return nil
 }
 
 // newConfinedChecker builds a PermissionChecker with the operator's real policy plus

@@ -176,27 +176,29 @@ func TestGreetingFromRegistry(t *testing.T) {
 func TestGreetingNotInModelContext(t *testing.T) {
 	t.Parallel()
 
-	wiring, err := buildOperatorWiring(&fakeLLM{}, newModelFactory(), "/tmp/workspace-root", Config{})
+	definitions, err := swarmDefinitions(&fakeLLM{}, testModel(), Config{})
 	if err != nil {
-		t.Fatalf("buildOperatorWiring() error = %v", err)
+		t.Fatalf("swarmDefinitions() error = %v", err)
 	}
-	cfg := wiring.cfg
+	// definitions[0] is the operator-primary primer; its effective system prompt is
+	// Identity + operator.Role + delegation + the trusted skill catalog.
+	primerSystem := definitions[0].FingerprintInitial().EffectiveSystem
 
-	// The primary's system prompt begins with Identity + operator.Role (the greeting text
-	// is built on a separate path and must not appear anywhere in it).
-	if !strings.HasPrefix(cfg.System, Identity+operator.Role) {
-		t.Fatalf("operator system prompt does not start with Identity+operator.Role; greeting must not touch it")
+	// The primer's system prompt begins with Identity + operator.Role (the greeting text is
+	// built on a separate path and must not appear anywhere in it).
+	if !strings.HasPrefix(primerSystem, Identity+operator.Role) {
+		t.Fatalf("operator-primary system prompt does not start with Identity+operator.Role; greeting must not touch it")
 	}
 	greeting := Greeting(Config{Greeting: true})
 	if greeting == "" {
 		t.Fatal("Greeting(on) empty; cannot assert it is absent from the model context")
 	}
-	if strings.Contains(cfg.System, greetingLead) {
-		t.Errorf("greeting lead leaked into the operator system prompt (model context):\n%s", cfg.System)
+	if strings.Contains(primerSystem, greetingLead) {
+		t.Errorf("greeting lead leaked into the operator system prompt (model context):\n%s", primerSystem)
 	}
 	// No agent's catalog line from the greeting body may appear in the system prompt.
 	for _, b := range leafBuiltins() {
-		if b.description != "" && strings.Contains(cfg.System, "  - "+string(b.name)+": "+b.description) {
+		if b.description != "" && strings.Contains(primerSystem, "  - "+string(b.name)+": "+b.description) {
 			t.Errorf("greeting agent line for %q leaked into the model context", b.name)
 		}
 	}

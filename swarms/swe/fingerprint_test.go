@@ -1,45 +1,42 @@
 package swe
 
 import (
-	"path/filepath"
 	"testing"
 
-	"github.com/looprig/harness/pkg/session"
+	"github.com/looprig/harness/pkg/rig"
 	"github.com/looprig/swe/agents/operator"
 )
 
-// TestOperatorFingerprintFields asserts the swarm-level config-fingerprint fields the
-// composition root injects: AgentKind is the swarm+primary identity ("swe:operator"),
-// RuntimeSkills passes the human-set mode through verbatim, and WorkspaceRoot is the
-// canonical absolute root. These are what a restore compares so a session cannot silently
-// resume under a different agent identity, skill-trust mode, or repo.
+// TestOperatorFingerprintFields asserts the rig-level config-fingerprint fields the
+// composition root injects via rig.WithFingerprintFields: AgentKind is the swarm+primary
+// identity ("swe:operator") and RuntimeSkills passes the human-set mode through verbatim. The
+// workspace-root field is NOT set here — the rig's exclusive-workspace placement folds the
+// canonical root into the fingerprint — so a restore still compares agent identity, skill
+// mode, AND (via the placement) the repo root.
 func TestOperatorFingerprintFields(t *testing.T) {
 	t.Parallel()
-
-	root := t.TempDir()
-	wantRoot := canonicalWorkspaceRoot(root)
 
 	tests := []struct {
 		name string
 		cfg  Config
-		want session.ConfigFingerprintFields
+		want rig.ConfigFingerprintFields
 	}{
 		{
 			name: "runtime skills off",
 			cfg:  Config{RuntimeSkills: false},
-			want: session.ConfigFingerprintFields{AgentKind: "swe:operator", RuntimeSkills: false, WorkspaceRoot: wantRoot},
+			want: rig.ConfigFingerprintFields{AgentKind: "swe:operator", RuntimeSkills: false},
 		},
 		{
 			name: "runtime skills on",
 			cfg:  Config{RuntimeSkills: true},
-			want: session.ConfigFingerprintFields{AgentKind: "swe:operator", RuntimeSkills: true, WorkspaceRoot: wantRoot},
+			want: rig.ConfigFingerprintFields{AgentKind: "swe:operator", RuntimeSkills: true},
 		},
 	}
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := operatorFingerprintFields(root, tt.cfg)
+			got := operatorFingerprintFields(tt.cfg)
 			if got != tt.want {
 				t.Errorf("operatorFingerprintFields = %+v, want %+v", got, tt.want)
 			}
@@ -47,9 +44,9 @@ func TestOperatorFingerprintFields(t *testing.T) {
 	}
 }
 
-// TestOperatorAgentKindFormat pins the AgentKind to "<swarm>:<primary agent>" so a
-// rename of the operator's attribution name is reflected in the fingerprint (and a
-// prior coding/other session, with a different or empty AgentKind, cannot resume as SWE).
+// TestOperatorAgentKindFormat pins the AgentKind to "<swarm>:<primary agent>" so a rename of
+// the operator's attribution name is reflected in the fingerprint (and a prior/other session,
+// with a different or empty AgentKind, cannot resume as SWE).
 func TestOperatorAgentKindFormat(t *testing.T) {
 	t.Parallel()
 	want := "swe:" + string(operator.Name)
@@ -58,39 +55,5 @@ func TestOperatorAgentKindFormat(t *testing.T) {
 	}
 	if operatorAgentKind != "swe:operator" {
 		t.Errorf("operatorAgentKind = %q, want %q", operatorAgentKind, "swe:operator")
-	}
-}
-
-// TestCanonicalWorkspaceRoot asserts the root id is absolute + cleaned: an absolute path is
-// returned cleaned (redundant separators/dot segments collapsed), so two runs against the
-// same repo produce the SAME id and two repos produce DIFFERENT ids. A relative input is
-// made absolute against the cwd.
-func TestCanonicalWorkspaceRoot(t *testing.T) {
-	t.Parallel()
-
-	abs := t.TempDir()
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{name: "absolute clean is identity", in: abs, want: abs},
-		{name: "redundant segments collapse", in: abs + "/./sub/../", want: filepath.Clean(abs)},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := canonicalWorkspaceRoot(tt.in); got != tt.want {
-				t.Errorf("canonicalWorkspaceRoot(%q) = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-
-	// A relative input is anchored to an absolute path (begins with the separator) — never
-	// returned relative, so the id is stable regardless of how the caller spelled the root.
-	rel := canonicalWorkspaceRoot("some/rel/path")
-	if !filepath.IsAbs(rel) {
-		t.Errorf("canonicalWorkspaceRoot(relative) = %q, want an absolute path", rel)
 	}
 }

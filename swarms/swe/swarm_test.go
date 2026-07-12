@@ -4,365 +4,151 @@ import (
 	"context"
 	"encoding/xml"
 	"errors"
-	"net/http"
+	"io"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/looprig/cli/tui"
+	"github.com/looprig/core/uuid"
+	"github.com/looprig/harness/pkg/event"
+	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/harness/pkg/journal"
 	"github.com/looprig/harness/pkg/loop"
-	"github.com/looprig/harness/pkg/tool"
-	"github.com/looprig/harness/pkg/tools"
+	"github.com/looprig/harness/pkg/sessionstore"
 	"github.com/looprig/swe/agents/operator"
-	"github.com/looprig/swe/confine"
+	"github.com/looprig/swe/agents/reviewer"
 )
 
-// operatorPrimaryArgs builds the inputs operatorPrimaryConfig / operatorPrimaryToolSet
-// need from the real leaf registry — the deps, the unbound spawner + Subagent catalog,
-// the skill loader (as describer), and the primary's own code-style Skill tool — exactly
-// the way buildOperatorWiring assembles them. The spawner is UNBOUND (its session is nil);
-// these tests only assemble + inspect the cfg/toolset and never run a turn, so no bind is
-// needed.
-func operatorPrimaryArgs(t *testing.T, root string) (LeafToolDeps, *swarmSpawner, []tools.SubagentCatalogEntry, skillLoaderDescriber, tool.InvokableTool) {
+// swarm_test.go proves the three-loop managed-delegation topology: swarmDefinitions yields
+// exactly [operator-primary, operator, reviewer]; only the primer declares delegates + managed
+// delegation and displays as "operator"; the primer's tool policy and prompt identity match the
+// operator leaf's (minus the primer-only delegation guidance) so they cannot drift; and the
+// headless New path brings the primer up as the durable root loop.
+
+// swarmDefs builds the three definitions with the fake client + test model under cfg.
+func swarmDefs(t *testing.T, cfg Config) []loop.Definition {
 	t.Helper()
-	deps := LeafToolDeps{Root: root, HTTPCl: &http.Client{}}
-	reg, loader, err := leafRegistry(deps, Config{})
+	defs, err := swarmDefinitions(&fakeLLM{}, testModel(), cfg)
 	if err != nil {
-		t.Fatalf("leafRegistry() error = %v", err)
+		t.Fatalf("swarmDefinitions() error = %v", err)
 	}
-	spawner := newSwarmSpawner(reg, deps, &fakeLLM{}, newModelFactory(), loader, NewRuntimeContextProvider())
-	skill := buildLeafSkill(loader, operatorBuiltin(), deps, Config{})
-	return deps, spawner, toolCatalog(reg), loader, skill
+	if len(defs) != 3 {
+		t.Fatalf("swarmDefinitions() len = %d, want 3", len(defs))
+	}
+	return defs
 }
 
-// TestNewWithClientHappy proves swe.New (via the fake-client seam) builds a usable
-// tui.Agent that is releasable via Close.
-func TestNewWithClientHappy(t *testing.T) {
+// TestSwarmDefinitionsTopology proves the three definitions, their order and names, and that
+// ONLY the operator-primary primer declares delegates + managed delegation; both leaves are
+// delegate-free with the zero (sync-only) delegation.
+func TestSwarmDefinitionsTopology(t *testing.T) {
 	t.Parallel()
+	defs := swarmDefs(t, Config{})
+	primer, operatorLeaf, reviewerLeaf := defs[0], defs[1], defs[2]
 
-	agent, err := newWithClient(context.Background(), &fakeLLM{}, newModelFactory(), Config{})
-	if err != nil {
-		t.Fatalf("newWithClient() error = %v", err)
+	tests := []struct {
+		name          string
+		def           loop.Definition
+		wantName      identity.AgentName
+		wantDelegates int
+		wantManaged   bool
+	}{
+		{name: "primer", def: primer, wantName: operatorPrimaryName, wantDelegates: 2, wantManaged: true},
+		{name: "operator leaf", def: operatorLeaf, wantName: operator.Name, wantDelegates: 0, wantManaged: false},
+		{name: "reviewer leaf", def: reviewerLeaf, wantName: reviewer.Name, wantDelegates: 0, wantManaged: false},
 	}
-	if agent == nil {
-		t.Fatal("newWithClient() returned nil agent")
-	}
-	t.Cleanup(func() { _ = agent.Close(context.Background()) })
-
-	// The returned agent must satisfy the TUI surface.
-	var _ tui.Agent = agent
-}
-
-// TestOperatorPrimaryConfigIsPrimaryWithIdentityRoleAndDelegation proves the primary
-// operator config: its AgentName is the operator's name (so it runs AS the primary),
-// and its system prompt is the shared Identity + the operator's Role + the primary-only
-// delegation fragment + the trusted code-style <available_skills> catalog. It is routed
-// through the shared buildOperatorWiring seam (the production assembly).
-func TestOperatorPrimaryConfigIsPrimaryWithIdentityRoleAndDelegation(t *testing.T) {
-	t.Parallel()
-
-	wiring, err := buildOperatorWiring(&fakeLLM{}, newModelFactory(), "/tmp/workspace-root", Config{})
-	if err != nil {
-		t.Fatalf("buildOperatorWiring() error = %v", err)
-	}
-	cfg := wiring.cfg
-
-	if cfg.AgentName != operator.Name {
-		t.Errorf("cfg.AgentName = %q, want %q", cfg.AgentName, operator.Name)
-	}
-	if cfg.Client == nil {
-		t.Error("cfg.Client = nil, want the supplied client")
-	}
-	// The system prompt begins with Identity + operator.Role + operatorDelegation; the
-	// trusted code-style <available_skills> catalog follows.
-	wantPrefix := Identity + operator.Role + operatorDelegation
-	if !strings.HasPrefix(cfg.System, wantPrefix) {
-		t.Errorf("cfg.System does not start with Identity+operator.Role+operatorDelegation:\n%s", cfg.System)
-	}
-	if !strings.Contains(cfg.System, "<identity product=\"SWE\">") {
-		t.Error("system prompt missing the shared identity block")
-	}
-	if !strings.Contains(cfg.System, "<role name=\"operator\">") {
-		t.Error("system prompt missing the operator role block")
-	}
-	if !strings.Contains(cfg.System, "<delegation>") {
-		t.Error("system prompt missing the primary-only delegation block")
-	}
-	// The primary carries the trusted code-style catalog (proving the skill-catalog
-	// wiring on the primary): an <available_skills> block listing code-style.
-	if !strings.Contains(cfg.System, "<available_skills>") || !strings.Contains(cfg.System, "code-style") {
-		t.Errorf("system prompt missing the code-style <available_skills> catalog:\n%s", cfg.System)
-	}
-}
-
-// TestOperatorPrimaryConfigCarriesRuntimeContext proves the primary operator's
-// loop.Config has a non-nil RuntimeContext when one is wired (so the loop injects the
-// volatile date/cwd/git tail every turn), and that a nil provider leaves it OFF.
-func TestOperatorPrimaryConfigCarriesRuntimeContext(t *testing.T) {
-	t.Parallel()
-
-	t.Run("provider wired -> non-nil RuntimeContext", func(t *testing.T) {
-		t.Parallel()
-		deps, spawner, catalog, loader, skill := operatorPrimaryArgs(t, "/tmp/workspace-root")
-		rc := NewRuntimeContextProvider()
-		cfg, err := operatorPrimaryConfig(&fakeLLM{}, newModelFactory(), deps, spawner, catalog, rc, loader, skill, confine.Confinement{})
-		if err != nil {
-			t.Fatalf("operatorPrimaryConfig() error = %v", err)
-		}
-		if cfg.RuntimeContext == nil {
-			t.Error("operator cfg.RuntimeContext = nil, want the wired provider")
-		}
-	})
-
-	t.Run("nil provider -> RuntimeContext stays nil (OFF)", func(t *testing.T) {
-		t.Parallel()
-		deps, spawner, catalog, loader, skill := operatorPrimaryArgs(t, "/tmp/workspace-root")
-		cfg, err := operatorPrimaryConfig(&fakeLLM{}, newModelFactory(), deps, spawner, catalog, nil, loader, skill, confine.Confinement{})
-		if err != nil {
-			t.Fatalf("operatorPrimaryConfig() error = %v", err)
-		}
-		if cfg.RuntimeContext != nil {
-			t.Error("operator cfg.RuntimeContext != nil with a nil provider, want OFF")
-		}
-	})
-}
-
-// TestBuildOperatorWiringEnablesRuntimeContext proves the SHARED construction seam (used
-// by New, openNew, openResume) wires a non-nil RuntimeContext onto the primary operator's
-// cfg, so every construction path inherits runtime-context injection.
-func TestBuildOperatorWiringEnablesRuntimeContext(t *testing.T) {
-	t.Parallel()
-	wiring, err := buildOperatorWiring(&fakeLLM{}, newModelFactory(), "/tmp/workspace-root", Config{})
-	if err != nil {
-		t.Fatalf("buildOperatorWiring() error = %v", err)
-	}
-	if wiring.cfg.RuntimeContext == nil {
-		t.Error("wiring.cfg.RuntimeContext = nil, want runtime context enabled for the operator")
-	}
-}
-
-// TestOperatorPrimaryToolSetIsLeafUnionPlusSubagent proves the PRIMARY operator's toolset
-// is EXACTLY the operator leaf's toolset PLUS Subagent — the drift guard the
-// operatorPrimaryToolSet doc promises. It builds both over the SAME root + skill and
-// asserts primary-minus-Subagent == leaf tools, and that Subagent is present on the
-// primary (so the primary can spawn) and absent from the leaf (so a spawned operator
-// cannot).
-func TestOperatorPrimaryToolSetIsLeafUnionPlusSubagent(t *testing.T) {
-	t.Parallel()
-
-	deps, spawner, catalog, _, skill := operatorPrimaryArgs(t, "/tmp/workspace-root")
-	primary, err := operatorPrimaryToolSet(deps.Root, deps.HTTPCl, spawner, catalog, skill, confine.Confinement{})
-	if err != nil {
-		t.Fatalf("operatorPrimaryToolSet() error = %v", err)
-	}
-	if primary.Permission == nil {
-		t.Fatal("operatorPrimaryToolSet() Permission = nil, want non-nil PermissionChecker")
-	}
-	leaf, err := operator.BuildTools(deps.Root, deps.HTTPCl, skill, confine.Confinement{})
-	if err != nil {
-		t.Fatalf("operator.BuildTools() error = %v", err)
-	}
-
-	primaryNames := sortedNames(t, primary)
-	leafNames := sortedNames(t, leaf)
-
-	if !containsName(primaryNames, "Subagent") {
-		t.Errorf("primary toolset = %v, want it to contain Subagent (the primary must be able to spawn)", primaryNames)
-	}
-	if containsName(leafNames, "Subagent") {
-		t.Errorf("operator leaf toolset = %v, must NOT contain Subagent (a spawned operator cannot spawn)", leafNames)
-	}
-
-	// primary MINUS Subagent must equal the leaf set exactly (no drift).
-	got := make([]string, 0, len(primaryNames))
-	for _, n := range primaryNames {
-		if n != "Subagent" {
-			got = append(got, n)
-		}
-	}
-	if !equalStringSlice(got, leafNames) {
-		t.Errorf("primary tools minus Subagent = %v, want the leaf union %v", got, leafNames)
-	}
-}
-
-// TestOperatorPrimaryToolSetFailsClosedOnUnresolvableHome proves the Part-B security contract
-// for the PRIMARY operator: when the fail-secure PermissionChecker cannot be constructed —
-// because $HOME is unresolvable while DefaultHardDeny's home-relative ("~/…") deny patterns
-// require it — operatorPrimaryToolSet fails CLOSED with a typed *PrimaryToolSetError whose
-// Unwrap chain reaches *tools.HomeUnresolvableError, and returns the ZERO tool set. It also
-// proves operatorPrimaryConfig THREADS the same typed error up (the config-assembly seam that
-// carries it to buildOperatorWiring → New/Open → the composition root), never a partial config.
-func TestOperatorPrimaryToolSetFailsClosedOnUnresolvableHome(t *testing.T) {
-	// NOT t.Parallel(): HOME is process-global and t.Setenv panics under t.Parallel.
-	t.Setenv("HOME", "")
-
-	root := t.TempDir()
-
-	// (1) operatorPrimaryToolSet is the entry point that constructs the checker. It returns
-	// before touching the (here nil) spawner/catalog/skill, so nil args are safe.
-	ts, err := operatorPrimaryToolSet(root, &http.Client{}, nil, nil, nil, confine.Confinement{})
-	var ptse *PrimaryToolSetError
-	if !errors.As(err, &ptse) {
-		t.Fatalf("operatorPrimaryToolSet() error = %T (%v), want *PrimaryToolSetError", err, err)
-	}
-	var hue *tools.HomeUnresolvableError
-	if !errors.As(err, &hue) {
-		t.Fatalf("operatorPrimaryToolSet() error does not unwrap to *tools.HomeUnresolvableError: %v", err)
-	}
-	if ts.Permission != nil || ts.Registry != nil {
-		t.Errorf("operatorPrimaryToolSet() returned a non-zero tool set on failure (want fail-closed): Permission=%v Registry=%v", ts.Permission, ts.Registry)
-	}
-
-	// (2) operatorPrimaryConfig threads the SAME typed error up, returning a zero config.
-	deps, spawner, catalog, loader, skill := operatorPrimaryArgs(t, root)
-	cfg, err := operatorPrimaryConfig(&fakeLLM{}, newModelFactory(), deps, spawner, catalog, nil, loader, skill, confine.Confinement{})
-	if !errors.As(err, &hue) {
-		t.Fatalf("operatorPrimaryConfig() error does not unwrap to *tools.HomeUnresolvableError: %v", err)
-	}
-	if cfg.Client != nil || cfg.Tools.Permission != nil {
-		t.Errorf("operatorPrimaryConfig() returned a non-zero config on failure (want fail-closed): Client=%v Permission=%v", cfg.Client, cfg.Tools.Permission)
-	}
-}
-
-// sortedNames returns the toolset's tool names, sorted.
-func sortedNames(t *testing.T, ts loop.ToolSet) []string {
-	t.Helper()
-	out := toolNames(t, ts)
-	sort.Strings(out)
-	return out
-}
-
-// TestOperatorPrimaryToolSetPermissions proves the primary operator's PermissionChecker
-// auto-approves the read/search/plan/ask/spawn/skill tools and human-gates (never
-// auto-approves) the mutating + network tools (WriteFile, EditFile, Bash, WebSearch,
-// Fetch). Subagent has no path/command boundary and reaches AutoApprove only via the
-// hard-approve list; the Skill tool (embedded code-style) auto-approves the same way.
-func TestOperatorPrimaryToolSetPermissions(t *testing.T) {
-	t.Parallel()
-
-	// A real, existing root so the Stage-1 containment check (which EvalSymlinks the
-	// root) clears for the read/search tools.
-	root := t.TempDir()
-	deps, spawner, catalog, _, skill := operatorPrimaryArgs(t, root)
-	ts, err := operatorPrimaryToolSet(root, deps.HTTPCl, spawner, catalog, skill, confine.Confinement{})
-	if err != nil {
-		t.Fatalf("operatorPrimaryToolSet() error = %v", err)
-	}
-
-	// Per-tool valid args: the auto-approve tools carry args that clear Stage-1
-	// containment; the gated tools carry empty args (a gated tool is never auto-approved
-	// regardless of args — fail-secure — so the security-relevant assertion is "not
-	// auto-approve").
-	autoApprove := map[string]string{
-		"ReadFile": `{"path":"file.txt"}`,
-		"Glob":     `{"pattern":"*.go","root":"."}`,
-		"Grep":     `{"pattern":"foo","path":"."}`,
-		"Todo":     `{}`,
-		"AskUser":  `{}`,
-		"Subagent": `{"agent":"operator","message":"do it"}`,
-		"Skill":    `{"name":"code-style"}`,
-	}
-	gated := map[string]string{
-		"WriteFile": `{}`,
-		"EditFile":  `{}`,
-		"Bash":      `{}`,
-		"WebSearch": `{}`,
-		"Fetch":     `{}`,
-	}
-
-	for _, tl := range ts.Registry {
-		info, err := tl.Info(t.Context())
-		if err != nil {
-			t.Fatalf("Info() error = %v", err)
-		}
-		name := info.Name
-		switch {
-		case hasKey(autoApprove, name):
-			eff := ts.Permission.Check(t.Context(), tl, name, autoApprove[name])
-			if eff != loop.EffectAutoApprove {
-				t.Errorf("Check(%q) = %v, want EffectAutoApprove", name, eff)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.def.Name(); got != tt.wantName {
+				t.Errorf("Name() = %q, want %q", got, tt.wantName)
 			}
-		case hasKey(gated, name):
-			eff := ts.Permission.Check(t.Context(), tl, name, gated[name])
-			if eff == loop.EffectAutoApprove {
-				t.Errorf("Check(%q) = EffectAutoApprove, want a human gate (Ask/Deny — never auto-approve)", name)
+			if got := len(tt.def.Delegates()); got != tt.wantDelegates {
+				t.Errorf("len(Delegates()) = %d, want %d", got, tt.wantDelegates)
 			}
-		default:
-			t.Errorf("unexpected tool %q in primary toolset (no permission expectation)", name)
-		}
+			managed := tt.def.Delegation().Style == loop.DelegationManaged
+			if managed != tt.wantManaged {
+				t.Errorf("Delegation managed = %v, want %v", managed, tt.wantManaged)
+			}
+		})
+	}
+
+	// The primer's delegates are exactly the two leaves.
+	delegates := map[identity.AgentName]bool{}
+	for _, d := range primer.Delegates() {
+		delegates[d] = true
+	}
+	if !delegates[operator.Name] || !delegates[reviewer.Name] {
+		t.Errorf("primer delegates = %v, want operator + reviewer", primer.Delegates())
 	}
 }
 
-// hasKey reports whether m has key k.
-func hasKey(m map[string]string, k string) bool {
-	_, ok := m[k]
-	return ok
-}
-
-// TestOperatorPrimaryToolSetPermissionParity hardens the name-only drift guard: for EVERY
-// tool the operator LEAF carries, the PRIMARY operator's PermissionChecker must resolve the
-// SAME effect (auto-approve vs gated) as the leaf's checker — so the primary really is
-// "leaf + Subagent" in GATING semantics, not merely in tool names. It builds both toolsets
-// over the SAME root and the SAME code-style Skill (so Skill is compared too) and Checks
-// each leaf tool's effect on BOTH checkers with the SAME args; the effect is a deterministic
-// function of (policy, tool, args), so any per-side divergence — e.g. a tool silently moving
-// Ask->auto-approve on only one side — is a real drift this catches.
-func TestOperatorPrimaryToolSetPermissionParity(t *testing.T) {
+// TestSwarmDefinitionsAntiDrift proves the primer and operator leaf share ONE tool policy
+// (byte-identical PolicyRevision) and one prompt identity: the operator leaf's effective
+// system equals the primer's with the primer-only operatorDelegation guidance removed. This
+// is the guard that the two operator faces cannot silently diverge.
+func TestSwarmDefinitionsAntiDrift(t *testing.T) {
 	t.Parallel()
+	defs := swarmDefs(t, Config{})
+	primer, operatorLeaf := defs[0], defs[1]
 
-	// A real, existing root so the Stage-1 containment check clears for the read/search
-	// tools on both checkers.
-	root := t.TempDir()
-	deps, spawner, catalog, _, skill := operatorPrimaryArgs(t, root)
-	leaf, err := operatorBuiltin().build(deps, skill, confine.Confinement{}) // == operator.BuildTools(root, http, skill)
-	if err != nil {
-		t.Fatalf("operatorBuiltin().build() error = %v", err)
-	}
-	primary, err := operatorPrimaryToolSet(root, deps.HTTPCl, spawner, catalog, skill, confine.Confinement{})
-	if err != nil {
-		t.Fatalf("operatorPrimaryToolSet() error = %v", err)
-	}
-
-	// Representative args per leaf tool. The SAME args go to BOTH checkers, so divergence is
-	// a real per-side drift (never an args artifact). Auto-approve tools carry in-root/embedded
-	// args so they clear containment; a gated tool is never auto-approved regardless of args.
-	args := map[string]string{
-		"ReadFile":  `{"path":"file.txt"}`,
-		"Glob":      `{"pattern":"*.go","root":"."}`,
-		"Grep":      `{"pattern":"foo","path":"."}`,
-		"WriteFile": `{"path":"out.txt","content":"x"}`,
-		"EditFile":  `{"path":"out.txt","old":"a","new":"b"}`,
-		"Bash":      `{"command":"ls"}`,
-		"WebSearch": `{"query":"go"}`,
-		"Fetch":     `{"url":"https://example.com"}`,
-		"Todo":      `{}`,
-		"AskUser":   `{}`,
-		"Skill":     `{"name":"code-style"}`,
+	// The primer and operator leaf are built from the SAME operator.BuildTools result, so
+	// their declared tool sets are byte-identical (the managed Subagent is added
+	// structurally by the rig at bind, not part of either definition's WithTools). Whole-
+	// definition PolicyRevision necessarily differs (name, system, delegation), so the
+	// no-drift signal is the identical declared tool-name set.
+	primerTools := append([]string(nil), primer.FingerprintInitial().ToolNames...)
+	leafTools := append([]string(nil), operatorLeaf.FingerprintInitial().ToolNames...)
+	sort.Strings(primerTools)
+	sort.Strings(leafTools)
+	if !slices.Equal(primerTools, leafTools) {
+		t.Errorf("primer tool set %v != operator leaf %v — tool policy drifted", primerTools, leafTools)
 	}
 
-	for _, leafTool := range leaf.Registry {
-		info, err := leafTool.Info(t.Context())
-		if err != nil {
-			t.Fatalf("Info() error = %v", err)
-		}
-		name := info.Name
-		callArgs, ok := args[name]
-		if !ok {
-			t.Fatalf("no parity args for leaf tool %q (update the args map)", name)
-		}
-		leafEff := leaf.Permission.Check(t.Context(), leafTool, name, callArgs)
-		primaryTool := mustTool(t, primary, name)
-		primaryEff := primary.Permission.Check(t.Context(), primaryTool, name, callArgs)
-		if primaryEff != leafEff {
-			t.Errorf("tool %q: primary effect = %v, leaf effect = %v — want parity (the primary must gate exactly like the leaf)", name, primaryEff, leafEff)
+	primerSys := primer.FingerprintInitial().EffectiveSystem
+	leafSys := operatorLeaf.FingerprintInitial().EffectiveSystem
+
+	if !strings.Contains(primerSys, operatorDelegation) {
+		t.Error("primer system does not carry the operatorDelegation guidance")
+	}
+	if strings.Contains(leafSys, operatorDelegation) {
+		t.Error("operator leaf system carries the primer-only operatorDelegation guidance, want absent")
+	}
+	if got := strings.Replace(primerSys, operatorDelegation, "", 1); got != leafSys {
+		t.Errorf("primer-minus-delegation system != operator leaf system:\nprimer(-deleg)=%q\nleaf=%q", got, leafSys)
+	}
+	// Both carry the shared identity, operator role, and trusted code-style catalog.
+	for _, want := range []string{`<identity product="SWE">`, `<role name="operator">`, "<available_skills>", "code-style"} {
+		if !strings.Contains(leafSys, want) {
+			t.Errorf("operator leaf system missing %q", want)
 		}
 	}
 }
 
-// TestOperatorDelegationIsWellFormedXML proves the primary-only operatorDelegation fragment
-// is a single well-formed <delegation> element, mirroring each agent's TestRoleIsWellFormedXML.
-// The fragment is baked into the primary's system prompt (after operator.Role), so malformed
-// XML would corrupt that assembly; this regression-guards it like the role and identity blocks.
+// TestReviewerLeafIsReadOnly proves the reviewer leaf carries no write/edit/Subagent tools:
+// its tool policy differs from the operator's, and it declares no delegates.
+func TestReviewerLeafIsReadOnly(t *testing.T) {
+	t.Parallel()
+	defs := swarmDefs(t, Config{})
+	operatorLeaf, reviewerLeaf := defs[1], defs[2]
+	if reviewerLeaf.PolicyRevision() == operatorLeaf.PolicyRevision() {
+		t.Error("reviewer PolicyRevision == operator's, want a distinct read-only policy")
+	}
+	names := map[string]bool{}
+	for _, n := range reviewerLeaf.FingerprintInitial().ToolNames {
+		names[n] = true
+	}
+	for _, forbidden := range []string{"WriteFile", "EditFile", "Subagent"} {
+		if names[forbidden] {
+			t.Errorf("reviewer leaf carries %q, want read-only critique tools only", forbidden)
+		}
+	}
+}
+
+// TestOperatorDelegationIsWellFormedXML proves the primer-only operatorDelegation fragment is a
+// single well-formed <delegation> element (it is baked into the primer system prompt).
 func TestOperatorDelegationIsWellFormedXML(t *testing.T) {
 	t.Parallel()
 	var probe struct {
@@ -376,22 +162,83 @@ func TestOperatorDelegationIsWellFormedXML(t *testing.T) {
 	}
 }
 
-// TestOperatorSpawnCaps pins the session's spawn safety caps and documents WHY Depth is 2.
-// Only the primary operator carries Subagent and every spawnable leaf has none, so the real
-// tree is depth-1 (primary → non-spawning leaf). looprig refuses a spawn whose would-be child
-// has an ancestor chain ≥ Depth, so Depth=2 permits exactly that one level and refuses anything
-// deeper. Depth=1 would refuse even the primary→leaf spawn (TestAcceptanceEndToEndSpawn would
-// break); Depth>2 is dead slack since no leaf can spawn. operatorLimits() must carry both consts.
+// TestOperatorSpawnCaps pins the delegation safety caps the rig enforces (Depth 2 admits the
+// one structural level primary→leaf; Quota 64 bounds total spawns).
 func TestOperatorSpawnCaps(t *testing.T) {
 	t.Parallel()
 	if operatorSpawnDepth != 2 {
-		t.Errorf("operatorSpawnDepth = %d, want 2 (the structural depth-1 tree: primary → non-spawning leaf)", operatorSpawnDepth)
+		t.Errorf("operatorSpawnDepth = %d, want 2 (structural depth-1: primary → non-spawning leaf)", operatorSpawnDepth)
 	}
 	if operatorSpawnQuota != 64 {
 		t.Errorf("operatorSpawnQuota = %d, want 64", operatorSpawnQuota)
 	}
-	lim := operatorLimits()
-	if lim.Depth != operatorSpawnDepth || lim.Quota != operatorSpawnQuota {
-		t.Errorf("operatorLimits() = {Depth:%d Quota:%d}, want {Depth:%d Quota:%d}", lim.Depth, lim.Quota, operatorSpawnDepth, operatorSpawnQuota)
+}
+
+// TestNewWithClientBuildsRootPrimer proves the headless New path (via the fake-client seam)
+// builds a usable tui.Agent whose durable root loop is the operator-primary, DISPLAYED as
+// "operator", started first (zero-parent). It is serial (not t.Parallel) because the exclusive
+// current-checkout placement means only one headless session can hold the root lease at a time;
+// it Closes the agent so the next serial session test can acquire.
+func TestNewWithClientBuildsRootPrimer(t *testing.T) {
+	ctx := context.Background()
+	agent, err := newWithClient(ctx, &fakeLLM{}, newModelFactory(), Config{})
+	if err != nil {
+		t.Fatalf("newWithClient() error = %v", err)
+	}
+	t.Cleanup(func() { _ = agent.Close(ctx) })
+
+	var _ tui.Agent = agent
+
+	root := agent.RootLoopID()
+	if root.IsZero() {
+		t.Fatal("RootLoopID() is zero")
+	}
+	if agent.ActiveLoopID() != root {
+		t.Errorf("ActiveLoopID() = %v, want RootLoopID %v (the active primer is the root)", agent.ActiveLoopID(), root)
+	}
+
+	started := swarmFirstRootLoop(t, agent.SessionID())
+	if got := string(started.AgentName); got != string(operatorPrimaryName) {
+		t.Errorf("root loop AgentName = %q, want %q", got, operatorPrimaryName)
+	}
+	if started.DisplayName != string(operator.Name) {
+		t.Errorf("root loop DisplayName = %q, want %q", started.DisplayName, operator.Name)
+	}
+	if started.Description != operator.Description {
+		t.Errorf("root loop Description = %q, want operator.Description", started.Description)
+	}
+	if started.LoopID != root {
+		t.Errorf("root LoopStarted LoopID = %v, want RootLoopID %v", started.LoopID, root)
+	}
+}
+
+// swarmFirstRootLoop drains the durable log of the headless session and returns the first
+// zero-parent LoopStarted (the active primer, started first).
+func swarmFirstRootLoop(t *testing.T, sessionID uuid.UUID) event.LoopStarted {
+	t.Helper()
+	stores, err := headlessStores()
+	if err != nil {
+		t.Fatalf("headlessStores() error = %v", err)
+	}
+	replayer, err := stores.session.OpenEventReplayer(sessionID, sessionstore.ReplayRequest{})
+	if err != nil {
+		t.Fatalf("OpenEventReplayer() error = %v", err)
+	}
+	cursor, err := replayer.Open(context.Background(), journal.ReplayRequest{From: journal.Beginning()})
+	if err != nil {
+		t.Fatalf("replayer.Open() error = %v", err)
+	}
+	defer func() { _ = cursor.Close() }()
+	for {
+		ev, _, err := cursor.Next(context.Background())
+		if errors.Is(err, io.EOF) {
+			t.Fatal("no zero-parent LoopStarted in the durable log")
+		}
+		if err != nil {
+			t.Fatalf("cursor.Next() error = %v", err)
+		}
+		if started, ok := ev.(event.LoopStarted); ok && started.Cause.Coordinates.LoopID.IsZero() {
+			return started
+		}
 	}
 }

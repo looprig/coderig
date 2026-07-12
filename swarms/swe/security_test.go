@@ -252,8 +252,8 @@ func TestCeilingModeSourceMapsOrdinalToMode(t *testing.T) {
 			t.Parallel()
 			// Drive the adapter through the SAME source shape the harness checker
 			// reads (tools.CeilingSource), proving one source feeds both seams.
-			st := ceiling.NewClamped(tt.ordinal)
-			st.Set(tt.ordinal)
+			st := ceiling.NewClamped(ceiling.Level(tt.ordinal))
+			st.Set(ceiling.Level(tt.ordinal))
 			var src tools.CeilingSource = st
 			m := ceilingModeSource{src: src}
 			if got := m.Current(); got != tt.want {

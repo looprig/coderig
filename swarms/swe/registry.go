@@ -7,55 +7,27 @@
 package swe
 
 import (
-	"net/http"
 	"strconv"
 
 	"github.com/looprig/harness/pkg/identity"
-	"github.com/looprig/harness/pkg/loop"
-	"github.com/looprig/harness/pkg/tools"
 	"github.com/looprig/inference"
 )
 
-// Agent is what an agent PACKAGE exposes. It owns its role prompt + toolset
-// builder; it does NOT own identity, the model, or the full loop.Config (the
-// swarm assembles those).
+// Agent is what an agent PACKAGE exposes as METADATA: its name, one-line description, role
+// prompt, and allowed embedded-skill set. It does NOT own identity, the model, the toolset,
+// or delegation — the composition root (swarm.go) builds each loop.Definition, and the rig
+// owns delegation — so this type is pure data + lookup for the catalog and greeting.
 type Agent struct {
 	Name        identity.AgentName
-	Description string // shown in the Subagent catalog + greeting
+	Description string // shown in the greeting/catalog
 	Role        string // role prompt; the swarm prepends identity
 
 	// Skills is the agent's closed set of allowed embedded-skill names — part of
 	// its boundary. An agent with ≥1 skill is wired with the Skill tool and an
 	// <available_skills> catalog in its system prompt; an empty set gets neither.
-	// The swarm builds the loader's per-agent allow-map from these names.
 	Skills []string
 
-	// BuildTools constructs the agent's OWN tool allowlist. The swarm calls it
-	// per spawn so each invocation gets a fresh PermissionChecker (no shared
-	// mutable permission state across loops). The optional Skill tool is threaded
-	// in by the leaf adapter when the agent has ≥1 skill. It returns a typed error
-	// (never a nil, checker-less tool set) when the fail-secure PermissionChecker
-	// cannot be built, so a leaf never runs unguarded.
-	BuildTools func(LeafToolDeps) (loop.ToolSet, error)
-
-	AllowsRuntimeSkills bool // P2b; false in P1
-}
-
-// LeafToolDeps are the construction deps a leaf agent's toolset needs. There is
-// deliberately NO Spawner here — a leaf cannot spawn (least privilege). The primary
-// operator's spawn-capable toolset is assembled separately.
-type LeafToolDeps struct {
-	Root   string
-	HTTPCl *http.Client
-
-	// Ceiling is the shared session security-ceiling source every leaf build reads to
-	// compute its EFFECTIVE mode (min(role static mode, ceiling)) — the SAME source the
-	// session's SetSecurityCeiling mutates and the checker reads per Check, so a ceiling
-	// change clamps every leaf at once (SPEC §8). For a SPAWNED child the spawner passes
-	// the PARENT's effective-mode source here instead, so a child clamps to
-	// min(childRole, parentEffective) and can never exceed its parent (non-escalation).
-	// A nil Ceiling fail-closes the effective mode to 0 (ZeroTrust): nothing auto-approves.
-	Ceiling tools.CeilingSource
+	AllowsRuntimeSkills bool // §7a workspace-skill eligibility
 }
 
 // Config is the swarm's human-set construction config — the knobs a launch flag /

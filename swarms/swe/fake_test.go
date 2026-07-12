@@ -5,9 +5,11 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"testing"
 
 	"github.com/looprig/core/content"
 	"github.com/looprig/inference"
+	"github.com/looprig/storage/memstore"
 )
 
 // fakeLLM is a controllable inference.Client for tests. The loop only ever calls Stream,
@@ -52,9 +54,41 @@ func (f *fakeLLM) Stream(ctx context.Context, req inference.Request) (*inference
 	return inference.NewStreamReader(next, nil), nil
 }
 
-// testModel is a minimal valid inference.Model for fake-client tests. The fake ignores it; loop.New
-// only requires it to pass inference.Model.Validate (valid provider/APIFormat/BaseURL + non-empty
-// name), which the loopback LM Studio catalog row satisfies.
+// testModel is a minimal valid inference.Model for fake-client tests. The fake ignores it; loop
+// binding only requires it to pass inference.Model.Validate (valid provider/APIFormat/BaseURL +
+// non-empty name), which the loopback LM Studio catalog row satisfies.
 func testModel() inference.Model {
 	return lmStudioLocal("fake-model")
+}
+
+// newTestAgent builds an ISOLATED headless sessionAgent over a FRESH in-memory store and a
+// throwaway workspace root, so a test never contends on the process-shared headless store's
+// exclusive checkout lease (which would serialize every parallel test on the real cwd) and
+// never snapshots the real working tree. Each call is independent and parallel-safe; the agent
+// is Closed at test cleanup. client is the fake inference client to drive turns.
+func newTestAgent(t *testing.T, client inference.Client, cfg Config) *sessionAgent {
+	t.Helper()
+	root := t.TempDir()
+	definitions, err := swarmDefinitions(client, testModel(), cfg)
+	if err != nil {
+		t.Fatalf("swarmDefinitions() error = %v", err)
+	}
+	stores, err := openStores(memstore.New())
+	if err != nil {
+		t.Fatalf("openStores() error = %v", err)
+	}
+	assembly, err := buildRig(definitions, stores, root, cfg, false)
+	if err != nil {
+		t.Fatalf("buildRig() error = %v", err)
+	}
+	controller, err := assembly.NewSession(context.Background())
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	agent, err := newSessionAgent(context.Background(), controller, stores.session, false)
+	if err != nil {
+		t.Fatalf("newSessionAgent() error = %v", err)
+	}
+	t.Cleanup(func() { _ = agent.Close(context.Background()) })
+	return agent
 }
