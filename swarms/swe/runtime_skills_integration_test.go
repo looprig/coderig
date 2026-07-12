@@ -44,33 +44,82 @@ func writeWorkspaceSkill(t *testing.T, root, name string) string {
 }
 
 func TestRuntimeSkillsWorkspaceLoadGatedEndToEnd(t *testing.T) {
-	root := t.TempDir()
+	dataDir, root := t.TempDir(), t.TempDir()
 	t.Chdir(root)
 	name := writeWorkspaceSkill(t, root, "project-checklist")
+	phase := "initial"
 	step := 0
 	var skillResult string
 	client := &managedScript{}
 	client.fn = func(_ context.Context, req inference.Request) ([]content.Chunk, error) {
 		if strings.Contains(req.System, operatorDelegation) {
-			if step == 0 {
+			if phase == "initial" && step == 0 {
 				step++
-				return toolCall("skill-delegate", `{"agent":"operator","message":"load the project checklist","wait":true}`), nil
+				return toolCall("skill-delegate", `{"agent":"operator","message":"prepare for restore","wait":true}`), nil
 			}
-			return finalText("runtime skill complete"), nil
+			return finalText("runtime skill parent prepared"), nil
 		}
-		if step == 1 {
+		if phase == "initial" {
+			return finalText("runtime skill child prepared"), nil
+		}
+		if step == 0 {
 			step++
 			return []content.Chunk{&content.ToolUseChunk{Index: 0, ID: "skill-load", Name: "Skill", InputJSON: fmt.Sprintf(`{"name":%q}`, name)}}, nil
 		}
 		skillResult = lastToolText(req)
 		return finalText("delegate consumed skill"), nil
 	}
-	f := newIntegrationFactory(t)
-	a, err := f.openWithClient(context.Background(), client, newModelFactory(), SessionSelector{}, Config{RuntimeSkills: true})
+	f1, err := NewSessionStoreFactory(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a1, err := f1.openWithClient(context.Background(), client, newModelFactory(), SessionSelector{}, Config{RuntimeSkills: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := a1.SessionID()
+	_, initialEvents := runManagedTurnObserved(t, a1, "create runtime-skill delegate")
+	var childID uuid.UUID
+	for _, ev := range initialEvents {
+		if started, ok := ev.(event.LoopStarted); ok && !started.Cause.Coordinates.LoopID.IsZero() {
+			childID = started.LoopID
+		}
+	}
+	if childID.IsZero() {
+		t.Fatal("runtime-skill delegate missing before restore")
+	}
+	if err := a1.sess.SetActiveLoop(context.Background(), childID); err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer waitCancel()
+	if err := a1.sess.(interface{ WaitIdle(context.Context) error }).WaitIdle(waitCtx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a1.sess.CheckpointWorkspace(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a1.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	phase, step = "restored", 0
+	f2, err := NewSessionStoreFactory(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f2.Close() })
+	a, err := f2.openWithClient(context.Background(), client, newModelFactory(), SessionSelector{Resume: sid}, Config{RuntimeSkills: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = a.Close(context.Background()) })
+	if a.ActiveLoopID() != childID {
+		t.Fatalf("restored runtime-skill active loop = %v, want %v", a.ActiveLoopID(), childID)
+	}
 	sub, err := a.Subscribe(event.EventFilter{Enduring: event.LoopScope{All: true}})
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +131,7 @@ func TestRuntimeSkillsWorkspaceLoadGatedEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var childID, turnID uuid.UUID
+	var turnID uuid.UUID
 	approved := false
 	var observed []event.Event
 	for {
@@ -95,10 +144,6 @@ func TestRuntimeSkillsWorkspaceLoadGatedEndToEnd(t *testing.T) {
 			}
 			observed = append(observed, delivery.Event)
 			switch ev := delivery.Event.(type) {
-			case event.LoopStarted:
-				if !ev.Cause.Coordinates.LoopID.IsZero() {
-					childID = ev.LoopID
-				}
 			case event.GateOpened:
 				if ev.EventHeader().LoopID != childID || childID.IsZero() {
 					t.Fatalf("workspace-skill gate loop = %v, want delegate %v", ev.EventHeader().LoopID, childID)

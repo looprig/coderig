@@ -219,6 +219,7 @@ func TestRigRestoreDelegateOwnership(t *testing.T) {
 	step := 0
 	var childID uuid.UUID
 	var unrelatedResult string
+	var initialSyncResult string
 	client := &managedScript{}
 	client.fn = func(_ context.Context, req inference.Request) ([]content.Chunk, error) {
 		if !strings.Contains(req.System, operatorDelegation) {
@@ -232,6 +233,7 @@ func TestRigRestoreDelegateOwnership(t *testing.T) {
 				step++
 				return toolCall("own-start", `{"agent":"operator","message":"first","wait":true}`), nil
 			}
+			initialSyncResult = lastToolText(req)
 			return finalText("initial parent"), nil
 		}
 		switch step {
@@ -268,6 +270,9 @@ func TestRigRestoreDelegateOwnership(t *testing.T) {
 	if childID.IsZero() {
 		t.Fatal("no durable child")
 	}
+	if initialSyncResult != "initial child" {
+		t.Fatalf("sync wait=true Subagent result = %q, want exact child final", initialSyncResult)
+	}
 	if err := a1.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -301,8 +306,8 @@ func TestRigRestoreDelegateOwnership(t *testing.T) {
 func TestAsyncDelegatesFSStoreResolveIndependently(t *testing.T) {
 	t.Chdir(t.TempDir())
 	step := 0
-	var first, second queuedHandle
-	var firstWait, secondWait, firstStatus, interrupted string
+	var first, second, followup queuedHandle
+	var firstWait, secondWait, firstStatus, followupStatus, followupWait, interrupted string
 	firstEntered := make(chan struct{})
 	secondEntered := make(chan struct{})
 	releaseFirst := make(chan struct{})
@@ -320,10 +325,12 @@ func TestAsyncDelegatesFSStoreResolveIndependently(t *testing.T) {
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				}
-			default:
+			case 2:
 				close(secondEntered)
 				<-ctx.Done()
 				return nil, ctx.Err()
+			default:
+				return finalText("exact follow-up child result"), nil
 			}
 		}
 		prior := lastToolText(req)
@@ -365,8 +372,24 @@ func TestAsyncDelegatesFSStoreResolveIndependently(t *testing.T) {
 		case 4:
 			firstWait = prior
 			step++
-			return toolCall("fs-interrupt-2", fmt.Sprintf(`{"action":"interrupt","delegate_id":%q}`, second.DelegateID)), nil
+			return toolCall("fs-followup-1", fmt.Sprintf(`{"action":"send","delegate_id":%q,"message":"follow up","wait":false}`, first.DelegateID)), nil
 		case 5:
+			var err error
+			followup, err = parseQueued(prior)
+			if err != nil {
+				return nil, err
+			}
+			step++
+			return toolCall("fs-followup-status", fmt.Sprintf(`{"action":"status","delegate_id":%q}`, followup.DelegateID)), nil
+		case 6:
+			followupStatus = prior
+			step++
+			return toolCall("fs-followup-wait", fmt.Sprintf(`{"action":"wait","delegate_id":%q,"request_id":%q}`, followup.DelegateID, followup.RequestID)), nil
+		case 7:
+			followupWait = prior
+			step++
+			return toolCall("fs-interrupt-2", fmt.Sprintf(`{"action":"interrupt","delegate_id":%q}`, second.DelegateID)), nil
+		case 8:
 			interrupted = prior
 			step++
 			return toolCall("fs-wait-2", fmt.Sprintf(`{"action":"wait","delegate_id":%q,"request_id":%q}`, second.DelegateID, second.RequestID)), nil
@@ -399,6 +422,15 @@ func TestAsyncDelegatesFSStoreResolveIndependently(t *testing.T) {
 	if !strings.Contains(interrupted, second.DelegateID) {
 		t.Fatalf("interrupt result = %q, want delegate %s", interrupted, second.DelegateID)
 	}
+	if followup.DelegateID != first.DelegateID || followup.RequestID == first.RequestID || followup.RequestID == "" {
+		t.Fatalf("follow-up handle = %+v, first = %+v", followup, first)
+	}
+	if !strings.Contains(followupStatus, first.DelegateID) {
+		t.Fatalf("follow-up status = %q", followupStatus)
+	}
+	if !strings.Contains(followupWait, "exact follow-up child result") {
+		t.Fatalf("follow-up wait = %q", followupWait)
+	}
 }
 
 // TestManagedDelegateDeclaredModeFSStore uses the production managed-topology shape with
@@ -406,7 +438,9 @@ func TestAsyncDelegatesFSStoreResolveIndependently(t *testing.T) {
 // named mode. It complements the production-definition rejection test by proving a mode
 // is accepted only when present in the target definition.
 func TestManagedDelegateDeclaredModeFSStore(t *testing.T) {
-	t.Chdir(t.TempDir())
+	dataDir, root := t.TempDir(), t.TempDir()
+	t.Chdir(root)
+	phase := "initial"
 	primaryCalls := 0
 	var childModel string
 	client := &managedScript{}
@@ -414,70 +448,155 @@ func TestManagedDelegateDeclaredModeFSStore(t *testing.T) {
 		if strings.Contains(req.System, "mode-test-primary") {
 			primaryCalls++
 			if primaryCalls == 1 {
-				return toolCall("declared-mode", `{"agent":"operator","mode":"build","message":"build it","wait":true}`), nil
+				return toolCall("declared-mode", `{"agent":"operator","mode":"plan","message":"plan it","wait":true}`), nil
 			}
 			return finalText("declared mode complete"), nil
 		}
-		childModel = req.Model.Name
+		if phase == "restored" {
+			childModel = req.Model.Name
+		}
 		return finalText("mode child complete"), nil
-	}
-	permission := &typedDelegatePermission{}
-	primer, err := loop.Define(
-		loop.WithName(operatorPrimaryName),
-		loop.WithInference(client, testModel()),
-		loop.WithSystem("mode-test-primary"),
-		loop.WithPermissionFactory(func(_ context.Context, bindings tool.Bindings) (loop.PermissionGate, error) {
-			permission.controller = bindings.Delegate
-			return permission, nil
-		}),
-		loop.WithPolicyRevision("mode-test-primary-v1"),
-		loop.WithDelegates(operator.Name),
-		loop.WithDelegation(loop.Delegation{Style: loop.DelegationManaged}),
-	)
-	if err != nil {
-		t.Fatal(err)
 	}
 	modeModel := testModel()
 	modeModel.Name = "declared-build-model"
-	leaf, err := loop.Define(
-		loop.WithName(operator.Name),
-		loop.WithInference(client, testModel()),
-		loop.WithModes(loop.Mode{Name: "plan"}, loop.Mode{Name: "build", Model: modeModel, Effort: inference.EffortHigh}),
-		loop.WithInitialMode("plan"),
-		loop.WithPolicyRevision("mode-test-leaf-v1"),
-	)
+	definitions := func(t *testing.T) []loop.Definition {
+		t.Helper()
+		permission := &typedDelegatePermission{}
+		primer, err := loop.Define(
+			loop.WithName(operatorPrimaryName), loop.WithInference(client, testModel()), loop.WithSystem("mode-test-primary"),
+			loop.WithPermissionFactory(func(_ context.Context, bindings tool.Bindings) (loop.PermissionGate, error) {
+				permission.controller = bindings.Delegate
+				return permission, nil
+			}),
+			loop.WithPolicyRevision("mode-test-primary-v1"), loop.WithDelegates(operator.Name),
+			loop.WithDelegation(loop.Delegation{Style: loop.DelegationManaged}),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		leaf, err := loop.Define(
+			loop.WithName(operator.Name), loop.WithInference(client, testModel()),
+			loop.WithModes(loop.Mode{Name: "plan"}, loop.Mode{Name: "build", Model: modeModel, Effort: inference.EffortHigh}),
+			loop.WithInitialMode("plan"), loop.WithPolicyRevision("mode-test-leaf-v1"),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return []loop.Definition{primer, leaf}
+	}
+	f1, err := NewSessionStoreFactory(dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := newIntegrationFactory(t)
-	assembly, err := buildRig([]loop.Definition{primer, leaf}, f.stores, mustCurrentDir(t), Config{}, false)
+	assembly1, err := buildRig(definitions(t), f1.stores, root, Config{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	controller, err := assembly.NewSession(context.Background())
+	controller1, err := assembly1.NewSession(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := newSessionAgent(context.Background(), controller, f.stores.session, false)
+	a1, err := newSessionAgent(context.Background(), controller1, f1.stores.session, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = a.Close(context.Background()) })
-	if got := runManagedTurn(t, a, "use build mode"); got != "declared mode complete" {
+	sid := a1.SessionID()
+	got, observed := runManagedTurnObserved(t, a1, "use plan mode")
+	if got != "declared mode complete" {
 		t.Fatalf("final = %q", got)
+	}
+	var childID uuid.UUID
+	for _, ev := range observed {
+		if started, ok := ev.(event.LoopStarted); ok && !started.Cause.Coordinates.LoopID.IsZero() {
+			childID = started.LoopID
+		}
+	}
+	childController, ok := a1.sess.LoopController(childID)
+	if !ok {
+		t.Fatal("declared-mode child controller missing")
+	}
+	if childController.Mode() != "plan" {
+		t.Fatalf("spawned mode = %q, want plan", childController.Mode())
+	}
+	if err := childController.SetMode(context.Background(), "build"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a1.sess.SetActiveLoop(context.Background(), childID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a1.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	phase = "restored"
+	f2, err := NewSessionStoreFactory(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f2.Close() })
+	assembly2, err := buildRig(definitions(t), f2.stores, root, Config{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller2, err := assembly2.RestoreSession(context.Background(), sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2, err := newSessionAgent(context.Background(), controller2, f2.stores.session, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a2.Close(context.Background()) })
+	restoredChild, ok := a2.sess.Loop(childID)
+	if !ok {
+		t.Fatal("restored declared-mode child missing before submit")
+	}
+	if restoredChild.Mode() != "build" {
+		t.Fatalf("restored changed mode before submit = %q, want build", restoredChild.Mode())
+	}
+	if restoredChild.Model().Name != modeModel.Name {
+		t.Fatalf("restored changed-mode model = %q, want %q", restoredChild.Model().Name, modeModel.Name)
+	}
+	if got := runManagedTurn(t, a2, "continue in build mode"); got != "mode child complete" {
+		t.Fatalf("restored child final = %q", got)
 	}
 	if childModel != modeModel.Name {
 		t.Fatalf("declared-mode child model = %q, want %q", childModel, modeModel.Name)
 	}
 }
 
-func mustCurrentDir(t *testing.T) string {
-	t.Helper()
-	root, err := os.Getwd()
+// TestManagedDelegateUndeclaredModeFSStore proves the production single-mode operator
+// definition rejects a requested mode before registering any child in the real fsstore
+// journal. This is the production counterpart to the topology-equivalent acceptance test.
+func TestManagedDelegateUndeclaredModeFSStore(t *testing.T) {
+	t.Chdir(t.TempDir())
+	calls := 0
+	var result string
+	client := &managedScript{}
+	client.fn = func(_ context.Context, req inference.Request) ([]content.Chunk, error) {
+		calls++
+		if calls == 1 {
+			return toolCall("undeclared-mode", `{"agent":"operator","mode":"build","message":"must reject","wait":true}`), nil
+		}
+		result = lastToolText(req)
+		return finalText("rejection observed"), nil
+	}
+	f := newIntegrationFactory(t)
+	a, err := f.openWithClient(context.Background(), client, newModelFactory(), SessionSelector{}, Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return root
+	t.Cleanup(func() { _ = a.Close(context.Background()) })
+	_, observed := runManagedTurnObserved(t, a, "request undeclared mode")
+	if !strings.Contains(result, "is not declared") {
+		t.Fatalf("undeclared mode result = %q", result)
+	}
+	if got := countLoopStarted(observed); got != 0 {
+		t.Fatalf("undeclared mode registered %d child loops, want 0", got)
+	}
 }
 
 // TestRigRestoreSnapshotFailureAdmission composes the actual fsstore session journal and
@@ -691,7 +810,7 @@ func TestRigRestoreDelegateGateSandboxRoot(t *testing.T) {
 	t.Chdir(root)
 	phase, primaryCalls, childCalls := "initial", 0, 0
 	var childID uuid.UUID
-	var bashResult string
+	var pwdResult, deniedResult string
 	client := &managedScript{}
 	client.fn = func(_ context.Context, req inference.Request) ([]content.Chunk, error) {
 		if strings.Contains(req.System, operatorDelegation) {
@@ -705,11 +824,16 @@ func TestRigRestoreDelegateGateSandboxRoot(t *testing.T) {
 			return finalText("child prepared"), nil
 		}
 		childCalls++
-		if childCalls == 1 {
+		switch childCalls {
+		case 1:
 			return []content.Chunk{&content.ToolUseChunk{Index: 0, ID: "restored-pwd", Name: "Bash", InputJSON: `{"command":"pwd"}`}}, nil
+		case 2:
+			pwdResult = lastToolText(req)
+			return []content.Chunk{&content.ToolUseChunk{Index: 0, ID: "restored-clamp", Name: "Bash", InputJSON: `{"command":"touch restored-ceiling-must-deny"}`}}, nil
+		default:
+			deniedResult = lastToolText(req)
+			return finalText("restored bash complete"), nil
 		}
-		bashResult = lastToolText(req)
-		return finalText("restored bash complete"), nil
 	}
 	f1, err := NewSessionStoreFactory(dataDir)
 	if err != nil {
@@ -756,9 +880,6 @@ func TestRigRestoreDelegateGateSandboxRoot(t *testing.T) {
 	if a2.ActiveLoopID() != childID {
 		t.Fatalf("restored active loop = %v, want %v", a2.ActiveLoopID(), childID)
 	}
-	if got := a2.sess.(interface{ CeilingSource() ceiling.Source }).CeilingSource().Current(); got != 1 {
-		t.Fatalf("restored ceiling = %d", got)
-	}
 	sub, err := a2.Subscribe(event.EventFilter{Enduring: event.LoopScope{All: true}})
 	if err != nil {
 		t.Fatal(err)
@@ -770,8 +891,9 @@ func TestRigRestoreDelegateGateSandboxRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var turnID, gateID, callID uuid.UUID
-	resolved := false
+	var turnID uuid.UUID
+	gateCalls := make(map[uuid.UUID]uuid.UUID)
+	resolved := make(map[uuid.UUID]bool)
 	for {
 		select {
 		case <-ctx.Done():
@@ -786,29 +908,36 @@ func TestRigRestoreDelegateGateSandboxRoot(t *testing.T) {
 				if ev.EventHeader().LoopID != childID {
 					t.Fatalf("gate loop = %v, want %v", ev.EventHeader().LoopID, childID)
 				}
-				gateID = ev.Gate.ID
-				callID = ev.Gate.Subject.ToolExecutionID
+				gateID := ev.Gate.ID
+				callID := ev.Gate.Subject.ToolExecutionID
+				gateCalls[gateID] = callID
 				if err := a2.Approve(ctx, childID, callID, tool.ScopeOnce); err != nil {
 					t.Fatal(err)
 				}
 			case event.GateResolved:
-				if ev.GateID == gateID && !gateID.IsZero() {
-					resolved = true
-				}
+				resolved[ev.GateID] = true
 			case event.TurnFailed:
 				t.Fatalf("restored Bash turn failed: %v", ev.Err)
 			case event.TurnDone:
 				if ev.TurnID != turnID || turnID.IsZero() {
 					continue
 				}
-				if gateID.IsZero() || !resolved {
-					t.Fatalf("gate lifecycle incomplete: id=%v resolved=%v", gateID, resolved)
+				if len(gateCalls) != 2 || len(resolved) != 2 {
+					t.Fatalf("gate lifecycle incomplete: calls=%v resolved=%v", gateCalls, resolved)
 				}
-				if !strings.Contains(bashResult, root) {
-					t.Fatalf("restored Bash pwd result = %q, want root %q", bashResult, root)
+				if !strings.Contains(pwdResult, root) {
+					t.Fatalf("restored Bash pwd result = %q, want root %q", pwdResult, root)
 				}
-				if _, err := a2.gateIDFor(childID, callID); err == nil {
-					t.Fatal("resolved gate remained indexed")
+				if !strings.Contains(strings.ToLower(deniedResult), "operation not permitted") && !strings.Contains(deniedResult, "exit code") {
+					t.Fatalf("restored ceiling did not deny write command: %q", deniedResult)
+				}
+				if _, err := os.Stat(filepath.Join(root, "restored-ceiling-must-deny")); !os.IsNotExist(err) {
+					t.Fatalf("restored read-only ceiling allowed touch; stat error = %v", err)
+				}
+				for _, callID := range gateCalls {
+					if _, err := a2.gateIDFor(childID, callID); err == nil {
+						t.Fatal("resolved gate remained indexed")
+					}
 				}
 				return
 			}
