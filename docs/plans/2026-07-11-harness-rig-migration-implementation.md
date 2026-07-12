@@ -4,7 +4,12 @@
 
 **Goal:** Migrate SWE from manual harness session, workspace, and subagent wiring to the final immutable rig API without retaining compatibility paths.
 
-**Architecture:** Define operator-primary, operator, and reviewer loops once, compose them into one rig owned by `SessionStoreFactory`, and create/restore sessions exclusively through the rig. Build tools, permissions, sandbox runners, and skills from per-loop bindings; use harness-managed delegation and native workspace checkpoints. Adapt the resulting `session.SessionController` to the already-migrated CLI contract.
+**Architecture:** Use one builder to define operator-primary, operator, and reviewer loops
+and create an immutable rig for each resolved `Open` (config and mismatch policy arrive at
+that boundary). Create/restore sessions exclusively through that rig. Build tools,
+permissions, sandbox runners, and skills from per-loop bindings; use harness-managed
+delegation and native workspace checkpoints. Adapt the resulting
+`session.SessionController` to the already-migrated CLI contract.
 
 **Tech Stack:** Go 1.26, harness rig/loop/session/tool APIs, fsstore, sessionstore, workspacestore, inference, sandbox, Bubble Tea CLI adapter.
 
@@ -19,6 +24,77 @@
   intentionally hides the journal lease, and deleting the ticker would regress collection.
 - Run all commands with `GOWORK=off`. Keep the repository's relative `replace` directives for local private modules.
 - Do not begin with production rewrites. Each task adds failing tests, proves the expected failure, implements one seam, verifies it, and commits.
+
+### Task 0: Land blocking harness metadata and offload-GC support
+
+**Repository:** `github.com/looprig/harness` (not SWE)
+
+**Files:**
+- Modify: `pkg/loop/definition.go`
+- Modify: `pkg/loop/definition_test.go`
+- Modify: `pkg/event/event.go`
+- Modify: `pkg/event/marshal.go`
+- Modify: `pkg/event/marshal_test.go`
+- Modify: `pkg/tools/subagent.go`
+- Modify: `pkg/tools/subagent_test.go`
+- Modify: `internal/sessionruntime/delegation.go`
+- Modify: `internal/sessionruntime/delegation_test.go`
+- Modify: `internal/sessionruntime/lifecycle.go`
+- Modify: `internal/sessionruntime/restore_constructor.go`
+- Modify: `internal/sessionruntime/session.go`
+- Modify: `internal/sessionruntime/lifecycle_test.go`
+- Modify: `pkg/rig/options.go`
+- Modify: `pkg/rig/rig_test.go`
+
+Do not start SWE Task 1 until this harness task is implemented, reviewed, tagged, and its
+commit/tag is recorded here.
+
+**Step 1: Write failing definition metadata tests**
+
+Pin final names such as `loop.WithDisplayName` and `loop.WithDescription` in a short harness
+design amendment. Display/description are immutable, defensively copied, fingerprinted, and
+restored. `LoopStarted` carries display name while its existing agent name remains the topology
+key. Managed Subagent catalogs render target display names/descriptions and resolve a selected
+display name to the allowed definition key; duplicate display aliases fail definition.
+
+Prove an `operator-primary` key displays as `operator`, operator/reviewer descriptions reach
+`Subagent.Info`, old events fall back to the topology key, and leaves stay delegate-free.
+
+**Step 2: Write failing rig-owned offload-GC tests**
+
+Approve and pin an explicit policy API, for example:
+
+```go
+rig.WithOffloadGC(rig.OffloadGCPolicy{
+    Interval: 5 * time.Minute,
+    Timeout:  time.Minute,
+})
+```
+
+Use a manual tick seam in tests. New and restored rig sessions must run
+`sessionstore.OpenObjectGC` only while their session lease is held, serialize with lease loss
+and shutdown, and stop/join before lease release. This is session offload GC, never workspace
+snapshot GC.
+
+**Step 3: Verify RED**
+
+```bash
+GOWORK=off go test -race ./pkg/loop ./pkg/rig ./internal/sessionruntime -run 'Test.*Display|Test.*DelegateCatalog|Test.*OffloadGC'
+```
+
+Expected: missing metadata and GC policy/lifecycle APIs.
+
+**Step 4: Implement and verify**
+
+Run focused tests, full unit/integration race, vet/security, and trimpath build. Commit in the
+harness repository:
+
+```bash
+git commit -m "feat(rig): own loop metadata and session object gc"
+```
+
+Release a harness tag containing this commit. Supporting restored-session collection is a new
+improvement: current SWE schedules its ticker only for new sessions.
 
 ### Task 1: Upgrade harness and CLI dependencies before using final symbols
 
@@ -37,14 +113,13 @@ var _ = loop.Define
 var _ session.SessionController
 var _ = event.ActiveLoopChanged{}
 var _ tui.Agent
+var _ = loop.WithDisplayName
+var _ = rig.WithOffloadGC
 ```
 
 The last assertion must use the migrated CLI interface, including `RootLoopID`, `ActiveLoopID`, and loop-targeted image capability.
 
-Add a harness lifecycle acceptance assertion (in the harness release process, not a SWE
-shim) proving orphan offload blobs for both new and restored rig sessions are collected
-under the held session lease. Record the exact harness issue/commit in this plan before
-implementation proceeds.
+Record the Task 0 harness commit/tag in this plan before updating dependencies.
 
 **Step 2: Verify RED**
 
@@ -95,6 +170,12 @@ git commit -m "build: upgrade harness rig and cli contracts"
 - Modify: `swarms/swe/confinement.go:64-102`
 - Modify: `swarms/swe/confinement_test.go`
 - Modify: `swarms/swe/skills_wiring_test.go`
+- Modify: `swarms/swe/security.go`
+- Modify: `swarms/swe/security_test.go`
+- Modify: `swarms/swe/errors.go`
+- Modify: `swarms/swe/errors_test.go`
+- Modify: `swarms/swe/model.go`
+- Modify: `swarms/swe/model_test.go`
 
 **Step 1: Write failing binding-isolation tests**
 
@@ -152,6 +233,7 @@ git commit -m "refactor(swe): define tools per loop binding"
 - Modify: `swarms/swe/greeting.go`
 - Modify: `swarms/swe/greeting_test.go`
 - Modify: `swarms/swe/runtime_context.go`
+- Modify: `swarms/swe/runtime_context_test.go`
 - Delete: `swarms/swe/spawner.go`
 - Delete: `swarms/swe/spawner_test.go`
 - Modify: `swarms/swe/acceptance_test.go`
@@ -161,6 +243,7 @@ git commit -m "refactor(swe): define tools per loop binding"
 Tests must prove:
 
 - definitions are named `operator-primary`, `operator`, `reviewer`;
+- primer display name/description remain the current operator identity/catalog text;
 - only `operator-primary` is a primer and active primer;
 - only `operator-primary` declares delegates;
 - primer-minus-Subagent has the same tool policy/prompt identity as operator leaf;
@@ -169,6 +252,8 @@ Tests must prove:
 - `wait=true` returns the child final result;
 - `wait=false` returns delegate/request IDs, followed by status, send follow-up, wait, and interrupt;
 - quota/depth errors remain typed and no child is registered on refusal;
+- the existing `Depth: 2` admits exactly one direct primary-to-leaf spawn (`Depth: 1`
+  remains a negative regression);
 - async requests resolve independently by request ID;
 - restored delegates retain ownership and can receive follow-up.
 
@@ -214,12 +299,15 @@ git commit -m "refactor(swe): declare managed delegate topology"
 - Modify: `swarms/swe/persistence_integration_test.go`
 - Modify: `swarms/swe/swarm.go`
 - Modify: `swarms/swe/fingerprint_test.go`
+- Modify: `swarms/swe/operator_eval_integration_test.go`
 
 **Step 1: Write failing rig lifecycle tests**
 
 Using actual fsstore integration fixtures, prove:
 
-- one `SessionStoreFactory` builds one immutable rig;
+- one shared `SessionStoreFactory` provides stores to the single rig-builder path;
+- each `Open` builds one immutable rig from that call's resolved client/config/root and
+  mismatch flag; a later differing config is not served by a cached prior rig;
 - new session ID is read from the returned controller, not minted by SWE;
 - resume calls `Rig.RestoreSession` with the selected ID;
 - idle native checkpoint produces `WorkspaceCheckpointed` without a watcher;
@@ -228,6 +316,8 @@ Using actual fsstore integration fixtures, prove:
 - persistence paths outside the workspace pass; overlap fails at `rig.Define`;
 - close/shutdown releases leases exactly once;
 - list/catalog behavior remains unchanged.
+- exported `swe.New` uses the same rig builder over ephemeral memstore-backed session and
+  workspace stores; it neither calls a legacy constructor nor loses workspace tools.
 
 Add a deletion guard that rejects `watchSessionEvents`, `CheckpointWorkspace`, `session.New`, `session.Restore`, manual `Acquire`, and session lifecycle options in SWE production.
 
@@ -241,7 +331,9 @@ Expected: failures while manual factory/watcher code remains.
 
 **Step 3: Implement rig ownership**
 
-At factory construction, open fsstore and create session/workspace facades. Build definitions and call `rig.Define` with:
+At factory construction, open fsstore and create shared session/workspace facades. During
+each `Open`, resolve client/config/root plus `AllowConfigMismatch`, build definitions, and call
+`rig.Define` with:
 
 - `WithLoops`, `WithPrimers`, `WithActivePrimer`;
 - `WithSessionStore`;
@@ -251,12 +343,17 @@ At factory construction, open fsstore and create session/workspace facades. Buil
 - `WithDelegationLimits` matching current caps;
 - `WithFingerprintFields` and `WithCeilingFactory`;
 - `WithAllowConfigMismatch` only for the existing explicit flag.
+- the Task 0 rig-owned offload-GC option with SWE's current interval/timeout.
 
 `Open(new)` calls `Rig.NewSession`; `Open(resume)` calls `Rig.RestoreSession`. Delete ID minting, session/root lease handling, journal/appender construction, per-session GC ticker, `watchSessionEvents`, checkpoint timeout, and manual checkpoint calls.
 
 Keep only process-level fsstore close and catalog/list/replay reads not provided by the live
 session contract. Delete `scheduleGC` only after the precondition's rig-owned replacement is
 verified for new and restored sessions.
+
+For `swe.New`, create an ephemeral `storage/memstore` composite and corresponding session and
+workspace stores, then invoke the same rig builder with exclusive current-checkout placement.
+Delete the headless `session.New` path; update eval and runtime-skill tests to prove parity.
 
 **Step 4: Verify GREEN**
 
@@ -289,13 +386,15 @@ git commit -m "refactor(swe): let rig own session persistence"
 Pin the approved CLI contract:
 
 - fresh and restored `RootLoopID` use the initial active primer's first zero-parent `LoopStarted`;
-- `ActiveLoopID` starts from `sess.ActiveLoop().ID()` and tracks durable changes;
-- subscription is established before active baseline so setup-window changes are reconciled;
-- per-loop running state derives displayed active status;
+- `ActiveLoopID` directly returns `sess.ActiveLoop().ID()`; the approved CLI owns durable
+  selection reconciliation and per-loop running state;
 - focus is initialized/reopened from active but later active changes do not steal it (CLI-side assertion);
 - `AcceptsImages(loopID)` reads the current loop model; heterogeneous loops and `Controller.Change` update immediately;
 - replay preserves session order for the root transcript;
-- gate responses call `SessionController.RespondGate`;
+- replay and the returned live subscription fold `GateOpened`/`GateResolved` into one
+  adapter-owned ToolExecutionID-to-GateID index before forwarding events;
+- gate responses use that index with `SessionController.RespondGate`, including restored
+  open gates and resolved-gate removal;
 - `Close` calls `Shutdown` once and does not cancel a second root or persistence watcher.
 
 **Step 2: Verify RED**
@@ -308,9 +407,14 @@ Expected: compile failures for cached primary/static image fields and pointer to
 
 **Step 3: Implement the adapter**
 
-Store a `session.SessionController`, replay dependency, and stable root ID. Remove `rootCtx`, cancel, teardown ticker, cached image bool, restored primary ID, and direct constructor helpers.
+Store a `session.SessionController`, replay dependency, stable root ID, and concurrency-safe
+gate index. Remove `rootCtx`, cancel, teardown ticker, cached image bool, restored primary ID,
+and direct constructor helpers.
 
-Map methods to final contracts. Image capability must be target-loop-specific and dynamic. Use one all-loop live subscription; do not resubscribe on active/focus changes.
+Map methods to final contracts. Image capability must be target-loop-specific and dynamic.
+`ActiveLoopID` is a direct controller query. Return one wrapping subscription that indexes gate
+events and forwards them; do not open an adapter-owned second subscription. CLI owns
+subscribe-before-baseline, active/focus/running folding.
 
 **Step 4: Verify GREEN**
 
@@ -418,7 +522,9 @@ git commit -m "test(swe): cover restored rig and async delegates"
 Add an AST/source guard under `swarms/swe` that fails on production uses/declarations of:
 
 - `loop.Config`, `loop.ToolSet`;
-- `session.New`, `session.Restore`, session construction options;
+- `session.New`, `session.Restore`, concrete `*session.Session`, `session.Option`,
+  `session.Limits`, `session.ConfigFingerprintFields`, and session construction options
+  including `WithLimits`, `WithCeiling`, and `WithConfigFingerprintFields`;
 - `swarmSpawner`, `subagentRunner`, `RunSubagent`, custom `NewSubagent`;
 - `watchSessionEvents`, idle `CheckpointWorkspace`, manual session lease/appender/GC wiring;
 - `PrimaryLoopID`, static zero-argument `AcceptsImages`.
@@ -428,10 +534,16 @@ It must ignore comments/strings and respect import alias shadowing.
 **Step 2: Verify searches**
 
 ```bash
-rg -n 'loop\.Config|loop\.ToolSet|session\.(New|Restore)|WithWorkspaceStore|watchSessionEvents|CheckpointWorkspace|swarmSpawner|RunSubagent|PrimaryLoopID|AcceptsImages\(\)' --glob '*.go' --glob '!vendor/**'
+rg -n 'loop\.Config|loop\.ToolSet|\*session\.Session|session\.(New|Restore|Option|Limits|ConfigFingerprintFields)|WithLimits|WithCeiling|WithConfigFingerprintFields|WithWorkspaceStore|watchSessionEvents|CheckpointWorkspace|swarmSpawner|subagentRunner|RunSubagent|PrimaryLoopID|AcceptsImages\(\)' --glob '*.go' --glob '!vendor/**'
 ```
 
 Expected: no production hits; any test hit is an intentional negative fixture.
+
+The migration inventory must explicitly update stale production/tests/comments in
+`swarms/swe/errors.go`, `security.go`, `model.go`, `runtime_context_test.go`,
+`operator_eval_integration_test.go`, `runtime_skills_integration_test.go`, and every test
+currently constructing session options or direct sessions. Do not leave this work to a
+search-only final task.
 
 **Step 3: Run all gates**
 

@@ -60,15 +60,23 @@ Use three definitions:
 
 | Definition | Primer | Delegates | Purpose |
 |---|---:|---|---|
-| `operator-primary` | yes, active | `operator`, `reviewer` | User-facing coding loop with managed Subagent |
+| `operator-primary` | yes, active | `operator`, `reviewer` | Coding-loop topology key; display identity remains `operator` |
 | `operator` | no | none | Delegate leaf for implementation/investigation |
 | `reviewer` | no | none | Read-only critique leaf |
 
-The separate internal name prevents definition-wide delegation from accidentally giving a spawned operator another Subagent capability. The primer retains the operator's user-visible role, system prompt, greeting, and tool policy. Tests compare primer-minus-managed-Subagent with the operator leaf so the two cannot drift.
+The separate key prevents definition-wide delegation from accidentally giving a spawned
+operator another Subagent capability. A blocking harness prerequisite adds immutable display
+name and description metadata to definitions: the primer key is `operator-primary`, while its
+display name remains `operator`. `LoopStarted` exposes both values and CLI renders the display
+name. Managed delegate catalog entries use the target definition's display name and existing
+operator/reviewer description. Tests compare primer-minus-managed-Subagent with the operator
+leaf so the two cannot drift.
 
 ```go
 primary, err := loop.Define(
     loop.WithName("operator-primary"),
+    loop.WithDisplayName("operator"),
+    loop.WithDescription(operator.Description),
     loop.WithInference(client, model),
     loop.WithSystem(operatorSystem),
     loop.WithTools(primaryToolDefinitions...),
@@ -119,7 +127,13 @@ No resolved tool or permission instance is shared between primer, delegate, sess
 
 - `sessionstore.Store` for journal/catalog/leases;
 - `workspacestore.Store` for workspace snapshots;
-- one immutable `*rig.Rig` for the selected SWE config/model catalog.
+- shared store facades used by immutable rigs.
+
+`Config`, provider/model catalog, working directory, and the resume-only mismatch flag arrive
+at `Open`, not at `NewSessionStoreFactory`. Each `Open` therefore builds one immutable rig from
+that resolved input and immediately calls `NewSession` or `RestoreSession`. `/clear` builds a
+new rig with the same process config. Do not cache a rig across differing configs. This keeps
+one composition path without pretending the rig is process-global.
 
 SWE currently edits the process working directory. Preserve that behavior with an
 **exclusive** fixed-root placement; silently switching to per-session roots would make the
@@ -138,7 +152,7 @@ r, err := rig.Define(
         Priority: rig.SnapshotBestEffort,
         Timeout:  60 * time.Second,
     }),
-    rig.WithDelegationLimits(rig.DelegationLimits{Depth: 1, Quota: operatorSpawnQuota}),
+    rig.WithDelegationLimits(rig.DelegationLimits{Depth: 2, Quota: operatorSpawnQuota}),
     rig.WithFingerprintFields(fields),
     rig.WithCeilingFactory(ceilingFactory),
 )
@@ -186,16 +200,32 @@ migration.
 SWE implements the approved CLI contract over `session.SessionController`:
 
 - `RootLoopID`: first durable zero-parent `LoopStarted` (the active primer is started first), stable across later active changes and restore;
-- `ActiveLoopID`: `sess.ActiveLoop().ID()` baseline plus durable `ActiveLoopChanged` folding;
+- `ActiveLoopID`: a direct `sess.ActiveLoop().ID()` query;
 - focus: owned by CLI; initial/reopen focus follows active, later active changes do not steal focus;
-- per-loop running state: fold all loop terminals/starts, then derive active status;
+- per-loop running state and active-selection reconciliation are owned by CLI from the single
+  stream returned by SWE;
 - image capability: query `sess.Loop(loopID).Model().Caps.AcceptsImages` for the focused submission target each time;
 - `Submit` routes to active; `SubmitToLoop` routes to focus;
-- gate conveniences translate the UI call ID to `SessionController.RespondGate`;
+- gate conveniences use an adapter-owned index: replay and the forwarded live stream fold
+  `GateOpened` (`Gate.ID` and `Gate.Subject.ToolExecutionID`) and `GateResolved`, then call
+  `SessionController.RespondGate` with the indexed ID;
 - replay uses the journal-backed enduring stream and does not create a second live subscription;
 - `Close` maps to `Shutdown`.
 
-The CLI dependency/version migration lands first. SWE does not temporarily emulate removed `PrimaryLoopID` or static `AcceptsImages`.
+The adapter does not open a second subscription. Its subscription wrapper updates the gate
+index before forwarding each event; `ReplayBacklog` seeds the same index before returning
+history. Tests cover opened-before-request ordering and restored open/resolved gates.
+
+The CLI dependency/version migration lands first. SWE does not temporarily emulate removed
+`PrimaryLoopID` or static `AcceptsImages`.
+
+## Headless API
+
+The exported `swe.New` path remains supported for evals and tests. It uses the same definition
+and rig builder over an ephemeral `storage/memstore` composite, `sessionstore.Store`, and
+`workspacestore.Store`, with exclusive current-checkout placement. The returned owner shuts
+down the session; the in-memory stores need no process teardown. There is no direct
+`session.New` fallback and no second topology builder.
 
 ## Error handling
 
@@ -205,6 +235,8 @@ The CLI dependency/version migration lands first. SWE does not temporarily emula
 - Workspace busy/lost/recovery and checkpoint faults remain public typed errors.
 - Tool binding or permission factory failures abort session construction transactionally.
 - Config mismatch rejects restore unless the existing explicit SWE escape hatch maps to `rig.WithAllowConfigMismatch`.
+- Because mismatch policy is immutable rig configuration, `Open` builds the rig after reading
+  `SessionSelector`; it never mutates or reuses a differently configured rig.
 
 ## Deletions and non-goals
 
@@ -228,8 +260,11 @@ Do not add:
 
 ## Acceptance criteria
 
-- One immutable rig builds all new and restored SWE sessions.
+- One rig-builder path creates an immutable rig for each resolved new/restore open.
+- The public headless `swe.New` path uses the same rig builder over ephemeral stores.
 - Only `operator-primary` can delegate; operator/reviewer children cannot.
+- A direct child succeeds under `Depth: 2`; the display identity remains `operator` and
+  managed catalog descriptions remain intact.
 - Sync and async managed Subagent flows, follow-up, status, wait, interrupt, mode validation, quota, and restore are covered.
 - Tool/permission/sandbox instances are fresh per loop and use the correct bound root.
 - Idle checkpoint and restore work without a watcher.
