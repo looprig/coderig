@@ -3,8 +3,10 @@ package swe
 import (
 	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -20,6 +22,7 @@ const (
 	toolsImportPath   = "github.com/looprig/harness/pkg/tools"
 	journalImportPath = "github.com/looprig/harness/pkg/journal"
 	sessionStorePath  = "github.com/looprig/harness/pkg/sessionstore"
+	storageImportPath = "github.com/looprig/storage"
 )
 
 var forbiddenIdentifiers = map[string]string{
@@ -106,6 +109,7 @@ func legacySourceDiagnostics(filename string, source []byte) []string {
 	if err != nil {
 		return []string{fmt.Sprintf("%s: parse: %v", filename, err)}
 	}
+	typeInfo := guardTypeInfo(fset, file)
 
 	imports := make(map[string]string)
 	dotImports := make(map[string]bool)
@@ -159,7 +163,7 @@ func legacySourceDiagnostics(filename string, source []byte) []string {
 					report(n.Sel.Pos(), legacy)
 				}
 			}
-			if n.Sel.Name == "Acquire" && selectorEndsWith(n.X, "leases") {
+			if n.Sel.Name == "Acquire" && isManualLeaseCollaborator(typeInfo.TypeOf(n.X)) {
 				report(n.Sel.Pos(), "manual session lease acquisition")
 			}
 		case *ast.StarExpr:
@@ -175,6 +179,27 @@ func legacySourceDiagnostics(filename string, source []byte) []string {
 		case *ast.FuncDecl:
 			if n.Name.Name == "AcceptsImages" && fieldCount(n.Type.Params) == 0 {
 				report(n.Name.Pos(), "static zero-argument AcceptsImages declaration")
+			}
+		case *ast.ValueSpec:
+			for i, name := range n.Names {
+				if name.Name != "AcceptsImages" {
+					continue
+				}
+				if fn, ok := n.Type.(*ast.FuncType); ok && fieldCount(fn.Params) == 0 {
+					report(name.Pos(), "static zero-argument AcceptsImages variable")
+					continue
+				}
+				if i < len(n.Values) {
+					if fn, ok := n.Values[i].(*ast.FuncLit); ok && fieldCount(fn.Type.Params) == 0 {
+						report(name.Pos(), "static zero-argument AcceptsImages variable")
+					}
+				}
+			}
+		case *ast.TypeSpec:
+			if n.Name.Name == "AcceptsImages" {
+				if fn, ok := n.Type.(*ast.FuncType); ok && fieldCount(fn.Params) == 0 {
+					report(n.Name.Pos(), "static zero-argument AcceptsImages function type")
+				}
 			}
 		case *ast.Field:
 			for _, name := range n.Names {
@@ -199,15 +224,65 @@ func selectorFromPackage(expr ast.Expr, imports map[string]string, importPath, m
 	return ok && qualifier.Obj == nil && imports[qualifier.Name] == importPath
 }
 
-func selectorEndsWith(expr ast.Expr, name string) bool {
-	switch expr := expr.(type) {
-	case *ast.Ident:
-		return expr.Name == name
-	case *ast.SelectorExpr:
-		return expr.Sel.Name == name
+type guardImporter struct{ standard types.Importer }
+
+func (i guardImporter) Import(path string) (*types.Package, error) {
+	switch path {
+	case storageImportPath:
+		pkg := types.NewPackage(path, "storage")
+		anyType := types.Universe.Lookup("any").Type()
+		params := types.NewTuple(types.NewVar(token.NoPos, pkg, "ctx", anyType), types.NewVar(token.NoPos, pkg, "name", anyType))
+		results := types.NewTuple(types.NewVar(token.NoPos, pkg, "lease", anyType), types.NewVar(token.NoPos, pkg, "err", anyType))
+		acquire := types.NewFunc(token.NoPos, pkg, "Acquire", types.NewSignatureType(nil, nil, nil, params, results, false))
+		iface := types.NewInterfaceType([]*types.Func{acquire}, nil)
+		iface.Complete()
+		obj := types.NewTypeName(token.NoPos, pkg, "Leaser", nil)
+		types.NewNamed(obj, iface, nil)
+		pkg.Scope().Insert(obj)
+		pkg.MarkComplete()
+		return pkg, nil
+	case journalImportPath:
+		pkg := types.NewPackage(path, "journal")
+		obj := types.NewTypeName(token.NoPos, pkg, "LeaseManager", nil)
+		types.NewNamed(obj, types.NewStruct(nil, nil), nil)
+		pkg.Scope().Insert(obj)
+		pkg.MarkComplete()
+		return pkg, nil
 	default:
+		if i.standard != nil {
+			if pkg, err := i.standard.Import(path); err == nil {
+				return pkg, nil
+			}
+		}
+		pkg := types.NewPackage(path, filepath.Base(path))
+		pkg.MarkComplete()
+		return pkg, nil
+	}
+}
+
+func guardTypeInfo(fset *token.FileSet, file *ast.File) *types.Info {
+	info := &types.Info{
+		Types:      make(map[ast.Expr]types.TypeAndValue),
+		Uses:       make(map[*ast.Ident]types.Object),
+		Defs:       make(map[*ast.Ident]types.Object),
+		Selections: make(map[*ast.SelectorExpr]*types.Selection),
+	}
+	config := &types.Config{Importer: guardImporter{standard: importer.Default()}, Error: func(error) {}}
+	_, _ = config.Check("guard/fixture", fset, []*ast.File{file}, info)
+	return info
+}
+
+func isManualLeaseCollaborator(t types.Type) bool {
+	if pointer, ok := t.(*types.Pointer); ok {
+		t = pointer.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj().Pkg() == nil {
 		return false
 	}
+	path := named.Obj().Pkg().Path()
+	name := named.Obj().Name()
+	return (path == storageImportPath && name == "Leaser") || (path == journalImportPath && name == "LeaseManager")
 }
 
 func calledName(expr ast.Expr) string {
@@ -302,6 +377,44 @@ func f(agent interface{ AcceptsImages() bool }) { _ = agent.AcceptsImages() }
 			source: `package fixture
 func f(agent interface{ AcceptsImages(string) bool }) { _ = agent.AcceptsImages("child") }
 `,
+		},
+		{
+			name: "unrelated shadowed leases acquire",
+			source: `package fixture
+type unrelated struct{}
+func (*unrelated) Acquire() {}
+func f() { leases := &unrelated{}; leases.Acquire() }
+`,
+		},
+		{
+			name: "renamed storage leaser acquire",
+			source: `package fixture
+import store "github.com/looprig/storage"
+func f(leaseStore store.Leaser) { _, _ = leaseStore.Acquire(nil, "session") }
+`,
+			wantLegacy: true,
+		},
+		{
+			name: "dot imported storage leaser acquire",
+			source: `package fixture
+import . "github.com/looprig/storage"
+func f(leaseStore Leaser) { _, _ = leaseStore.Acquire(nil, "session") }
+`,
+			wantLegacy: true,
+		},
+		{
+			name: "zero argument image capability variable",
+			source: `package fixture
+var AcceptsImages = func() bool { return true }
+`,
+			wantLegacy: true,
+		},
+		{
+			name: "zero argument image capability function type",
+			source: `package fixture
+type AcceptsImages func() bool
+`,
+			wantLegacy: true,
 		},
 	}
 

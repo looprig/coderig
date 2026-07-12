@@ -216,7 +216,8 @@ SWE implements the approved CLI contract over `session.SessionController`:
 
 The adapter does not open a second subscription. Its subscription wrapper updates the gate
 index before forwarding each event. Restore performs one unnarrowed cold replay to seed gates
-from every loop, then returns only the root transcript projection to CLI. Tests cover
+and materialize Enduring history from every loop, then returns that all-loop backlog to CLI.
+Tests cover
 opened-before-request ordering, identical tool-execution IDs in different loops, and restored
 delegate-loop open/resolved gates.
 

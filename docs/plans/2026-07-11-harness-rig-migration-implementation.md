@@ -459,9 +459,9 @@ Expected: compile failures for cached primary/static image fields and pointer to
 
 **Step 3: Implement the adapter**
 
-Store a `session.SessionController`, replay dependency, stable root ID, and concurrency-safe
+Store a `session.SessionController`, replay dependency, and concurrency-safe
 forward/reverse gate indexes. Restore opens one unnarrowed cold replay to fold gates for every
-loop, then filters/materializes the root transcript returned to CLI. Remove `rootCtx`, cancel,
+loop and materializes the all-loop Enduring backlog returned to CLI. Remove `rootCtx`, cancel,
 teardown ticker, cached image bool, restored primary ID, and direct constructor helpers.
 
 Map methods to final contracts. Image capability must be target-loop-specific and dynamic.
