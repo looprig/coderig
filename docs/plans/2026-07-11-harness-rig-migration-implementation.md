@@ -166,7 +166,7 @@ var _ = loop.WithDisplayName
 var _ = rig.WithOffloadGC
 ```
 
-The last assertion must use the migrated CLI interface, including `RootLoopID`, `ActiveLoopID`, and loop-targeted image capability.
+The last assertion must use the migrated CLI interface, including `ActiveLoopID` and loop-targeted image capability.
 
 Record the Task 0 harness commit/tag in this plan before updating dependencies.
 
@@ -437,12 +437,11 @@ git commit -m "refactor(swe): let rig own session persistence"
 
 Pin the approved CLI contract:
 
-- fresh and restored `RootLoopID` use the initial active primer's first zero-parent `LoopStarted`;
 - `ActiveLoopID` directly returns `sess.ActiveLoop().ID()`; the approved CLI owns durable
   selection reconciliation and per-loop running state;
 - focus is initialized/reopened from active but later active changes do not steal it (CLI-side assertion);
 - `AcceptsImages(loopID)` reads the current loop model; heterogeneous loops and `Controller.Change` update immediately;
-- replay preserves session order for the root transcript;
+- replay preserves session order for all-loop Enduring history;
 - replay and the returned live subscription fold `GateOpened`/`GateResolved` into one
   adapter-owned `(LoopID, ToolExecutionID)`-to-GateID index plus reverse GateID removal map
   before forwarding events;

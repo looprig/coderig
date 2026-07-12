@@ -234,10 +234,12 @@ func TestSessionStoreRoundTrip(t *testing.T) {
 	if !hasType(backlog, event.TurnStarted{}) {
 		t.Errorf("resumed backlog missing TurnStarted: %v", typeNames(backlog))
 	}
-	// ReplayBacklog is intentionally root-loop transcript only; session-scoped restore
-	// brackets remain in the durable all-session journal and are not painted by the TUI.
-	if got := primaryLoopAgentName(backlog, a2.RootLoopID()); got != operatorPrimaryName {
-		t.Errorf("restored root-loop LoopStarted AgentName = %q, want %q (operator-primary primer)", got, operatorPrimaryName)
+	// ReplayBacklog includes all-loop Enduring history, including restore brackets.
+	if !hasType(backlog, event.RestoreStarted{}) {
+		t.Errorf("restored all-loop backlog missing RestoreStarted: %v", typeNames(backlog))
+	}
+	if got := primaryLoopAgentName(backlog, a2.ActiveLoopID()); got != operatorPrimaryName {
+		t.Errorf("restored active primer LoopStarted AgentName = %q, want %q", got, operatorPrimaryName)
 	}
 
 	drainTurn(t, a2, "continue")

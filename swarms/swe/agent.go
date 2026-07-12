@@ -29,13 +29,8 @@ type sessionAgent struct {
 	sess     session.SessionController
 	replayer journal.EventReplayer // nil for a new/headless session with no replay
 
-	// rootLoopID is the stable root loop used for transcript attribution: the first durable
-	// zero-parent LoopStarted (the active primer is started first). It is captured once at
-	// construction and never changes as the active loop is later re-selected or the session
-	// is restored.
-	rootLoopID uuid.UUID
-	isRestore  bool
-	backlog    []event.Event // restored root-loop Enduring transcript; nil for new/headless
+	isRestore bool
+	backlog   []event.Event // restored all-loop Enduring history; nil for new/headless
 
 	// mu guards the gate indexes below. foldGate mutates them from the cold replay (at
 	// construction) and from every Subscribe forwarding goroutine; the gate-reply trio reads
@@ -62,12 +57,9 @@ type replayOpener interface {
 	OpenEventReplayer(uuid.UUID, sessionstore.ReplayRequest) (journal.EventReplayer, error)
 }
 
-// newSessionAgent wraps a live rig session controller as a tui.Agent. For a NEW session the
-// root loop is the active primer (started first), captured directly. For a RESTORED session
-// it performs ONE unnarrowed cold replay: it folds every loop's gate events into the index
-// (so a restored delegate loop's open gate is answerable), derives the root loop id from the
-// first zero-parent LoopStarted, and materializes the root loop's Enduring transcript for
-// ReplayBacklog. store supplies the replayer; ctx bounds the cold replay.
+// newSessionAgent wraps a live rig session controller as a tui.Agent. A restored session
+// performs one unnarrowed cold replay, folding every loop's gate events and materializing
+// all-loop Enduring history for uniform CLI projections.
 func newSessionAgent(ctx context.Context, sess session.SessionController, store replayOpener, isRestore bool) (*sessionAgent, error) {
 	a := &sessionAgent{
 		sess:      sess,
@@ -77,7 +69,7 @@ func newSessionAgent(ctx context.Context, sess session.SessionController, store 
 	}
 	if replayer, err := store.OpenEventReplayer(sess.SessionID(), sessionstore.ReplayRequest{}); err != nil {
 		if isRestore {
-			return nil, err // a restore cannot fold gates or derive the root without the replay
+			return nil, err // a restore cannot fold gates or rebuild projections without replay
 		}
 	} else {
 		a.replayer = replayer
@@ -88,13 +80,11 @@ func newSessionAgent(ctx context.Context, sess session.SessionController, store 
 		}
 		return a, nil
 	}
-	a.rootLoopID = sess.ActiveLoop().ID()
 	return a, nil
 }
 
 // coldReplay drains the whole durable log once (all loops), folding every gate event into
-// the index, capturing the first zero-parent LoopStarted as the root loop id, and collecting
-// the root loop's Enduring events as the restore backlog.
+// the index and collecting all Enduring events in session order as the restore backlog.
 func (a *sessionAgent) coldReplay(ctx context.Context) error {
 	if a.replayer == nil {
 		return nil
@@ -114,11 +104,7 @@ func (a *sessionAgent) coldReplay(ctx context.Context) error {
 			return err // typed fail-secure error (object missing/corrupt) — surfaced unchanged
 		}
 		a.foldGate(ev)
-		header := ev.EventHeader()
-		if started, ok := ev.(event.LoopStarted); ok && started.Cause.Coordinates.LoopID.IsZero() && a.rootLoopID.IsZero() {
-			a.rootLoopID = header.LoopID
-		}
-		if !a.rootLoopID.IsZero() && ev.Class() == event.Enduring && header.LoopID == a.rootLoopID {
+		if ev.Class() == event.Enduring {
 			a.backlog = append(a.backlog, ev)
 		}
 	}
@@ -158,11 +144,6 @@ func (a *sessionAgent) SubmitToLoop(ctx context.Context, loopID uuid.UUID, block
 	return a.sess.SubmitToLoop(ctx, loopID, blocks)
 }
 
-// RootLoopID returns the stable root loop used for transcript attribution — the first
-// durable zero-parent LoopStarted, captured at construction and stable across active-loop
-// changes and restore.
-func (a *sessionAgent) RootLoopID() uuid.UUID { return a.rootLoopID }
-
 // ActiveLoopID returns the session's current default input target directly.
 func (a *sessionAgent) ActiveLoopID() uuid.UUID { return a.sess.ActiveLoop().ID() }
 
@@ -201,7 +182,7 @@ func (a *sessionAgent) Subscribe(filter event.EventFilter) (event.Subscription, 
 	return sub, nil
 }
 
-// ReplayBacklog returns the RESTORED session's root-loop Enduring transcript materialized at
+// ReplayBacklog returns the restored session's all-loop Enduring history materialized at
 // construction, in session order. A NEW/headless session returns nil (the CLI skips the
 // repaint). ctx is accepted for the contract; the backlog was folded once at restore.
 func (a *sessionAgent) ReplayBacklog(_ context.Context) ([]event.Event, error) {

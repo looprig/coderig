@@ -192,12 +192,9 @@ func TestNewWithClientBuildsRootPrimer(t *testing.T) {
 
 	var _ tui.Agent = agent
 
-	root := agent.RootLoopID()
-	if root.IsZero() {
-		t.Fatal("RootLoopID() is zero")
-	}
-	if agent.ActiveLoopID() != root {
-		t.Errorf("ActiveLoopID() = %v, want RootLoopID %v (the active primer is the root)", agent.ActiveLoopID(), root)
+	active := agent.ActiveLoopID()
+	if active.IsZero() {
+		t.Fatal("ActiveLoopID() is zero")
 	}
 
 	started := swarmFirstRootLoop(t, agent.SessionID())
@@ -210,8 +207,8 @@ func TestNewWithClientBuildsRootPrimer(t *testing.T) {
 	if started.Description != operator.Description {
 		t.Errorf("root loop Description = %q, want operator.Description", started.Description)
 	}
-	if started.LoopID != root {
-		t.Errorf("root LoopStarted LoopID = %v, want RootLoopID %v", started.LoopID, root)
+	if started.LoopID != active {
+		t.Errorf("primer LoopStarted LoopID = %v, want active %v", started.LoopID, active)
 	}
 }
 

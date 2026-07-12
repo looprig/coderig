@@ -3,7 +3,7 @@
 // exposes (role prompt + its own toolset builder), and the deterministic order
 // the catalog is presented in. Tool validation, the prompt catalog, and the
 // greeting all read the Registry; nothing here drives a loop or owns identity,
-// the model, or the full loop.Config — the swarm assembles those.
+// the model, or a bound loop definition — the swarm assembles those.
 package swe
 
 import (
@@ -75,7 +75,7 @@ type Config struct {
 // ModelFactory yields the swarm's shared, secret-free inference.Model identity (provider/
 // endpoint/model/sampling). Post-split it carries NO secret and NO system prompt: the
 // connection secret is bound to the Client once at auto.New, and each agent's finished
-// system prompt is set on loop.Config.System (and inference.Request.System), never on the model.
+// system prompt is set on the loop definition (and inference.Request.System), never on the model.
 type ModelFactory func() inference.Model
 
 // AgentCatalogEntry is the public, lookup-free view of an agent: just the name

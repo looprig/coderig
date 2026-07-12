@@ -60,7 +60,7 @@ func (e *ModelCatalogError) Unwrap() error { return e.Cause }
 // modelResolver is the narrow seam the swarm depends on to choose a model per use, instead
 // of threading the whole catalog through session logic. Its accessors return secret-free
 // inference.Model identities (the connection secret is bound to the Client at auto.New; each
-// agent's system prompt rides loop.Config.System), so a resolved or logged value never
+// the bound loop definition carries the agent's system prompt), so a resolved or logged value never
 // carries an API key.
 type modelResolver interface {
 	// standardModel returns the identity for normal operator/subagent turns. ok is false

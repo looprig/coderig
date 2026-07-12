@@ -201,13 +201,13 @@ migration.
 
 SWE implements the approved CLI contract over `session.SessionController`:
 
-- `RootLoopID`: first durable zero-parent `LoopStarted` (the active primer is started first), stable across later active changes and restore;
 - `ActiveLoopID`: a direct `sess.ActiveLoop().ID()` query;
 - focus: owned by CLI; initial/reopen focus follows active, later active changes do not steal focus;
 - per-loop running state and active-selection reconciliation are owned by CLI from the single
   stream returned by SWE;
 - image capability: query `sess.Loop(loopID).Model().Caps.AcceptsImages` for the focused submission target each time;
 - `Submit` routes to active; `SubmitToLoop` routes to focus;
+- restored replay materializes all-loop Enduring history for uniform CLI projections;
 - gate conveniences use an adapter-owned index keyed by `(LoopID, ToolExecutionID)`: replay
   and the forwarded live stream fold `GateOpened`, with a reverse `GateID` index for
   `GateResolved`, then call `SessionController.RespondGate` with the indexed ID;

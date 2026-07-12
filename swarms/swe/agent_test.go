@@ -3,6 +3,7 @@ package swe
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +23,12 @@ import (
 	"github.com/looprig/inference"
 )
 
+func TestSessionAgentHasNoRootLoopContract(t *testing.T) {
+	if _, ok := reflect.TypeOf((*sessionAgent)(nil)).MethodByName("RootLoopID"); ok {
+		t.Fatal("sessionAgent still exposes RootLoopID")
+	}
+}
+
 // Compile-time proof that *sessionAgent satisfies the CLI's tui.Agent surface.
 var _ tui.Agent = (*sessionAgent)(nil)
 
@@ -29,8 +36,7 @@ var _ tui.Agent = (*sessionAgent)(nil)
 // ignores it for a NEW session (only a restore requires the replayer).
 var errNoReplay = errors.New("no replay for a new session")
 
-// fakeReplayOpener returns no replayer, exercising the new-session path (rootLoopID from the
-// active loop; ReplayBacklog nil).
+// fakeReplayOpener returns no replayer, exercising the new-session path (ReplayBacklog nil).
 type fakeReplayOpener struct{}
 
 func (fakeReplayOpener) OpenEventReplayer(uuid.UUID, sessionstore.ReplayRequest) (journal.EventReplayer, error) {
@@ -169,23 +175,18 @@ func gateOpened(loopID, toolExecID, gateID uuid.UUID) event.GateOpened {
 	}
 }
 
-// TestRootLoopIDFromActiveOnNew proves a NEW session's RootLoopID is the active primer's loop
-// id, captured at construction and stable across a later active-loop change.
-func TestRootLoopIDFromActiveOnNew(t *testing.T) {
+func TestActiveLoopIDTracksControllerSelection(t *testing.T) {
 	t.Parallel()
 	a, fc, rootID, otherID := newFakeAgent(t)
 
-	if got := a.RootLoopID(); got != rootID {
-		t.Fatalf("RootLoopID() = %v, want the active primer %v", got, rootID)
+	if got := a.ActiveLoopID(); got != rootID {
+		t.Fatalf("ActiveLoopID() = %v, want the active primer %v", got, rootID)
 	}
 	if err := fc.SetActiveLoop(context.Background(), otherID); err != nil {
 		t.Fatalf("SetActiveLoop error = %v", err)
 	}
 	if got := a.ActiveLoopID(); got != otherID {
 		t.Errorf("ActiveLoopID() = %v, want %v after switch", got, otherID)
-	}
-	if got := a.RootLoopID(); got != rootID {
-		t.Errorf("RootLoopID() = %v, want it stable at %v across active change", got, rootID)
 	}
 }
 

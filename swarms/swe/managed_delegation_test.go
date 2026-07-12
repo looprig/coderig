@@ -711,7 +711,7 @@ func newTypedDelegateTestRig(t *testing.T, limits rig.DelegationLimits) (*sessio
 	if err != nil {
 		t.Fatal(err)
 	}
-	assembly, err := buildRigWithLimits([]loop.Definition{primer, leaf}, stores, t.TempDir(), Config{}, false, limits)
+	assembly, err := buildRigForDelegationCaps([]loop.Definition{primer, leaf}, stores, t.TempDir(), Config{}, false, limits)
 	if err != nil {
 		t.Fatal(err)
 	}

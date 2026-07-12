@@ -85,7 +85,7 @@ type confineFactory struct {
 }
 
 // newConfineFactory builds a confine.Factory clamped to role's static mode. The caller wires
-// ONE factory per role into that role's leaf/primary loop.Definition (via BuildTools).
+// ONE factory per role into that role's leaf/primer loop.Definition.
 func newConfineFactory(role uint8) *confineFactory {
 	return &confineFactory{role: role, memo: make(map[uuid.UUID]confine.Confinement)}
 }

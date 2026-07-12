@@ -64,8 +64,7 @@ func durableRootLoop(t *testing.T, stores *swarmStores, sessionID uuid.UUID) (st
 }
 
 // TestAcceptanceRootLoopIsOperatorPrimary proves the composed rig starts with the
-// operator-primary as the durable, zero-parent root loop, and that the adapter's RootLoopID
-// matches that durable loop id.
+// operator-primary as the durable, zero-parent primer and that it is initially active.
 func TestAcceptanceRootLoopIsOperatorPrimary(t *testing.T) {
 	t.Parallel()
 	agent, stores := openAcceptanceAgent(t)
@@ -76,9 +75,6 @@ func TestAcceptanceRootLoopIsOperatorPrimary(t *testing.T) {
 	}
 	if rootID.IsZero() {
 		t.Fatal("no durable zero-parent root LoopStarted found")
-	}
-	if got := agent.RootLoopID(); got != rootID {
-		t.Errorf("RootLoopID() = %v, want the durable root %v", got, rootID)
 	}
 	if got := agent.ActiveLoopID(); got != rootID {
 		t.Errorf("ActiveLoopID() = %v, want the active primer %v", got, rootID)
@@ -125,7 +121,7 @@ func TestAcceptanceLoopHandleExposesPrimerModel(t *testing.T) {
 	t.Parallel()
 	agent, _ := openAcceptanceAgent(t)
 
-	handle, ok := agent.sess.Loop(agent.RootLoopID())
+	handle, ok := agent.sess.Loop(agent.ActiveLoopID())
 	if !ok {
 		t.Fatal("root loop handle not found")
 	}

@@ -174,7 +174,7 @@ func TestGreetingFromRegistry(t *testing.T) {
 // seam (§5a): even with the greeting toggle ON, the root operator primer's assembled system
 // prompt (Identity + operator.Role + delegation + the trusted skill catalog) contains NONE
 // of the greeting text — the greeting flows only to the TUI banner, never into any
-// loop.Config.System. This holds because the greeting and the system prompt are built
+// the bound loop definition's system prompt. This holds because the greeting and system prompt are built
 // on entirely separate paths; the assertion makes that structural fact a regression test.
 func TestGreetingNotInModelContext(t *testing.T) {
 	t.Parallel()

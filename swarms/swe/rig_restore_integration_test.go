@@ -301,8 +301,8 @@ func TestRigRestoreDelegateOwnership(t *testing.T) {
 
 // TestAsyncDelegatesFSStoreResolveIndependently drives two managed children through the
 // production SWE rig over fsstore. Both are started before either request is waited, and
-// the waits are intentionally reversed so completion of one request cannot satisfy the
-// other request's identity.
+// each request is waited by its own request ID, so completion of one cannot satisfy the
+// other request's identity even though their completions are released in a different order.
 func TestAsyncDelegatesFSStoreResolveIndependently(t *testing.T) {
 	t.Chdir(t.TempDir())
 	step := 0
@@ -550,6 +550,20 @@ func TestManagedDelegateDeclaredModeFSStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = a2.Close(context.Background()) })
+	backlog, err := a2.ReplayBacklog(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayedChild bool
+	for _, ev := range backlog {
+		if started, ok := ev.(event.LoopStarted); ok && started.LoopID == childID {
+			replayedChild = true
+			break
+		}
+	}
+	if !replayedChild {
+		t.Fatal("restored all-loop backlog omitted delegate LoopStarted")
+	}
 	restoredChild, ok := a2.sess.Loop(childID)
 	if !ok {
 		t.Fatal("restored declared-mode child missing before submit")
@@ -898,7 +912,10 @@ func TestRigRestoreDelegateGateSandboxRoot(t *testing.T) {
 		select {
 		case <-ctx.Done():
 			t.Fatalf("restored Bash timed out: %v", ctx.Err())
-		case delivery := <-sub.Events():
+		case delivery, ok := <-sub.Events():
+			if !ok {
+				t.Fatalf("restored Bash subscription closed before turn completion")
+			}
 			switch ev := delivery.Event.(type) {
 			case event.TurnStarted:
 				if ev.Cause.CommandID == commandID {

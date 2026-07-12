@@ -68,7 +68,7 @@ func TestExclusiveCheckoutContentionAndHandoff(t *testing.T) {
 
 // TestHeadlessNewAndRestoreRoundTrip proves a session opened over an isolated store can be
 // Shutdown and RESTORED by id over the SAME store (the rig owns new + restore), and that the
-// restored session's root loop id matches the original — parity for the headless rig builder.
+// restored session's active loop id matches the original — parity for the headless rig builder.
 func TestHeadlessNewAndRestoreRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -81,9 +81,9 @@ func TestHeadlessNewAndRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("new session error = %v", err)
 	}
 	id := first.SessionID()
-	rootLoop := first.RootLoopID()
-	if id.IsZero() || rootLoop.IsZero() {
-		t.Fatalf("new session id/root loop zero: id=%v root=%v", id, rootLoop)
+	activeLoop := first.ActiveLoopID()
+	if id.IsZero() || activeLoop.IsZero() {
+		t.Fatalf("new session id/active loop zero: id=%v active=%v", id, activeLoop)
 	}
 	if err := first.Close(ctx); err != nil {
 		t.Fatalf("Close error = %v", err)
@@ -110,8 +110,8 @@ func TestHeadlessNewAndRestoreRoundTrip(t *testing.T) {
 	if restored.SessionID() != id {
 		t.Errorf("restored SessionID = %v, want %v", restored.SessionID(), id)
 	}
-	if restored.RootLoopID() != rootLoop {
-		t.Errorf("restored RootLoopID = %v, want %v (stable across restore)", restored.RootLoopID(), rootLoop)
+	if restored.ActiveLoopID() != activeLoop {
+		t.Errorf("restored ActiveLoopID = %v, want %v", restored.ActiveLoopID(), activeLoop)
 	}
 }
 

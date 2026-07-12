@@ -121,13 +121,13 @@ func operatorFingerprintFields(cfg Config) rig.ConfigFingerprintFields {
 // ceiling, and offload-blob GC. allowMismatch opts a resume into proceeding despite a config
 // fingerprint change (never set for a new session).
 func buildRig(definitions []loop.Definition, stores *swarmStores, root string, cfg Config, allowMismatch bool) (*rig.Rig, error) {
-	return buildRigWithLimits(definitions, stores, root, cfg, allowMismatch, rig.DelegationLimits{Depth: operatorSpawnDepth, Quota: operatorSpawnQuota})
+	return buildRigForDelegationCaps(definitions, stores, root, cfg, allowMismatch, rig.DelegationLimits{Depth: operatorSpawnDepth, Quota: operatorSpawnQuota})
 }
 
-// buildRigWithLimits is the common assembly path with explicit delegation caps. Production
+// buildRigForDelegationCaps is the common assembly path with explicit delegation caps. Production
 // callers use buildRig's SWE defaults; focused topology tests vary only these limits while
 // retaining the exact production definitions, stores, workspace, and policy wiring.
-func buildRigWithLimits(definitions []loop.Definition, stores *swarmStores, root string, cfg Config, allowMismatch bool, limits rig.DelegationLimits) (*rig.Rig, error) {
+func buildRigForDelegationCaps(definitions []loop.Definition, stores *swarmStores, root string, cfg Config, allowMismatch bool, limits rig.DelegationLimits) (*rig.Rig, error) {
 	options := []rig.Option{
 		rig.WithLoops(definitions...),
 		rig.WithPrimers(string(operatorPrimaryName)),

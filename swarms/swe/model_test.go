@@ -10,7 +10,7 @@ import (
 // TestModelFactoryYieldsSharedModel proves the ModelFactory yields the swarm's shared,
 // secret-free inference.Model identity (the package default) verbatim: same provider, API format,
 // endpoint, and model name — and, being secret-free, no API key field to carry. Post-split
-// the factory takes no system prompt (each agent's prompt rides loop.Config.System) and no
+// the factory takes no system prompt (each bound loop definition carries its prompt) and no
 // key (the secret binds to the Client at auto.New).
 func TestModelFactoryYieldsSharedModel(t *testing.T) {
 	t.Parallel()

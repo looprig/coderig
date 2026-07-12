@@ -34,7 +34,7 @@ func newModelFactory() ModelFactory {
 // newModelFactoryFor builds a ModelFactory over an explicit base model identity: it yields
 // base's secret-free inference.Model (provider/endpoint/model/sampling) unchanged. Post-split it
 // carries NO key (the secret is bound to the Client at auto.New) and NO system prompt (each
-// agent's finished prompt is set on loop.Config.System), so the factory's only job is to
+// each bound loop definition carries the agent's finished prompt), so the factory's only job is to
 // hand out the shared model identity every agent's loop is stamped with.
 func newModelFactoryFor(base inference.Model) ModelFactory {
 	return func() inference.Model { return base }
@@ -70,7 +70,7 @@ func readAPIKeyFor(base inference.Model) (string, error) {
 // single shared provider client via auto.New, and returns the ModelFactory bound to the
 // resolved model. The connection secret (the API key) is bound to the CLIENT here, once, at
 // auto.New — never onto the model or the factory. The provider client is system-agnostic:
-// each agent's system prompt rides loop.Config.System / inference.Request.System every turn. On any
+// each agent's system prompt rides its bound definition / inference.Request.System every turn. On any
 // failure it returns nil client + nil factory (fail secure).
 func buildClient(catalog ModelCatalog) (inference.Client, ModelFactory, error) {
 	resolver, err := newModelResolver(catalog)

@@ -24,9 +24,8 @@ import (
 // uint8) and the sandbox dynamic executor (as sandbox.ModeSource, sandbox.Mode). One
 // source → posture and enforcement can never disagree (§10.2).
 //
-// NOTE: this task builds the types/table/adapter only. Wiring the executor and this
-// table into the tool-build sites (BuildTools / WithCeilingPostures / NewExecutorDynamic)
-// is Task 22.
+// Immutable loop definitions wire this table and the dynamic executor per binding,
+// sharing the same live ceiling source for checks and enforcement.
 
 // ceilingModeSource adapts the harness ceiling ORDINAL source (tools.CeilingSource,
 // uint8) into the sandbox.ModeSource (sandbox.Mode) the dynamic executor reads. The
