@@ -142,6 +142,39 @@ func TestSessionStoreNewSessionBasics(t *testing.T) {
 	}
 }
 
+// TestSessionStoreClearReopenReleasesExclusiveWorkspace is the real factory-level /clear
+// regression. The first rig owns the exclusive checkout lease; after its session adapter is
+// shut down, the same shared factory can build a distinct NewSession over that checkout.
+func TestSessionStoreClearReopenReleasesExclusiveWorkspace(t *testing.T) {
+	f := newIntegrationFactory(t)
+	ctx := context.Background()
+
+	first, err := f.openWithClient(ctx, &fakeLLM{}, newModelFactory(), SessionSelector{}, Config{})
+	if err != nil {
+		t.Fatalf("first NewSession: %v", err)
+	}
+	firstID := first.SessionID()
+	blocked, err := f.openWithClient(ctx, &fakeLLM{}, newModelFactory(), SessionSelector{}, Config{})
+	if err == nil {
+		_ = blocked.Close(ctx)
+		t.Fatal("second NewSession succeeded before first shutdown; exclusive workspace lease was not enforced")
+	}
+	if err := first.Close(ctx); err != nil {
+		t.Fatalf("close first session: %v", err)
+	}
+
+	second, err := f.openWithClient(ctx, &fakeLLM{}, newModelFactory(), SessionSelector{}, Config{})
+	if err != nil {
+		t.Fatalf("second NewSession after /clear handoff: %v", err)
+	}
+	if second.SessionID() == firstID {
+		t.Errorf("second SessionID = first SessionID %v, want a fresh /clear session", firstID)
+	}
+	if err := second.Close(ctx); err != nil {
+		t.Fatalf("close second session: %v", err)
+	}
+}
+
 // primaryLoopAgentName returns the AgentName the LoopStarted for loopID carries in evs, or
 // the empty string if no such LoopStarted is present.
 func primaryLoopAgentName(evs []event.Event, loopID uuid.UUID) identity.AgentName {

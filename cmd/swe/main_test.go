@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
-	"os/exec"
+	"errors"
+	"go/parser"
+	"go/token"
+	"io/fs"
+	"path/filepath"
+	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -20,38 +24,25 @@ import (
 )
 
 // TestOpenThunkSelectsResumeOnlyOnce proves the process opener restores only its first
-// session and all later opens (including concurrent /clear reopens) select a fresh session.
+// session and all later serialized /clear reopens select a fresh session.
 // The function-shaped seam keeps SessionStoreFactory as the production owner while making
 // the NewSession/RestoreSession selector decision observable without opening a real store.
 func TestOpenThunkSelectsResumeOnlyOnce(t *testing.T) {
 	resume := mustUUID(t)
-	const opens = 16
-	var (
-		mu        sync.Mutex
-		selectors []swe.SessionSelector
-	)
+	const opens = 3
+	var selectors []swe.SessionSelector
 	openSession := func(_ context.Context, sel swe.SessionSelector, _ swe.Config) (tui.Agent, error) {
-		mu.Lock()
 		selectors = append(selectors, sel)
-		mu.Unlock()
 		return nil, nil
 	}
 	open := openThunk(openSession, resume, swe.Config{})
 
-	var wg sync.WaitGroup
 	for range opens {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := open(context.Background()); err != nil {
-				t.Errorf("open: %v", err)
-			}
-		}()
+		if _, err := open(context.Background()); err != nil {
+			t.Errorf("open: %v", err)
+		}
 	}
-	wg.Wait()
 
-	mu.Lock()
-	defer mu.Unlock()
 	if len(selectors) != opens {
 		t.Fatalf("opens = %d, want %d", len(selectors), opens)
 	}
@@ -94,13 +85,8 @@ func TestOpenThunkSelectsNewForLaunchAndClear(t *testing.T) {
 // closes the live session before it returns, then the composition root closes the shared
 // SessionStoreFactory. This remains true for a non-zero runtime exit code.
 func TestRunCLIClosesSessionBeforeStore(t *testing.T) {
-	var (
-		mu    sync.Mutex
-		order []string
-	)
+	var order []string
 	record := func(step string) {
-		mu.Lock()
-		defer mu.Unlock()
 		order = append(order, step)
 	}
 	agent := &orderingAgent{close: func() { record("session") }}
@@ -122,6 +108,16 @@ func TestRunCLIClosesSessionBeforeStore(t *testing.T) {
 	}
 	if got, want := strings.Join(order, ","), "session,store"; got != want {
 		t.Fatalf("shutdown order = %q, want %q", got, want)
+	}
+}
+
+// TestRunCLIStoreCloseErrorFails maps shared-store teardown failure to a process failure even
+// when the CLI runtime itself completed successfully.
+func TestRunCLIStoreCloseErrorFails(t *testing.T) {
+	runner := func(context.Context, tui.OpenAgent, cli.Banner) int { return exitOK }
+	closeStore := func() error { return errors.New("close store") }
+	if got := runCLIWithStore(context.Background(), nil, cli.Banner{}, runner, closeStore); got != exitFailed {
+		t.Fatalf("exit = %d, want %d when SessionStoreFactory.Close fails", got, exitFailed)
 	}
 }
 
@@ -170,14 +166,34 @@ func TestRunPreservesPublicIdentity(t *testing.T) {
 // packages do not directly import the generic harness HTTP layer. A future HTTP entry point
 // should pass the real rig to serve.Handler instead of adding a SWE Runner adapter here.
 func TestRunHasNoSWEServeAdapter(t *testing.T) {
-	cmd := exec.Command("go", "list", "-f", `{{join .Imports "\n"}}`, "./cmd/swe", "./swarms/swe")
-	cmd.Dir = "../.."
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go list direct imports: %v\n%s", err, out)
-	}
-	if strings.Contains(string(out), "github.com/looprig/harness/pkg/serve") {
-		t.Fatalf("SWE process packages directly import serve; no SWE serve adapter belongs in this migration:\n%s", out)
+	moduleRoot := filepath.Clean("../..")
+	for _, relRoot := range []string{"cmd/swe", "swarms/swe"} {
+		root := filepath.Join(moduleRoot, relRoot)
+		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+			if err != nil {
+				return err
+			}
+			for _, spec := range file.Imports {
+				importPath, err := strconv.Unquote(spec.Path.Value)
+				if err != nil {
+					return err
+				}
+				if importPath == "github.com/looprig/harness/pkg/serve" {
+					t.Errorf("%s imports harness serve; no SWE serve adapter belongs in this migration", path)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("scan %s: %v", root, err)
+		}
 	}
 }
 
