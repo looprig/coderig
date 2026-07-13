@@ -43,6 +43,37 @@ func (fakeReplayOpener) OpenEventReplayer(uuid.UUID, sessionstore.ReplayRequest)
 	return nil, errNoReplay
 }
 
+type scriptedReplayOpener struct {
+	replayer journal.EventReplayer
+	err      error
+}
+
+type replayInitError struct{ message string }
+
+func (e *replayInitError) Error() string { return e.message }
+
+func (s scriptedReplayOpener) OpenEventReplayer(uuid.UUID, sessionstore.ReplayRequest) (journal.EventReplayer, error) {
+	return s.replayer, s.err
+}
+
+type scriptedEventReplayer struct {
+	cursor  journal.EventCursor
+	openErr error
+}
+
+func (s scriptedEventReplayer) Open(context.Context, journal.ReplayRequest) (journal.EventCursor, error) {
+	return s.cursor, s.openErr
+}
+
+type scriptedEventCursor struct {
+	nextErr error
+}
+
+func (s *scriptedEventCursor) Next(context.Context) (event.Event, uint64, error) {
+	return nil, 0, s.nextErr
+}
+func (*scriptedEventCursor) Close() error { return nil }
+
 // fakeHandle is a minimal loop.Handle: an id + a model whose caps drive AcceptsImages.
 type fakeHandle struct {
 	id    uuid.UUID
@@ -77,9 +108,13 @@ type fakeController struct {
 	loops     map[uuid.UUID]*fakeHandle
 	sub       *fakeSub
 
-	mu        sync.Mutex
-	gotGate   []gate.GateResponse
-	shutdowns int
+	mu                  sync.Mutex
+	gotGate             []gate.GateResponse
+	shutdowns           int
+	shutdownErr         error
+	shutdownCtxErr      error
+	shutdownDeadline    time.Time
+	shutdownHasDeadline bool
 }
 
 func (f *fakeController) SessionID() uuid.UUID    { return f.sessionID }
@@ -120,17 +155,25 @@ func (f *fakeController) CheckpointWorkspace(context.Context) (workspacestore.Re
 	return "", nil
 }
 func (f *fakeController) RestoreWorkspace(context.Context, workspacestore.Ref) error { return nil }
-func (f *fakeController) Shutdown(context.Context) error {
+func (f *fakeController) Shutdown(ctx context.Context) error {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.shutdowns++
-	f.mu.Unlock()
-	return nil
+	f.shutdownCtxErr = ctx.Err()
+	f.shutdownDeadline, f.shutdownHasDeadline = ctx.Deadline()
+	return f.shutdownErr
 }
 
 func (f *fakeController) responses() []gate.GateResponse {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]gate.GateResponse(nil), f.gotGate...)
+}
+
+func (f *fakeController) shutdownState() (int, error, time.Time, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.shutdowns, f.shutdownCtxErr, f.shutdownDeadline, f.shutdownHasDeadline
 }
 
 // mustUUID mints a uuid or fails the test.
@@ -141,6 +184,75 @@ func mustUUID(t *testing.T) uuid.UUID {
 		t.Fatalf("uuid.New() error = %v", err)
 	}
 	return id
+}
+
+func TestSessionAgentInitializationFailureShutsDownController(t *testing.T) {
+	t.Parallel()
+
+	shutdownErr := errors.New("shutdown failed")
+	tests := []struct {
+		name    string
+		primary error
+		opener  func(error) replayOpener
+	}{
+		{
+			name:    "event replayer acquisition",
+			primary: &replayInitError{message: "open event replayer failed"},
+			opener: func(primary error) replayOpener {
+				return scriptedReplayOpener{err: primary}
+			},
+		},
+		{
+			name:    "replay cursor open",
+			primary: &replayInitError{message: "open replay cursor failed"},
+			opener: func(primary error) replayOpener {
+				return scriptedReplayOpener{replayer: scriptedEventReplayer{openErr: primary}}
+			},
+		},
+		{
+			name:    "replay cursor drain",
+			primary: &replayInitError{message: "drain replay cursor failed"},
+			opener: func(primary error) replayOpener {
+				return scriptedReplayOpener{replayer: scriptedEventReplayer{
+					cursor: &scriptedEventCursor{nextErr: primary},
+				}}
+			},
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fc := &fakeController{sessionID: mustUUID(t), shutdownErr: shutdownErr}
+			callerCtx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			a, err := newSessionAgent(callerCtx, fc, tt.opener(tt.primary), true)
+			if a != nil {
+				t.Fatalf("newSessionAgent() agent = %p, want nil on initialization failure", a)
+			}
+			if !errors.Is(err, tt.primary) || !errors.Is(err, shutdownErr) {
+				t.Fatalf("newSessionAgent() error = %v, want primary + shutdown errors", err)
+			}
+			var typedPrimary *replayInitError
+			if !errors.As(err, &typedPrimary) || typedPrimary != tt.primary {
+				t.Fatalf("newSessionAgent() error = %v, want typed primary discoverable with errors.As", err)
+			}
+			shutdowns, shutdownCtxErr, deadline, hasDeadline := fc.shutdownState()
+			if shutdowns != 1 {
+				t.Fatalf("Shutdown calls = %d, want exactly 1", shutdowns)
+			}
+			if shutdownCtxErr != nil {
+				t.Fatalf("Shutdown context error = %v, want live bounded background context", shutdownCtxErr)
+			}
+			if !hasDeadline {
+				t.Fatal("Shutdown context has no deadline, want bounded cleanup")
+			}
+			if remaining := time.Until(deadline); remaining <= 0 || remaining > sessionAgentInitShutdownTimeout {
+				t.Fatalf("Shutdown deadline remaining = %v, want within (0, %v]", remaining, sessionAgentInitShutdownTimeout)
+			}
+		})
+	}
 }
 
 // newFakeAgent builds a *sessionAgent over a fakeController with two loops (active + one

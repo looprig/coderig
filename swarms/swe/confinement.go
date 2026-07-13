@@ -77,12 +77,17 @@ func ceilingCurrent(c ceiling.Source) uint8 {
 // MEMO SAFETY: within one process each LoopID's tools are bound once and the executor is a
 // pure function of root + ceiling (stable per LoopID within a process); restore is a fresh
 // process → fresh rig → fresh memo. The memo is concurrency-safe (mutex) and bounded by the
-// spawn quota so a runaway bind loop cannot grow it without bound.
+// session topology (configured primer + spawn quota) so a runaway bind loop cannot grow it.
 type confineFactory struct {
 	role uint8
 	mu   sync.Mutex
 	memo map[uuid.UUID]confine.Confinement
 }
+
+// confinementMemoLimit is topology-derived: one configured primer plus every delegate the
+// rig's session quota permits. Operator and reviewer factories remain role-separated, so this
+// bound does not alter either role's effective-mode semantics.
+const confinementMemoLimit = operatorSpawnQuota + 1
 
 // newConfineFactory builds a confine.Factory clamped to role's static mode. The caller wires
 // ONE factory per role into that role's leaf/primer loop.Definition.
@@ -106,7 +111,7 @@ func (f *confineFactory) For(b tool.Bindings) (confine.Confinement, error) {
 		root = b.Workspace.Root
 	}
 	conf := confinementFor(root, effectiveModeSource{role: f.role, ceiling: b.Ceiling})
-	if len(f.memo) < operatorSpawnQuota {
+	if len(f.memo) < confinementMemoLimit {
 		f.memo[b.LoopID] = conf
 	}
 	return conf, nil

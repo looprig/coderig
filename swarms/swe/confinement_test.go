@@ -82,20 +82,48 @@ func TestConfineFactoryMemoizesPerLoopID(t *testing.T) {
 	}
 }
 
-// TestConfineFactoryMemoBoundedByQuota proves the per-LoopID memo never grows past the spawn
-// quota, so a pathological number of distinct binds cannot grow it without bound.
-func TestConfineFactoryMemoBoundedByQuota(t *testing.T) {
+// TestConfineFactoryMemoCoversPrimerAndFullOperatorQuota proves the topology-derived memo
+// bound covers the primer plus every delegate allowed by operatorSpawnQuota. The final
+// delegate must still reuse its exact executor/checker interlock on repeated leaf binds.
+func TestConfineFactoryMemoCoversPrimerAndFullOperatorQuota(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	f := newConfineFactory(operatorRoleMode)
-	for range operatorSpawnQuota + 8 {
-		if _, err := f.For(bindingFor(mustBindingID(t), root)); err != nil {
-			t.Fatalf("For() error = %v", err)
+	if _, err := f.For(bindingFor(mustBindingID(t), root)); err != nil {
+		t.Fatalf("For(primer) error = %v", err)
+	}
+
+	var finalBinding tool.Bindings
+	var final confine.Confinement
+	for i := range operatorSpawnQuota {
+		finalBinding = bindingFor(mustBindingID(t), root)
+		var err error
+		final, err = f.For(finalBinding)
+		if err != nil {
+			t.Fatalf("For(operator child %d) error = %v", i+1, err)
 		}
 	}
-	if got := len(f.memo); got > operatorSpawnQuota {
-		t.Errorf("memo size = %d, want ≤ quota %d (bounded)", got, operatorSpawnQuota)
+	repeated, err := f.For(finalBinding)
+	if err != nil {
+		t.Fatalf("For(final child again) error = %v", err)
+	}
+	if got, want := len(f.memo), operatorSpawnQuota+1; got != want {
+		t.Fatalf("memo size = %d, want primer + full quota = %d", got, want)
+	}
+	if final.BashRunner != repeated.BashRunner || final.GrepRunner != repeated.GrepRunner {
+		t.Fatal("final child's repeated For returned a different executor interlock")
+	}
+	if final.CheckerOption == nil || repeated.CheckerOption == nil {
+		t.Fatal("final child's repeated For lost the checker interlock")
+	}
+	finalChecker := newConfinedChecker(t, root, final)
+	repeatedChecker := newConfinedChecker(t, root, repeated)
+	finalBash := tools.NewBash(root, final.BashOptions()...)
+	repeatedBash := tools.NewBash(root, repeated.BashOptions()...)
+	if got, want := repeatedChecker.Check(context.Background(), repeatedBash, "Bash", `{"command":"ls"}`),
+		finalChecker.Check(context.Background(), finalBash, "Bash", `{"command":"ls"}`); got != want {
+		t.Fatalf("final child's repeated checker effect = %v, want %v", got, want)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/looprig/cli/tui"
 	"github.com/looprig/core/content"
@@ -17,6 +18,8 @@ import (
 	"github.com/looprig/harness/pkg/sessionstore"
 	"github.com/looprig/harness/pkg/tool"
 )
+
+const sessionAgentInitShutdownTimeout = 10 * time.Second
 
 // sessionAgent adapts a rig session.SessionController to the CLI's tui.Agent surface. It
 // owns three things and nothing else: the live session controller, a replay dependency used
@@ -69,18 +72,27 @@ func newSessionAgent(ctx context.Context, sess session.SessionController, store 
 	}
 	if replayer, err := store.OpenEventReplayer(sess.SessionID(), sessionstore.ReplayRequest{}); err != nil {
 		if isRestore {
-			return nil, err // a restore cannot fold gates or rebuild projections without replay
+			return nil, a.failInitialization(err) // restore cannot rebuild without replay
 		}
 	} else {
 		a.replayer = replayer
 	}
 	if isRestore {
 		if err := a.coldReplay(ctx); err != nil {
-			return nil, err
+			return nil, a.failInitialization(err)
 		}
 		return a, nil
 	}
 	return a, nil
+}
+
+// failInitialization releases controller ownership after the rig has successfully created or
+// restored it but the adapter cannot finish initialization. Cleanup is bounded and detached
+// from the caller because replay failures commonly arrive through an already-canceled context.
+func (a *sessionAgent) failInitialization(primary error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), sessionAgentInitShutdownTimeout)
+	defer cancel()
+	return errors.Join(primary, a.Close(ctx))
 }
 
 // coldReplay drains the whole durable log once (all loops), folding every gate event into
