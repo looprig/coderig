@@ -384,7 +384,7 @@ func TestCeilingChangeClampsCheckerLive(t *testing.T) {
 func TestSubagentClampBoundsChildToParentEffective(t *testing.T) {
 	t.Parallel()
 
-	// Session ceiling ReadOnly makes the primary operator's effective mode ReadOnly
+	// Session ceiling ReadOnly makes the parent operator primer's effective mode ReadOnly
 	// (min(Write, ReadOnly)) — the parent-effective source the spawner threads down.
 	st := ceiling.New()
 	st.Set(ceiling.Level(sandbox.ReadOnly))

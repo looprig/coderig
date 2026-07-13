@@ -30,7 +30,7 @@ import (
 // the session ceiling clamps it. The effective mode of every leaf is min(role static
 // mode, session ceiling) — a role can never exceed the ceiling, and never exceeds its
 // own static mode. operator (implement) writes; reviewer (critique) is read-only. The
-// PRIMARY operator carries the operator role mode.
+// operator primer carries the operator role mode.
 const (
 	operatorRoleMode uint8 = uint8(sandbox.Write)    // 2: workspace write/edit, gated bash/net
 	reviewerRoleMode uint8 = uint8(sandbox.ReadOnly) // 1: broad read, no write, everything gated

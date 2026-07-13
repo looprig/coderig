@@ -186,8 +186,8 @@ type sessionOpen func(context.Context, swe.SessionSelector, swe.Config) (tui.Age
 // every open, including a /clear reopen (the launch flag holds for the whole process). Every
 // open (or, on the first call, resume) addresses its session by name in the SHARED store, so a
 // /clear reopen's new session is independent of the one it replaces. The returned thunk yields
-// a tui.Agent (the persisted session adapter satisfies the migrated root/active/focused-loop
-// CLI contract).
+// a tui.Agent (the persisted session adapter exposes current active selection and independent
+// focused-loop routing for the CLI).
 func openThunk(openSession sessionOpen, resume uuid.UUID, cfg swe.Config) tui.OpenAgent {
 	var opened bool
 	return func(c context.Context) (tui.Agent, error) {

@@ -1,7 +1,7 @@
 # SWE-Swarm operator golden-set
 
 Golden input/output pairs for evaluating the SWE-Swarm `operator` agent driven
-as a session PRIMARY loop (built via `swarms/swe.newSessionAgent`).
+as the active operator primer built by the SWE rig.
 
 Each `cases/*.json` file is one `internal/eval.TestCase`:
 
@@ -21,4 +21,4 @@ does not block on a permission gate.
 
 This set was migrated from `agents/coding/golden-set` in Phase 7A: the eval
 engine (`internal/eval`) is reused unchanged; only the agent under test changed
-from the coding agent to the operator-as-primary.
+from the coding agent to the operator primer.

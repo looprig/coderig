@@ -15,7 +15,7 @@ type ModelTier string
 const (
 	// TierEconomy is the cheap tier used for best-effort session-title generation.
 	TierEconomy ModelTier = "economy"
-	// TierStandard is the tier used for normal operator (primary) and subagent turns.
+	// TierStandard is the default tier for operator-primer and delegate turns.
 	TierStandard ModelTier = "standard"
 	// TierPremium is stored but never implicitly selected in this change.
 	TierPremium ModelTier = "premium"

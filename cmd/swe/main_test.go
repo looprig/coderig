@@ -122,7 +122,7 @@ func TestRunCLIStoreCloseErrorFails(t *testing.T) {
 }
 
 // orderingAgent is the smallest complete migrated CLI contract used by the process-order
-// test. The explicit Root/Active/loop-targeted image methods keep this command package
+// test. The explicit Active/loop-targeted image methods keep this command package
 // compiled against the same multi-loop surface as the production session adapter.
 type orderingAgent struct{ close func() }
 
