@@ -79,7 +79,7 @@ func legacyProductionDiagnostics() ([]string, error) {
 		return nil, fmt.Errorf("locate legacy guard source")
 	}
 	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
-	var diagnostics []string
+	packages := make(map[string]map[string][]byte)
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -97,19 +97,55 @@ func legacyProductionDiagnostics() ([]string, error) {
 		if err != nil {
 			return err
 		}
-		diagnostics = append(diagnostics, legacySourceDiagnostics(path, source)...)
+		dir := filepath.Dir(path)
+		if packages[dir] == nil {
+			packages[dir] = make(map[string][]byte)
+		}
+		packages[dir][path] = source
 		return nil
 	})
-	return diagnostics, err
+	if err != nil {
+		return nil, err
+	}
+	var diagnostics []string
+	for _, sources := range packages {
+		diagnostics = append(diagnostics, legacyPackageDiagnostics(sources)...)
+	}
+	return diagnostics, nil
 }
 
 func legacySourceDiagnostics(filename string, source []byte) []string {
+	return legacyPackageDiagnostics(map[string][]byte{filename: source})
+}
+
+func legacyPackageDiagnostics(sources map[string][]byte) []string {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filename, source, 0)
-	if err != nil {
-		return []string{fmt.Sprintf("%s: parse: %v", filename, err)}
+	files := make([]*ast.File, 0, len(sources))
+	var diagnostics []string
+	for filename, source := range sources {
+		file, err := parser.ParseFile(fset, filename, source, 0)
+		if err != nil {
+			diagnostics = append(diagnostics, fmt.Sprintf("%s: parse: %v", filename, err))
+			continue
+		}
+		files = append(files, file)
 	}
-	typeInfo := guardTypeInfo(fset, file)
+	if len(files) == 0 {
+		return diagnostics
+	}
+	typeInfo, typeErrors := guardTypeInfo(fset, files)
+	for _, file := range files {
+		diagnostics = append(diagnostics, legacyASTDiagnostics(fset, file, typeInfo)...)
+	}
+	for _, err := range typeErrors {
+		if relevantGuardTypeError(err) {
+			diagnostics = append(diagnostics, "type resolution failed closed: "+err.Error())
+		}
+	}
+	return diagnostics
+}
+
+func legacyASTDiagnostics(fset *token.FileSet, file *ast.File, typeInfo *types.Info) []string {
 
 	imports := make(map[string]string)
 	dotImports := make(map[string]bool)
@@ -265,29 +301,52 @@ func (i guardImporter) Import(path string) (*types.Package, error) {
 	}
 }
 
-func guardTypeInfo(fset *token.FileSet, file *ast.File) *types.Info {
+func guardTypeInfo(fset *token.FileSet, files []*ast.File) (*types.Info, []error) {
 	info := &types.Info{
 		Types:      make(map[ast.Expr]types.TypeAndValue),
 		Uses:       make(map[*ast.Ident]types.Object),
 		Defs:       make(map[*ast.Ident]types.Object),
 		Selections: make(map[*ast.SelectorExpr]*types.Selection),
 	}
-	config := &types.Config{Importer: guardImporter{standard: importer.Default()}, Error: func(error) {}}
-	_, _ = config.Check("guard/fixture", fset, []*ast.File{file}, info)
-	return info
+	var typeErrors []error
+	config := &types.Config{Importer: guardImporter{standard: importer.Default()}, Error: func(err error) {
+		typeErrors = append(typeErrors, err)
+	}}
+	_, _ = config.Check("guard/fixture", fset, files, info)
+	return info, typeErrors
+}
+
+func relevantGuardTypeError(err error) bool {
+	message := err.Error()
+	return strings.Contains(message, "AcceptsImages") || strings.Contains(message, "Acquire") ||
+		strings.Contains(message, "Leaser") || strings.Contains(message, "LeaseManager")
 }
 
 func isManualLeaseCollaborator(t types.Type) bool {
+	t = types.Unalias(t)
 	if pointer, ok := t.(*types.Pointer); ok {
-		t = pointer.Elem()
+		t = types.Unalias(pointer.Elem())
 	}
 	named, ok := t.(*types.Named)
-	if !ok || named.Obj().Pkg() == nil {
+	if ok && named.Obj().Pkg() != nil {
+		path := named.Obj().Pkg().Path()
+		name := named.Obj().Name()
+		if (path == storageImportPath && name == "Leaser") || (path == journalImportPath && name == "LeaseManager") {
+			return true
+		}
+	}
+	iface, ok := t.Underlying().(*types.Interface)
+	if !ok {
 		return false
 	}
-	path := named.Obj().Pkg().Path()
-	name := named.Obj().Name()
-	return (path == storageImportPath && name == "Leaser") || (path == journalImportPath && name == "LeaseManager")
+	iface.Complete()
+	for i := 0; i < iface.NumMethods(); i++ {
+		method := iface.Method(i)
+		if method.Name() == "Acquire" && method.Pkg() != nil && method.Pkg().Path() == storageImportPath {
+			return true
+		}
+	}
+	return false
 }
 
 func isZeroArgumentCallable(t types.Type) bool {
@@ -501,4 +560,46 @@ func TestNoLegacySessionWiringInProduction(t *testing.T) {
 	if len(diagnostics) != 0 {
 		t.Fatalf("legacy session wiring remains in production:\n%s", strings.Join(diagnostics, "\n"))
 	}
+}
+
+func TestLegacyPackageGuardResolvesCrossFileTypes(t *testing.T) {
+	t.Parallel()
+
+	t.Run("forbidden cross-file aliases", func(t *testing.T) {
+		t.Parallel()
+		diagnostics := legacyPackageDiagnostics(map[string][]byte{
+			"a.go": []byte(`package fixture
+import store "github.com/looprig/storage"
+type LeaseAlias = store.Leaser
+type LeaseWrapper interface { store.Leaser }
+type ZeroArgFunc func() bool
+`),
+			"b.go": []byte(`package fixture
+func acquire(l LeaseAlias) { _, _ = l.Acquire(nil, "session") }
+func acquireWrapped(l LeaseWrapper) { _, _ = l.Acquire(nil, "session") }
+var AcceptsImages ZeroArgFunc
+`),
+		})
+		if len(diagnostics) < 3 {
+			t.Fatalf("diagnostics = %v, want alias lease, wrapper lease, and AcceptsImages findings", diagnostics)
+		}
+	})
+
+	t.Run("unrelated cross-file types", func(t *testing.T) {
+		t.Parallel()
+		diagnostics := legacyPackageDiagnostics(map[string][]byte{
+			"a.go": []byte(`package fixture
+type unrelated struct{}
+func (*unrelated) Acquire() {}
+type OneArgFunc func(string) bool
+`),
+			"b.go": []byte(`package fixture
+func use(leases *unrelated) { leases.Acquire() }
+var AcceptsImages OneArgFunc
+`),
+		})
+		if len(diagnostics) != 0 {
+			t.Fatalf("diagnostics = %v, want none", diagnostics)
+		}
+	})
 }
