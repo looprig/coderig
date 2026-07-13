@@ -3,13 +3,14 @@ module github.com/looprig/swe
 go 1.26.4
 
 require (
-	github.com/looprig/cli v0.3.1
+	github.com/looprig/cli v0.4.0
 	github.com/looprig/core v0.1.0
-	github.com/looprig/fsstore v0.1.0
-	github.com/looprig/harness v0.5.2
+	github.com/looprig/fsstore v0.2.0
+	github.com/looprig/harness v0.10.0
 	github.com/looprig/inference v0.1.0
 	github.com/looprig/llm v0.1.0
 	github.com/looprig/sandbox v0.0.0
+	github.com/looprig/storage v0.2.0
 )
 
 require (
@@ -36,7 +37,6 @@ require (
 	github.com/google/nftables v0.3.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/landlock-lsm/go-landlock v0.9.0 // indirect
-	github.com/looprig/storage v0.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
 	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
