@@ -21,7 +21,7 @@ This is a breaking migration. Old adapters are deleted rather than wrapped.
 | Delegation | `swarms/swe/spawner.go` late-binds a live `session.Session`; `swarm.go` injects `tools.NewSubagent` | Delete both. Declare delegates and managed delegation on the primer definition |
 | Leaf tools | `swarms/swe/agents.go`, `agents/operator`, `agents/reviewer` build live tools and permission checkers | Convert to immutable `tool.Definition` factories and `loop.PermissionFactory` |
 | Sandbox/read guard | `swarms/swe/confinement.go`, `confine`, runtime-skill wiring use a fixed root and per-spawn ceiling | Rebuild per loop bind from `tool.Bindings.Workspace` and the session ceiling source |
-| TUI adapter | `swarms/swe/agent.go` caches primary ID and image capability, owns teardown/replay | Wrap `session.SessionController`; implement the approved CLI Root/Active/Focus contract and dynamic per-loop image capability |
+| TUI adapter | `swarms/swe/agent.go` caches primary ID and image capability, owns teardown/replay | Wrap `session.SessionController`; expose current active selection, independent focus, uniform all-loop replay, and dynamic per-loop image capability |
 | CLI composition | `cmd/swe/main.go:179-249` opens `SessionStoreFactory` and passes an opener to CLI | Preserve this composition seam; update it to the migrated CLI adapter contract |
 | Serve | No SWE production serve composition exists | Do not add one. Future composition uses generic `serve.Handler[S,O]` directly |
 
@@ -276,5 +276,5 @@ Do not add:
 - Tool/permission/sandbox instances are fresh per loop and use the correct bound root.
 - Idle checkpoint and restore work without a watcher.
 - Active loop, mode, model, effort, ceiling, gates, delegates, and workspace restore before first admitted work.
-- CLI root/active/focus/status/image behavior matches the approved CLI plan.
+- CLI active/focus/status/image behavior matches the approved CLI plan.
 - Searches find no old session constructors, `loop.Config`, `loop.ToolSet`, spawner, custom Subagent, watcher, or manual checkpoint lifecycle.

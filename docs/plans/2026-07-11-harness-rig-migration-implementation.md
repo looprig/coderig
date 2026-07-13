@@ -134,7 +134,7 @@ improvement: current SWE schedules its ticker only for new sessions.
 
 After Task 0's harness tag is selected, add failing CLI projection tests: `LoopStarted` with a
 display name renders/stores that name, missing display name falls back to `Header.AgentName`,
-and root/active/focus identity remains keyed by loop ID. Update the approved CLI plan, bump the
+and active/focus identity remains keyed by loop ID. Update the approved CLI plan, bump the
 harness dependency/vendor, implement the projection, run CLI unit/race/vendor gates, and commit:
 
 ```bash

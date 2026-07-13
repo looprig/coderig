@@ -149,6 +149,11 @@ func legacySourceDiagnostics(filename string, source []byte) []string {
 			if legacy, ok := forbiddenIdentifiers[n.Name]; ok {
 				report(n.Pos(), legacy)
 			}
+			if n.Name == "AcceptsImages" {
+				if obj := typeInfo.Defs[n]; obj != nil && isZeroArgumentCallable(obj.Type()) {
+					report(n.Pos(), "static zero-argument AcceptsImages declaration")
+				}
+			}
 			if n.Obj == nil {
 				for path := range dotImports {
 					if legacy, ok := forbiddenPackageMembers[path][n.Name]; ok {
@@ -285,6 +290,15 @@ func isManualLeaseCollaborator(t types.Type) bool {
 	return (path == storageImportPath && name == "Leaser") || (path == journalImportPath && name == "LeaseManager")
 }
 
+func isZeroArgumentCallable(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	t = types.Unalias(t)
+	sig, ok := t.Underlying().(*types.Signature)
+	return ok && sig.Params().Len() == 0
+}
+
 func calledName(expr ast.Expr) string {
 	switch expr := expr.(type) {
 	case *ast.Ident:
@@ -415,6 +429,53 @@ var AcceptsImages = func() bool { return true }
 type AcceptsImages func() bool
 `,
 			wantLegacy: true,
+		},
+		{
+			name: "inferred existing zero argument image capability",
+			source: `package fixture
+func existingZeroArgFunc() bool { return true }
+var AcceptsImages = existingZeroArgFunc
+`,
+			wantLegacy: true,
+		},
+		{
+			name: "named zero argument image capability variable",
+			source: `package fixture
+type ZeroArgFunc func() bool
+var AcceptsImages ZeroArgFunc
+`,
+			wantLegacy: true,
+		},
+		{
+			name: "defined from zero argument image capability type",
+			source: `package fixture
+type ZeroArgFunc func() bool
+type AcceptsImages ZeroArgFunc
+`,
+			wantLegacy: true,
+		},
+		{
+			name: "alias of zero argument image capability type",
+			source: `package fixture
+type ZeroArgFunc func() bool
+type AcceptsImages = ZeroArgFunc
+`,
+			wantLegacy: true,
+		},
+		{
+			name: "inferred one argument image capability is allowed",
+			source: `package fixture
+func existingOneArgFunc(string) bool { return true }
+var AcceptsImages = existingOneArgFunc
+`,
+		},
+		{
+			name: "named one argument image capability declarations are allowed",
+			source: `package fixture
+type OneArgFunc func(string) bool
+var AcceptsImages OneArgFunc
+type ImageCapability OneArgFunc
+`,
 		},
 	}
 
