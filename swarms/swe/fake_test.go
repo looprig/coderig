@@ -2,7 +2,6 @@ package swe
 
 import (
 	"context"
-	"errors"
 	"io"
 	"sync"
 	"testing"
@@ -12,8 +11,36 @@ import (
 	"github.com/looprig/storage/memstore"
 )
 
-// fakeLLM is a controllable inference.Client for tests. The loop only ever calls Stream,
-// so Invoke is a stub. Salvaged from the prior coding agent's fake_test.go.
+// fakeInvokeStep scripts exactly one one-shot request. entered/release are
+// independent of the stream lane so tests can prove compaction blocks only the
+// loop that requested it.
+type fakeInvokeStep struct {
+	response *inference.Response
+	respond  func(inference.Request) (*inference.Response, error)
+	err      error
+	entered  chan struct{}
+	release  <-chan struct{}
+}
+
+// fakeStreamStep scripts exactly one ordinary streamed inference request.
+type fakeStreamStep struct {
+	chunks  []content.Chunk
+	result  *inference.StreamResult
+	err     error
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+type fakeLLMScriptError struct{ Operation string }
+
+func (e *fakeLLMScriptError) Error() string {
+	return "swe test: fake LLM " + e.Operation + " not scripted"
+}
+
+// fakeLLM is a controllable inference.Client for tests. Stream and Invoke have
+// independent scripts, captures, and barriers so compaction can never consume
+// an ordinary-turn fixture. The legacy stream fields remain as a compatibility
+// fallback for existing focused tests.
 type fakeLLM struct {
 	credential string // opaque test-only connection secret; never part of fingerprints
 	chunks     []content.Chunk
@@ -22,13 +49,69 @@ type fakeLLM struct {
 
 	entered     chan struct{} // if non-nil, closed once when Stream is first called
 	enteredOnce sync.Once
+
+	mu             sync.Mutex
+	streamSteps    []fakeStreamStep
+	invokeSteps    []fakeInvokeStep
+	streamRequests []inference.Request
+	invokeRequests []inference.Request
 }
 
 func (f *fakeLLM) Invoke(ctx context.Context, req inference.Request) (*inference.Response, error) {
-	return nil, errors.New("fakeLLM.Invoke not used")
+	f.mu.Lock()
+	f.invokeRequests = append(f.invokeRequests, req)
+	if len(f.invokeSteps) == 0 {
+		f.mu.Unlock()
+		return nil, &fakeLLMScriptError{Operation: "Invoke"}
+	}
+	step := f.invokeSteps[0]
+	f.invokeSteps = f.invokeSteps[1:]
+	f.mu.Unlock()
+	if step.entered != nil {
+		close(step.entered)
+	}
+	if step.release != nil {
+		select {
+		case <-step.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if step.err != nil {
+		return nil, step.err
+	}
+	if step.respond != nil {
+		return step.respond(req)
+	}
+	return step.response, nil
 }
 
 func (f *fakeLLM) Stream(ctx context.Context, req inference.Request) (*inference.StreamReader[content.Chunk], error) {
+	f.mu.Lock()
+	f.streamRequests = append(f.streamRequests, req)
+	var scripted *fakeStreamStep
+	if len(f.streamSteps) != 0 {
+		step := f.streamSteps[0]
+		f.streamSteps = f.streamSteps[1:]
+		scripted = &step
+	}
+	f.mu.Unlock()
+	if scripted != nil {
+		if scripted.entered != nil {
+			close(scripted.entered)
+		}
+		if scripted.release != nil {
+			select {
+			case <-scripted.release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		if scripted.err != nil {
+			return nil, scripted.err
+		}
+		return fakeStreamReader(scripted.chunks, scripted.result), nil
+	}
 	if f.entered != nil {
 		f.enteredOnce.Do(func() { close(f.entered) })
 	}
@@ -53,6 +136,31 @@ func (f *fakeLLM) Stream(ctx context.Context, req inference.Request) (*inference
 		return nil, io.EOF
 	}
 	return inference.NewStreamReader(next, nil), nil
+}
+
+func fakeStreamReader(chunks []content.Chunk, result *inference.StreamResult) *inference.StreamReader[content.Chunk] {
+	index := 0
+	next := func() (content.Chunk, error) {
+		if index == len(chunks) {
+			return nil, io.EOF
+		}
+		chunk := chunks[index]
+		index++
+		return chunk, nil
+	}
+	if result == nil {
+		return inference.NewStreamReader(next, nil)
+	}
+	terminal := *result
+	return inference.NewStreamReaderWithResult(next, nil, func() (inference.StreamResult, bool, error) {
+		return terminal, true, nil
+	})
+}
+
+func (f *fakeLLM) capturedRequests() ([]inference.Request, []inference.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]inference.Request(nil), f.streamRequests...), append([]inference.Request(nil), f.invokeRequests...)
 }
 
 // testModel is a minimal valid inference.Model for fake-client tests. The fake
