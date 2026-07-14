@@ -13,6 +13,7 @@ import (
 	"github.com/looprig/harness/pkg/event"
 	"github.com/looprig/harness/pkg/hustle"
 	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/harness/pkg/rig"
 	"github.com/looprig/inference"
 )
 
@@ -173,6 +174,49 @@ func TestConversationCompactionPolicy(t *testing.T) {
 			}
 			if target.Field != tt.wantField {
 				t.Errorf("Field = %q, want %q", target.Field, tt.wantField)
+			}
+		})
+	}
+}
+
+func TestConversationHustleRegistration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+	}{
+		{name: "first construction"},
+		{name: "repeated construction remains exact"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			registration, err := newConversationHustleRegistration()
+			if err != nil {
+				t.Fatalf("newConversationHustleRegistration() error = %v", err)
+			}
+			definitions := registration.definitions()
+			if len(definitions) != 1 {
+				t.Fatalf("len(definitions()) = %d, want exactly 1", len(definitions))
+			}
+			if got := definitions[0].Name(); got != conversationCompactionName {
+				t.Errorf("definition name = %q, want %q", got, conversationCompactionName)
+			}
+			if got := definitions[0].Descriptor().ModelSource; got != hustle.ModelSourceCurrentLoop {
+				t.Errorf("definition model source = %v, want current loop", got)
+			}
+			wantLimits := rig.HustleLimits{
+				BlockingConcurrent: 1, BlockingQueued: 2,
+				BackgroundConcurrent: 1, BackgroundQueued: 0,
+				AuditTimeout: 30 * time.Second, FinalizationTimeout: 30 * time.Second,
+				WorkerDrainTimeout: 5 * time.Second,
+			}
+			if registration.limits != wantLimits {
+				t.Errorf("registration limits = %+v, want %+v", registration.limits, wantLimits)
+			}
+			definitions[0] = hustle.Definition{}
+			if got := registration.definitions()[0].Name(); got != conversationCompactionName {
+				t.Errorf("registration changed through definitions copy: Name = %q", got)
 			}
 		})
 	}

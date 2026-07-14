@@ -15,9 +15,10 @@ import (
 // fakeLLM is a controllable inference.Client for tests. The loop only ever calls Stream,
 // so Invoke is a stub. Salvaged from the prior coding agent's fake_test.go.
 type fakeLLM struct {
-	chunks    []content.Chunk
-	streamErr error         // returned from Stream() before any chunk
-	hold      chan struct{} // if non-nil, Next blocks on hold or ctx after chunks
+	credential string // opaque test-only connection secret; never part of fingerprints
+	chunks     []content.Chunk
+	streamErr  error         // returned from Stream() before any chunk
+	hold       chan struct{} // if non-nil, Next blocks on hold or ctx after chunks
 
 	entered     chan struct{} // if non-nil, closed once when Stream is first called
 	enteredOnce sync.Once

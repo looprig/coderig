@@ -12,11 +12,16 @@ import (
 
 	"github.com/looprig/cli/tui"
 	"github.com/looprig/core/uuid"
+	"github.com/looprig/harness/pkg/ceiling"
 	"github.com/looprig/harness/pkg/event"
 	"github.com/looprig/harness/pkg/identity"
 	"github.com/looprig/harness/pkg/journal"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/sessionstore"
+	"github.com/looprig/harness/pkg/tool"
+	"github.com/looprig/harness/pkg/tools"
+	"github.com/looprig/inference"
+	"github.com/looprig/inference/contextcount"
 	"github.com/looprig/swe/agents/operator"
 	"github.com/looprig/swe/agents/reviewer"
 )
@@ -82,6 +87,93 @@ func TestSwarmDefinitionsTopology(t *testing.T) {
 	}
 	if !delegates[operator.Name] || !delegates[reviewer.Name] {
 		t.Errorf("primer delegates = %v, want operator + reviewer", primer.Delegates())
+	}
+}
+
+// TestSwarmDefinitionsCompactionComposition proves every native loop carries the
+// same complete context policy and the trusted summary-consumption fragment once.
+func TestSwarmDefinitionsCompactionComposition(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeLLM{}
+	model := testModel()
+	defs, err := swarmDefinitions(client, model, Config{})
+	if err != nil {
+		t.Fatalf("swarmDefinitions() error = %v", err)
+	}
+	if len(defs) != 3 {
+		t.Fatalf("swarmDefinitions() len = %d, want 3", len(defs))
+	}
+	root := t.TempDir()
+	wantCounter := inference.CounterCapability{
+		Transport:    inference.CounterTransportLocal,
+		Retention:    inference.RetentionNone,
+		TokenizerRev: contextcount.EstimatorRevision,
+		Quality:      inference.CountQualityHeuristicEstimate,
+	}
+	wantInference, err := inferenceCapabilityForModel(model)
+	if err != nil {
+		t.Fatalf("inferenceCapabilityForModel() error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		def  loop.Definition
+	}{
+		{name: "operator primer", def: defs[0]},
+		{name: "operator leaf", def: defs[1]},
+		{name: "reviewer leaf", def: defs[2]},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := strings.Count(tt.def.FingerprintInitial().EffectiveSystem, conversationSummaryConsumptionFragment); got != 1 {
+				t.Errorf("summary fragment count = %d, want 1", got)
+			}
+			policy, ok := tt.def.CompactionPolicy()
+			if !ok {
+				t.Fatal("CompactionPolicy() configured = false, want true")
+			}
+			if want := conversationCompactionPolicy(); policy != want {
+				t.Errorf("CompactionPolicy() = %+v, want %+v", policy, want)
+			}
+
+			bound, bindErr := tt.def.Bind(context.Background(), tool.Bindings{
+				SessionID: mustUUID(t),
+				LoopID:    mustUUID(t),
+				Ceiling:   ceiling.New(),
+				Workspace: &tool.WorkspaceBinding{
+					Root:         root,
+					Coordinator:  &testWorkspaceCoordinator{},
+					Observations: tools.NewObservations(),
+				},
+			})
+			if bindErr != nil {
+				t.Fatalf("Bind() error = %v", bindErr)
+			}
+			if got, configured := bound.CounterCapability(); !configured || got != wantCounter {
+				t.Errorf("CounterCapability() = %+v, %v, want %+v, true", got, configured, wantCounter)
+			}
+			if got, configured := bound.InferenceCapability(); !configured || got != wantInference {
+				t.Errorf("InferenceCapability() = %+v, %v, want %+v, true", got, configured, wantInference)
+			}
+			if bound.ContextCounter() == nil {
+				t.Error("ContextCounter() = nil, want fixed local estimator")
+			}
+			if bound.Client() != client {
+				t.Errorf("Client() type = %T, want originating client", bound.Client())
+			}
+			if got := bound.Model(); got.Key() != model.Key() {
+				t.Errorf("Model().Key() = %+v, want %+v", got.Key(), model.Key())
+			}
+		})
+	}
+
+	primerSystem := defs[0].FingerprintInitial().EffectiveSystem
+	operatorSystem := defs[1].FingerprintInitial().EffectiveSystem
+	if got := strings.Replace(primerSystem, operatorDelegation, "", 1); got != operatorSystem {
+		t.Errorf("primer-minus-delegation system != operator leaf system:\nprimer(-deleg)=%q\nleaf=%q", got, operatorSystem)
 	}
 }
 
