@@ -39,19 +39,21 @@ var (
 	_                    = llm.ProviderPhala
 	_                    = llm.ProviderLMStudio
 
-	_ = command.Compact{}
-	_ = event.ContextMeasured{}
-	_ = event.CompactionStarted{}
-	_ = event.CompactionCommitted{}
-	_ = event.CompactionRejected{}
-	_ = event.HustleStarted{}
-	_ = event.HustleCompleted{}
-	_ = event.HustleFailed{}
-	_ = hustle.Define
-	_ = loop.WithContextCounter
-	_ = loop.WithInferenceCapability
-	_ = loop.WithContextObservation
-	_ = loop.WithCompaction
-	_ = rig.WithHustles
-	_ = rig.WithHustleLimits
+	_                       = command.Compact{}
+	_                       = event.ContextMeasured{}
+	_                       = event.CompactionStarted{}
+	_                       = event.CompactionCommitted{}
+	_                       = event.CompactionRejected{}
+	_                       = event.HustleStarted{}
+	_                       = event.HustleCompleted{}
+	_                       = event.HustleFailed{}
+	_ event.EventVisibility = event.Public
+	_                       = event.ShouldDeliver
+	_                       = hustle.Define
+	_                       = loop.WithContextCounter
+	_                       = loop.WithInferenceCapability
+	_                       = loop.WithContextObservation
+	_                       = loop.WithCompaction
+	_                       = rig.WithHustles
+	_                       = rig.WithHustleLimits
 )

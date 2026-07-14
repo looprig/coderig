@@ -3,6 +3,7 @@ package swe
 import (
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"sync"
 	"testing"
@@ -66,10 +67,20 @@ func (s scriptedEventReplayer) Open(context.Context, journal.ReplayRequest) (jou
 }
 
 type scriptedEventCursor struct {
+	events  []event.Event
+	index   int
 	nextErr error
 }
 
 func (s *scriptedEventCursor) Next(context.Context) (event.Event, uint64, error) {
+	if s.index < len(s.events) {
+		ev := s.events[s.index]
+		s.index++
+		return ev, uint64(s.index), nil
+	}
+	if s.nextErr == nil {
+		return nil, 0, io.EOF
+	}
 	return nil, 0, s.nextErr
 }
 func (*scriptedEventCursor) Close() error { return nil }
@@ -109,6 +120,9 @@ type fakeController struct {
 	sub       *fakeSub
 
 	mu                  sync.Mutex
+	compactTargets      []uuid.UUID
+	compactResult       uuid.UUID
+	compactErr          error
 	gotGate             []gate.GateResponse
 	shutdowns           int
 	shutdownErr         error
@@ -135,8 +149,11 @@ func (f *fakeController) SubmitToLoop(context.Context, uuid.UUID, []content.Bloc
 func (f *fakeController) Compact(context.Context) (uuid.UUID, error) {
 	return uuid.UUID{}, nil
 }
-func (f *fakeController) CompactToLoop(context.Context, uuid.UUID) (uuid.UUID, error) {
-	return uuid.UUID{}, nil
+func (f *fakeController) CompactToLoop(_ context.Context, loopID uuid.UUID) (uuid.UUID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.compactTargets = append(f.compactTargets, loopID)
+	return f.compactResult, f.compactErr
 }
 func (f *fakeController) SubscribeEvents(event.EventFilter) (event.Subscription, error) {
 	return f.sub, nil
@@ -174,6 +191,12 @@ func (f *fakeController) responses() []gate.GateResponse {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]gate.GateResponse(nil), f.gotGate...)
+}
+
+func (f *fakeController) compactCalls() []uuid.UUID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]uuid.UUID(nil), f.compactTargets...)
 }
 
 func (f *fakeController) shutdownState() (int, error, time.Time, bool) {
@@ -334,6 +357,59 @@ func TestAcceptsImagesPerLoopFailsClosed(t *testing.T) {
 	}
 }
 
+type compactTestError struct{ message string }
+
+func (e *compactTestError) Error() string { return e.message }
+
+func TestCompactToLoopForwardsExactTargetAndResult(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		target    func(*testing.T, uuid.UUID, uuid.UUID) uuid.UUID
+		result    func(*testing.T) uuid.UUID
+		resultErr error
+	}{
+		{
+			name:   "selected non-active loop and command id",
+			target: func(_ *testing.T, _ uuid.UUID, other uuid.UUID) uuid.UUID { return other },
+			result: mustUUID,
+		},
+		{
+			name:      "controller error identity",
+			target:    func(_ *testing.T, active uuid.UUID, _ uuid.UUID) uuid.UUID { return active },
+			result:    mustUUID,
+			resultErr: &compactTestError{message: "compaction unavailable"},
+		},
+		{
+			name:   "zero target is forwarded without active fallback",
+			target: func(_ *testing.T, _ uuid.UUID, _ uuid.UUID) uuid.UUID { return uuid.UUID{} },
+			result: mustUUID,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			a, controller, active, other := newFakeAgent(t)
+			target := tt.target(t, active, other)
+			controller.compactResult = tt.result(t)
+			controller.compactErr = tt.resultErr
+
+			got, err := a.CompactToLoop(context.Background(), target)
+			if err != tt.resultErr {
+				t.Fatalf("CompactToLoop() error = %v, want identity %v", err, tt.resultErr)
+			}
+			if got != controller.compactResult {
+				t.Errorf("CompactToLoop() id = %v, want %v", got, controller.compactResult)
+			}
+			if calls := controller.compactCalls(); len(calls) != 1 || calls[0] != target {
+				t.Errorf("controller targets = %v, want exactly [%v]", calls, target)
+			}
+		})
+	}
+}
+
 // TestGateIndexResolvesPerLoopAndCall proves the (loopID, toolExecutionID)→GateID index: the
 // SAME tool-execution id in two loops resolves to two DISTINCT gate ids, an unknown (loop,
 // call) fails secure with *GateNotOpenError, and a GateResolved removes the entry.
@@ -384,7 +460,7 @@ func TestSubscribeFoldsGatesBeforeForwarding(t *testing.T) {
 	t.Parallel()
 	a, fc, loop1, _ := newFakeAgent(t)
 
-	stream, err := a.Subscribe(event.EventFilter{})
+	stream, err := a.Subscribe(event.EventFilter{Enduring: event.LoopScope{All: true}})
 	if err != nil {
 		t.Fatalf("Subscribe error = %v", err)
 	}
@@ -414,6 +490,140 @@ func TestSubscribeFoldsGatesBeforeForwarding(t *testing.T) {
 	if err := stream.Close(); err != nil {
 		t.Errorf("stream Close error = %v", err)
 	}
+}
+
+type visibilityCase struct {
+	name       string
+	ev         event.Event
+	wantPublic bool
+}
+
+type visibilityFixture struct {
+	cases           []visibilityCase
+	internalGateKey gateKey
+	publicGateKey   gateKey
+	publicGateID    gate.ID
+}
+
+func newVisibilityFixture(t *testing.T, loopID uuid.UUID) visibilityFixture {
+	t.Helper()
+	publicHeader := func() event.Header {
+		return event.Header{
+			Coordinates: identity.Coordinates{LoopID: loopID},
+			EventID:     mustUUID(t),
+		}
+	}
+	internalHeader := func() event.Header {
+		header := publicHeader()
+		header.EventVisibility = event.Internal
+		return header
+	}
+	internalCall, internalGateID := mustUUID(t), mustUUID(t)
+	publicCall, publicGateID := mustUUID(t), mustUUID(t)
+	internalGate := gateOpened(loopID, internalCall, internalGateID)
+	internalGate.Header = internalHeader()
+	publicGate := gateOpened(loopID, publicCall, publicGateID)
+	publicGate.Header = publicHeader()
+	return visibilityFixture{
+		cases: []visibilityCase{
+			{name: "internal hustle started", ev: event.HustleStarted{Header: internalHeader()}},
+			{name: "internal hustle completed", ev: event.HustleCompleted{Header: internalHeader()}},
+			{name: "internal hustle failed", ev: event.HustleFailed{Header: internalHeader()}},
+			{name: "public compaction committed", ev: event.CompactionCommitted{Header: publicHeader()}, wantPublic: true},
+			{name: "public compaction rejected", ev: event.CompactionRejected{Header: publicHeader()}, wantPublic: true},
+			{name: "unknown visibility", ev: event.SessionStarted{Header: event.Header{EventID: mustUUID(t), EventVisibility: event.EventVisibility(99)}}},
+			{name: "internal gate before fold", ev: internalGate},
+			{name: "public gate before fold", ev: publicGate, wantPublic: true},
+		},
+		internalGateKey: gateKey{loopID: loopID, toolExecutionID: internalCall},
+		publicGateKey:   gateKey{loopID: loopID, toolExecutionID: publicCall},
+		publicGateID:    publicGateID,
+	}
+}
+
+func publicEventIDs(cases []visibilityCase) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(cases))
+	for _, testCase := range cases {
+		if testCase.wantPublic {
+			ids = append(ids, testCase.ev.EventHeader().EventID)
+		}
+	}
+	return ids
+}
+
+func eventIDs(events []event.Event) []uuid.UUID {
+	ids := make([]uuid.UUID, len(events))
+	for index, ev := range events {
+		ids[index] = ev.EventHeader().EventID
+	}
+	return ids
+}
+
+func assertVisibilityGateFold(t *testing.T, a *sessionAgent, fixture visibilityFixture) {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.forward[fixture.internalGateKey]; ok {
+		t.Errorf("internal gate %v was folded before visibility filtering", fixture.internalGateKey)
+	}
+	if got, ok := a.forward[fixture.publicGateKey]; !ok || got != fixture.publicGateID {
+		t.Errorf("public gate fold = %v,%v, want %v,true", got, ok, fixture.publicGateID)
+	}
+}
+
+func TestSubscribeFiltersVisibilityBeforeGateFoldAndDelivery(t *testing.T) {
+	t.Parallel()
+	a, controller, loopID, _ := newFakeAgent(t)
+	fixture := newVisibilityFixture(t, loopID)
+
+	stream, err := a.Subscribe(event.EventFilter{Enduring: event.LoopScope{All: true}})
+	if err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	for _, testCase := range fixture.cases {
+		controller.sub.ch <- event.Delivery{Event: testCase.ev}
+	}
+	if err := controller.sub.Close(); err != nil {
+		t.Fatalf("inner subscription Close() error = %v", err)
+	}
+
+	var got []event.Event
+	for delivery := range stream.Events() {
+		got = append(got, delivery.Event)
+	}
+	if want := publicEventIDs(fixture.cases); !reflect.DeepEqual(eventIDs(got), want) {
+		t.Errorf("delivered event ids = %v, want public ids %v", eventIDs(got), want)
+	}
+	assertVisibilityGateFold(t, a, fixture)
+	if err := stream.Close(); err != nil {
+		t.Errorf("subscription Close() error = %v", err)
+	}
+}
+
+func TestColdReplayFiltersVisibilityBeforeGateFoldAndBacklog(t *testing.T) {
+	t.Parallel()
+	loopID := mustUUID(t)
+	fixture := newVisibilityFixture(t, loopID)
+	events := make([]event.Event, len(fixture.cases))
+	for index, testCase := range fixture.cases {
+		events[index] = testCase.ev
+	}
+	controller := &fakeController{sessionID: mustUUID(t), sub: newFakeSub()}
+	a, err := newSessionAgent(context.Background(), controller, scriptedReplayOpener{
+		replayer: scriptedEventReplayer{cursor: &scriptedEventCursor{events: events}},
+	}, true)
+	if err != nil {
+		t.Fatalf("newSessionAgent() error = %v", err)
+	}
+
+	backlog, err := a.ReplayBacklog(context.Background())
+	if err != nil {
+		t.Fatalf("ReplayBacklog() error = %v", err)
+	}
+	if want := publicEventIDs(fixture.cases); !reflect.DeepEqual(eventIDs(backlog), want) {
+		t.Errorf("backlog event ids = %v, want public ids %v", eventIDs(backlog), want)
+	}
+	assertVisibilityGateFold(t, a, fixture)
 }
 
 // TestReplayBacklogNilForNewSession proves a NEW session has no restore backlog.
