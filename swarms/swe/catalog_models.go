@@ -57,7 +57,8 @@ func chutesKimiK26() inference.Model {
 	return mustValidModel(inference.CustomModel(
 		inference.ProviderName(llm.ProviderChutes), inference.APIFormatOpenAI,
 		"https://api.chutes.ai", "moonshotai/Kimi-K2.6-TEE",
-		inference.WithMaxContext(128_000), inference.WithTools(), inference.WithThinking(),
+		inference.WithContextLimits(inference.ContextLimits{WindowTokens: 128_000}),
+		inference.WithTools(), inference.WithThinking(),
 	))
 }
 
@@ -69,7 +70,8 @@ func phalaGLM52() inference.Model {
 	return mustValidModel(inference.CustomModel(
 		inference.ProviderName(llm.ProviderPhala), inference.APIFormatOpenAI,
 		"https://inference.phala.com/v1", "z-ai/glm-5.2",
-		inference.WithMaxContext(128_000), inference.WithTools(),
+		inference.WithContextLimits(inference.ContextLimits{WindowTokens: 128_000}),
+		inference.WithTools(),
 	))
 }
 

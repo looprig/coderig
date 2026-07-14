@@ -17,31 +17,34 @@ func TestCatalogModelsAreValid(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		got       inference.Model
-		provider  llm.Provider
-		apiFormat inference.APIFormat
-		baseURL   string
-		modelID   string
-		wantCaps  inference.Capabilities
+		name       string
+		got        inference.Model
+		provider   llm.Provider
+		apiFormat  inference.APIFormat
+		baseURL    string
+		modelID    string
+		wantCaps   inference.Capabilities
+		wantLimits inference.ContextLimits
 	}{
 		{
-			name:      "chutes kimi k2.6 (default)",
-			got:       chutesKimiK26(),
-			provider:  llm.ProviderChutes,
-			apiFormat: inference.APIFormatOpenAI,
-			baseURL:   "https://api.chutes.ai",
-			modelID:   "moonshotai/Kimi-K2.6-TEE",
-			wantCaps:  inference.Capabilities{MaxContext: 128_000, Tools: true, Thinking: true},
+			name:       "chutes kimi k2.6 (default)",
+			got:        chutesKimiK26(),
+			provider:   llm.ProviderChutes,
+			apiFormat:  inference.APIFormatOpenAI,
+			baseURL:    "https://api.chutes.ai",
+			modelID:    "moonshotai/Kimi-K2.6-TEE",
+			wantCaps:   inference.Capabilities{Tools: true, Thinking: true},
+			wantLimits: inference.ContextLimits{WindowTokens: 128_000},
 		},
 		{
-			name:      "phala glm 5.2",
-			got:       phalaGLM52(),
-			provider:  llm.ProviderPhala,
-			apiFormat: inference.APIFormatOpenAI,
-			baseURL:   "https://inference.phala.com/v1",
-			modelID:   "z-ai/glm-5.2",
-			wantCaps:  inference.Capabilities{MaxContext: 128_000, Tools: true},
+			name:       "phala glm 5.2",
+			got:        phalaGLM52(),
+			provider:   llm.ProviderPhala,
+			apiFormat:  inference.APIFormatOpenAI,
+			baseURL:    "https://inference.phala.com/v1",
+			modelID:    "z-ai/glm-5.2",
+			wantCaps:   inference.Capabilities{Tools: true},
+			wantLimits: inference.ContextLimits{WindowTokens: 128_000},
 		},
 		{
 			name:      "lmstudio local",
@@ -73,6 +76,9 @@ func TestCatalogModelsAreValid(t *testing.T) {
 			}
 			if tt.got.Caps != tt.wantCaps {
 				t.Errorf("Caps = %+v, want %+v", tt.got.Caps, tt.wantCaps)
+			}
+			if tt.got.Limits != tt.wantLimits {
+				t.Errorf("Limits = %+v, want %+v", tt.got.Limits, tt.wantLimits)
 			}
 		})
 	}

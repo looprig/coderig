@@ -296,6 +296,12 @@ func (a *sessionAgent) Close(ctx context.Context) error {
 	return a.shutdownErr
 }
 
+// CompactToLoop forwards a manual compaction request to the exact loop selected
+// by the CLI. The session owns command identity and error semantics.
+func (a *sessionAgent) CompactToLoop(ctx context.Context, loopID uuid.UUID) (uuid.UUID, error) {
+	return a.sess.CompactToLoop(ctx, loopID)
+}
+
 // gateFoldingSubscription is the single wrapping event.Subscription Subscribe returns. Its
 // forwarding goroutine folds each event's gate transitions into the adapter index before
 // handing the event to the consumer channel; Close tears down both the inner subscription

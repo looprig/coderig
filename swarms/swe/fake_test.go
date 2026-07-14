@@ -54,11 +54,13 @@ func (f *fakeLLM) Stream(ctx context.Context, req inference.Request) (*inference
 	return inference.NewStreamReader(next, nil), nil
 }
 
-// testModel is a minimal valid inference.Model for fake-client tests. The fake ignores it; loop
-// binding only requires it to pass inference.Model.Validate (valid provider/APIFormat/BaseURL +
-// non-empty name), which the loopback LM Studio catalog row satisfies.
+// testModel is a minimal valid inference.Model for fake-client tests. The fake
+// ignores it, but the configured window mirrors a consumer-supplied LM Studio
+// limit so context-enabled definitions have a resolvable input denominator.
 func testModel() inference.Model {
-	return lmStudioLocal("fake-model")
+	model := lmStudioLocal("fake-model")
+	model.Limits = inference.ContextLimits{WindowTokens: 128_000}
+	return model
 }
 
 // newTestAgent builds an ISOLATED headless sessionAgent over a FRESH in-memory store and a

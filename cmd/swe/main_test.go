@@ -132,6 +132,9 @@ func (*orderingAgent) Submit(context.Context, []content.Block) (uuid.UUID, error
 func (*orderingAgent) SubmitToLoop(context.Context, uuid.UUID, []content.Block) (uuid.UUID, error) {
 	return uuid.UUID{}, nil
 }
+func (*orderingAgent) CompactToLoop(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.UUID{}, nil
+}
 func (*orderingAgent) ActiveLoopID() uuid.UUID                                 { return uuid.UUID{} }
 func (*orderingAgent) Interrupt(context.Context) (bool, error)                 { return false, nil }
 func (a *orderingAgent) Close(context.Context) error                           { a.close(); return nil }

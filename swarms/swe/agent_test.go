@@ -132,6 +132,12 @@ func (f *fakeController) Submit(context.Context, []content.Block) (uuid.UUID, er
 func (f *fakeController) SubmitToLoop(context.Context, uuid.UUID, []content.Block) (uuid.UUID, error) {
 	return uuid.UUID{}, nil
 }
+func (f *fakeController) Compact(context.Context) (uuid.UUID, error) {
+	return uuid.UUID{}, nil
+}
+func (f *fakeController) CompactToLoop(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.UUID{}, nil
+}
 func (f *fakeController) SubscribeEvents(event.EventFilter) (event.Subscription, error) {
 	return f.sub, nil
 }

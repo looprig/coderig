@@ -1,20 +1,23 @@
 package swe
 
-// This is the Task 1 dependency-surface probe from
-// docs/plans/2026-07-11-harness-rig-migration-implementation.md. It compiles only when the
-// final harness rig/loop/session/event symbols and the migrated CLI tui.Agent contract
-// (ActiveLoopID and loop-targeted AcceptsImages) are present. In this
-// workspace those modules resolve via the local `replace` directives to the reviewed
-// harness/cli checkouts, so the surface is already available; this file guards against a
-// regression in that surface while the swe migration proceeds. It carries no test
-// functions — its value is that it must build.
+// This compile-only dependency-surface probe covers both the completed rig
+// migration and Task 34's context/hustle additions. It builds only when the
+// planned core, inference, LLM, harness, and CLI APIs are all present through
+// SWE's retained local replaces. It carries no test functions because its value
+// is that the package cannot compile against a partial dependency rollout.
 
 import (
 	"github.com/looprig/cli/tui"
+	"github.com/looprig/core/content"
+	"github.com/looprig/harness/pkg/command"
 	"github.com/looprig/harness/pkg/event"
+	"github.com/looprig/harness/pkg/hustle"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/rig"
 	"github.com/looprig/harness/pkg/session"
+	"github.com/looprig/inference"
+	"github.com/looprig/inference/contextcount"
+	"github.com/looprig/llm"
 )
 
 var (
@@ -26,4 +29,29 @@ var (
 	_ tui.Agent
 	_ = loop.WithDisplayName
 	_ = rig.WithOffloadGC
+
+	_ content.TokenCount = 1
+	_                    = inference.ContextLimits{WindowTokens: 1}
+	_                    = inference.InferenceCapability{}
+	_                    = inference.CounterCapability{}
+	_                    = contextcount.NewEstimator
+	_                    = llm.ProviderChutes
+	_                    = llm.ProviderPhala
+	_                    = llm.ProviderLMStudio
+
+	_ = command.Compact{}
+	_ = event.ContextMeasured{}
+	_ = event.CompactionStarted{}
+	_ = event.CompactionCommitted{}
+	_ = event.CompactionRejected{}
+	_ = event.HustleStarted{}
+	_ = event.HustleCompleted{}
+	_ = event.HustleFailed{}
+	_ = hustle.Define
+	_ = loop.WithContextCounter
+	_ = loop.WithInferenceCapability
+	_ = loop.WithContextObservation
+	_ = loop.WithCompaction
+	_ = rig.WithHustles
+	_ = rig.WithHustleLimits
 )

@@ -125,6 +125,11 @@ func firstValidModel(tier ModelTier, models []inference.Model) (*inference.Model
 		if err := validateCatalogModel(m); err != nil {
 			return nil, &ModelCatalogError{Tier: tier, Index: i, Reason: err.Error(), Cause: err}
 		}
+		if tier == TierStandard {
+			if err := validateStandardModelContext(m); err != nil {
+				return nil, &ModelCatalogError{Tier: tier, Index: i, Reason: err.Error(), Cause: err}
+			}
+		}
 		if first == nil {
 			m := m
 			first = &m
