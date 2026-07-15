@@ -18,7 +18,7 @@ require (
 	github.com/looprig/sandbox v0.1.0
 	github.com/looprig/storage v0.2.0
 	github.com/looprig/tools v0.1.0
-	github.com/looprig/tui v0.1.0
+	github.com/looprig/tui v0.7.0
 )
 
 require (
