@@ -3,7 +3,7 @@ module github.com/looprig/swe
 go 1.26.4
 
 require (
-	github.com/looprig/cli v0.6.0
+	github.com/looprig/cli v0.6.1
 	github.com/looprig/core v0.2.0
 	github.com/looprig/fsstore v0.2.0
 	github.com/looprig/harness v0.11.0
