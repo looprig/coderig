@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/looprig/harness/pkg/identity"
-	"github.com/looprig/tools"
+	"github.com/looprig/tools/skill"
 )
 
 // skills_catalog.go is the composition-root seam that turns the swarm's per-agent
@@ -59,7 +59,7 @@ type skillScope struct {
 // catalog: the agent still gets the skills that do resolve. This is fail-safe for
 // a trusted, compiled-in catalogue; the loader's own tests pin the per-file
 // parse behaviour.
-func availableSkillsCatalog(ctx context.Context, describer tools.SkillDescriber, agent identity.AgentName, skills []string) string {
+func availableSkillsCatalog(ctx context.Context, describer skill.SkillDescriber, agent identity.AgentName, skills []string) string {
 	if len(skills) == 0 {
 		return ""
 	}

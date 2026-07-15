@@ -20,7 +20,7 @@ import (
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/inference"
 	"github.com/looprig/sandbox"
-	"github.com/looprig/tools"
+	"github.com/looprig/tools/skill"
 	"github.com/looprig/tui"
 	"github.com/looprig/tui/sessionadapter"
 )
@@ -178,7 +178,7 @@ func (e *LoopDefinitionError) Unwrap() error { return e.Cause }
 // workspace-eligible and the mode is on, the built tool is WORKSPACE-ENABLED at the bound
 // workspace root (read per bind; embedded-wins, a non-embedded name is Ask-gated). The
 // returned Definition is immutable and shared by the primer and the operator leaf.
-func skillDefinitionFor(loader tools.SkillLoader, b leafBuiltin, cfg Config) tool.Definition {
+func skillDefinitionFor(loader skill.SkillLoader, b leafBuiltin, cfg Config) tool.Definition {
 	workspaceEnabled := cfg.RuntimeSkills && b.allowsRuntimeSkills
 	if len(b.skills) == 0 && !workspaceEnabled {
 		return nil
@@ -190,9 +190,9 @@ func skillDefinitionFor(loader tools.SkillLoader, b leafBuiltin, cfg Config) too
 	agent := b.name
 	return tool.NewDefinition(skillToolName, requirements, func(_ context.Context, bind tool.Bindings) ([]tool.InvokableTool, error) {
 		if workspaceEnabled {
-			return []tool.InvokableTool{tools.NewSkill(loader, agent, tools.WithWorkspaceRoot(bind.Workspace.Root))}, nil
+			return []tool.InvokableTool{skill.NewSkill(loader, agent, skill.WithWorkspaceRoot(bind.Workspace.Root))}, nil
 		}
-		return []tool.InvokableTool{tools.NewSkill(loader, agent)}, nil
+		return []tool.InvokableTool{skill.NewSkill(loader, agent)}, nil
 	})
 }
 
@@ -226,7 +226,7 @@ func swarmDefinitionsWithContextPolicy(client inference.Client, model inference.
 	for _, b := range builtins {
 		scopes = append(scopes, skillScope{name: b.name, skills: b.skills})
 	}
-	loader := tools.NewEmbeddedSkillLoader(SkillsFS, buildSkillAllow(scopes))
+	loader := skill.NewEmbeddedSkillLoader(SkillsFS, buildSkillAllow(scopes))
 
 	// ONE confine.Factory per role: operator-primary + operator leaf share the operator
 	// factory (each memoizes per bound LoopID, so the two loops still get fresh executors);

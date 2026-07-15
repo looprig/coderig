@@ -7,7 +7,7 @@ import (
 	"github.com/looprig/coderig/agents/operator"
 	"github.com/looprig/coderig/agents/reviewer"
 	"github.com/looprig/harness/pkg/loop"
-	"github.com/looprig/tools"
+	"github.com/looprig/tools/skill"
 )
 
 // skills_wiring_test.go proves the composition root wires the per-agent Skill tool and the
@@ -16,12 +16,12 @@ import (
 
 // testSkillLoader builds the embedded skill loader over the roster's allow-map, exactly as
 // swarmDefinitions does.
-func testSkillLoader() tools.SkillLoader {
+func testSkillLoader() skill.SkillLoader {
 	scopes := []skillScope{
 		{name: operator.Name, skills: operatorSkills},
 		{name: reviewer.Name},
 	}
-	return tools.NewEmbeddedSkillLoader(SkillsFS, buildSkillAllow(scopes))
+	return skill.NewEmbeddedSkillLoader(SkillsFS, buildSkillAllow(scopes))
 }
 
 // TestDefinitionSystemPromptsCarrySkillCatalog proves the operator loops' system prompt carries

@@ -9,6 +9,8 @@ import (
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/sandbox"
 	"github.com/looprig/tools"
+	"github.com/looprig/tools/permission"
+	"github.com/looprig/tools/websearch"
 )
 
 type loopTools struct {
@@ -18,7 +20,7 @@ type loopTools struct {
 }
 
 func newReadGuard() (loop.ReadGuard, error) {
-	return tools.NewPermissionChecker(tools.PermissionPolicy{HardDeny: tools.DefaultHardDeny()})
+	return permission.NewPermissionChecker(permission.PermissionPolicy{HardDeny: permission.DefaultHardDeny()})
 }
 
 func newConfinement(maxMode sandbox.Mode) (*confinement.Factory, error) {
@@ -38,12 +40,12 @@ func permissionFactory(agent string, factory *confinement.Factory, approved []st
 		if err != nil {
 			return nil, err
 		}
-		policy := tools.PermissionPolicy{
+		policy := permission.PermissionPolicy{
 			WorkspaceRoot: bindings.Workspace.Root,
-			HardDeny:      tools.DefaultHardDeny(),
-			HardApprove:   tools.HardApproveRules{Tools: approved},
+			HardDeny:      permission.DefaultHardDeny(),
+			HardApprove:   permission.HardApproveRules{Tools: approved},
 		}
-		checker, err := tools.NewPermissionChecker(policy, confined.PermissionOptions()...)
+		checker, err := permission.NewPermissionChecker(policy, confined.PermissionOptions()...)
 		if err != nil {
 			return nil, &LoopDefinitionError{Agent: agent, Cause: err}
 		}
@@ -52,10 +54,10 @@ func permissionFactory(agent string, factory *confinement.Factory, approved []st
 }
 
 func policyRevision(approved []string) string {
-	return tools.PolicyFingerprint(tools.PermissionPolicy{
-		HardDeny:    tools.DefaultHardDeny(),
-		HardApprove: tools.HardApproveRules{Tools: approved},
-	}, tools.FingerprintMode{})
+	return permission.PolicyFingerprint(permission.PermissionPolicy{
+		HardDeny:    permission.DefaultHardDeny(),
+		HardApprove: permission.HardApproveRules{Tools: approved},
+	}, permission.FingerprintMode{})
 }
 
 func buildOperatorTools(factory *confinement.Factory, client *http.Client, skill tool.Definition) (loopTools, error) {
@@ -71,7 +73,7 @@ func buildOperatorTools(factory *confinement.Factory, client *http.Client, skill
 		tools.GlobDefinition(guard),
 		factory.GrepDefinition(guard),
 		factory.BashDefinition(),
-		tools.WebSearchDefinition(tools.NewDuckDuckGoProvider(client)),
+		tools.WebSearchDefinition(websearch.NewDuckDuckGoProvider(client)),
 		tools.FetchDefinition(client),
 		tools.TodoDefinition(),
 		tools.AskUserDefinition(),

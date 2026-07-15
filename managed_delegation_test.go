@@ -27,7 +27,7 @@ import (
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/inference"
 	"github.com/looprig/storage/memstore"
-	"github.com/looprig/tools"
+	"github.com/looprig/tools/todo"
 )
 
 // managedScript is a deterministic provider fake that drives the model-facing Subagent
@@ -299,7 +299,7 @@ func TestManagedPrimerPermissionPreservesOptionalCapabilities(t *testing.T) {
 		grants:   []string{"grant-a", "grant-b"},
 	}
 	wrapped := managedPrimerPermission{PermissionGate: base}
-	ordinary := tools.NewTodo()
+	ordinary := todo.NewTodo()
 
 	decision := wrapped.CheckDecision(context.Background(), ordinary, "Todo", `{"action":"list"}`)
 	if decision != base.decision {

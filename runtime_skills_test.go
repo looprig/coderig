@@ -9,7 +9,7 @@ import (
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/security"
 	"github.com/looprig/harness/pkg/tool"
-	"github.com/looprig/tools"
+	"github.com/looprig/tools/skill"
 )
 
 // runtime_skills_test.go proves the §7a per-agent Skill definition builds a bound Skill tool
@@ -17,8 +17,8 @@ import (
 // on), and that the reviewer never gets one.
 
 // runtimeSkillLoader mirrors swarmDefinitions' loader over the roster allow-map.
-func runtimeSkillLoader() tools.SkillLoader {
-	return tools.NewEmbeddedSkillLoader(SkillsFS, buildSkillAllow([]skillScope{
+func runtimeSkillLoader() skill.SkillLoader {
+	return skill.NewEmbeddedSkillLoader(SkillsFS, buildSkillAllow([]skillScope{
 		{name: operator.Name, skills: operatorSkills},
 		{name: reviewer.Name},
 	}))
