@@ -21,6 +21,12 @@ import (
 
 const sessionAgentInitShutdownTimeout = 10 * time.Second
 
+// shouldExposeEvent applies the harness's fail-closed visibility and requested
+// class/loop filter before an event can affect adapter projections or consumers.
+func shouldExposeEvent(filter event.EventFilter, ev event.Event) bool {
+	return event.ShouldDeliver(filter, ev)
+}
+
 // sessionAgent adapts a rig session.SessionController to the CLI's tui.Agent surface. It
 // owns three things and nothing else: the live session controller, a replay dependency used
 // for the one cold restore replay, and a concurrency-safe gate index that folds
@@ -33,7 +39,7 @@ type sessionAgent struct {
 	replayer journal.EventReplayer // nil for a new/headless session with no replay
 
 	isRestore bool
-	backlog   []event.Event // restored all-loop Enduring history; nil for new/headless
+	backlog   []event.Event // restored public all-loop Enduring history; nil for new/headless
 
 	// mu guards the gate indexes below. foldGate mutates them from the cold replay (at
 	// construction) and from every Subscribe forwarding goroutine; the gate-reply trio reads
@@ -55,14 +61,14 @@ type gateKey struct {
 }
 
 // replayOpener is the narrow slice of the session store the adapter needs: open a durable
-// event replayer for one session. *sessionstore.Store satisfies it.
+// public event replayer for one session. *sessionstore.Store satisfies it.
 type replayOpener interface {
 	OpenEventReplayer(uuid.UUID, sessionstore.ReplayRequest) (journal.EventReplayer, error)
 }
 
 // newSessionAgent wraps a live rig session controller as a tui.Agent. A restored session
-// performs one unnarrowed cold replay, folding every loop's gate events and materializing
-// all-loop Enduring history for uniform CLI projections.
+// performs one unnarrowed cold replay, filtering visibility before folding every requested
+// loop's gate events and materializing public all-loop Enduring history for CLI projections.
 func newSessionAgent(ctx context.Context, sess session.SessionController, store replayOpener, isRestore bool) (*sessionAgent, error) {
 	a := &sessionAgent{
 		sess:      sess,
@@ -95,8 +101,8 @@ func (a *sessionAgent) failInitialization(primary error) error {
 	return errors.Join(primary, a.Close(ctx))
 }
 
-// coldReplay drains the whole durable log once (all loops), folding every gate event into
-// the index and collecting all Enduring events in session order as the restore backlog.
+// coldReplay drains the public durable log once (all loops), applying the same fail-closed
+// product filter used by live delivery before gate folds and backlog materialization.
 func (a *sessionAgent) coldReplay(ctx context.Context) error {
 	if a.replayer == nil {
 		return nil
@@ -114,6 +120,9 @@ func (a *sessionAgent) coldReplay(ctx context.Context) error {
 		}
 		if err != nil {
 			return err // typed fail-secure error (object missing/corrupt) — surfaced unchanged
+		}
+		if !shouldExposeEvent(event.EventFilter{Enduring: event.LoopScope{All: true}}, ev) {
+			continue
 		}
 		a.foldGate(ev)
 		if ev.Class() == event.Enduring {
@@ -170,10 +179,10 @@ func (a *sessionAgent) AcceptsImages(loopID uuid.UUID) bool {
 	return handle.Model().Caps.AcceptsImages
 }
 
-// Subscribe returns ONE wrapping subscription over the session fan-in that folds
-// GateOpened/GateResolved into the adapter's gate index BEFORE forwarding each event to the
-// consumer, so a live gate is answerable the instant the CLI observes its request. It never
-// opens a second subscription.
+// Subscribe returns ONE wrapping subscription over the session fan-in. It applies the
+// caller's product filter before folding GateOpened/GateResolved into the adapter index and
+// forwarding, so a live gate is answerable the instant the CLI observes its request. It
+// never opens a second subscription.
 func (a *sessionAgent) Subscribe(filter event.EventFilter) (event.Subscription, error) {
 	inner, err := a.sess.SubscribeEvents(filter)
 	if err != nil {
@@ -183,6 +192,9 @@ func (a *sessionAgent) Subscribe(filter event.EventFilter) (event.Subscription, 
 	go func() {
 		defer close(sub.out)
 		for delivery := range inner.Events() {
+			if !shouldExposeEvent(filter, delivery.Event) {
+				continue
+			}
 			a.foldGate(delivery.Event)
 			select {
 			case sub.out <- delivery:
@@ -194,8 +206,8 @@ func (a *sessionAgent) Subscribe(filter event.EventFilter) (event.Subscription, 
 	return sub, nil
 }
 
-// ReplayBacklog returns the restored session's all-loop Enduring history materialized at
-// construction, in session order. A NEW/headless session returns nil (the CLI skips the
+// ReplayBacklog returns the restored session's public all-loop Enduring history materialized
+// at construction, in session order. A NEW/headless session returns nil (the CLI skips the
 // repaint). ctx is accepted for the contract; the backlog was folded once at restore.
 func (a *sessionAgent) ReplayBacklog(_ context.Context) ([]event.Event, error) {
 	if !a.isRestore {
@@ -296,10 +308,16 @@ func (a *sessionAgent) Close(ctx context.Context) error {
 	return a.shutdownErr
 }
 
+// CompactToLoop forwards a manual compaction request to the exact loop selected
+// by the CLI. The session owns command identity and error semantics.
+func (a *sessionAgent) CompactToLoop(ctx context.Context, loopID uuid.UUID) (uuid.UUID, error) {
+	return a.sess.CompactToLoop(ctx, loopID)
+}
+
 // gateFoldingSubscription is the single wrapping event.Subscription Subscribe returns. Its
-// forwarding goroutine folds each event's gate transitions into the adapter index before
-// handing the event to the consumer channel; Close tears down both the inner subscription
-// and the forwarder (via done) so a consumer that stops reading cannot leak the goroutine.
+// forwarding goroutine filters before folding each visible gate transition into the adapter
+// index and handing the event to the consumer channel; Close tears down both the inner
+// subscription and the forwarder so a consumer that stops reading cannot leak the goroutine.
 type gateFoldingSubscription struct {
 	inner event.Subscription
 	out   chan event.Delivery

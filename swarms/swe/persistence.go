@@ -128,6 +128,17 @@ func buildRig(definitions []loop.Definition, stores *swarmStores, root string, c
 // callers use buildRig's SWE defaults; focused topology tests vary only these limits while
 // retaining the exact production definitions, stores, workspace, and policy wiring.
 func buildRigForDelegationCaps(definitions []loop.Definition, stores *swarmStores, root string, cfg Config, allowMismatch bool, limits rig.DelegationLimits) (*rig.Rig, error) {
+	registration, err := newConversationHustleRegistration()
+	if err != nil {
+		return nil, err
+	}
+	return buildRigWithRegistration(definitions, stores, root, cfg, allowMismatch, limits, registration)
+}
+
+// buildRigWithRegistration is the common immutable rig assembly. Production
+// supplies exactly one reviewed registration; focused tests can vary its public
+// descriptor and limits to prove fingerprint sensitivity.
+func buildRigWithRegistration(definitions []loop.Definition, stores *swarmStores, root string, cfg Config, allowMismatch bool, limits rig.DelegationLimits, registration conversationHustleRegistration) (*rig.Rig, error) {
 	options := []rig.Option{
 		rig.WithLoops(definitions...),
 		rig.WithPrimers(string(operatorPrimaryName)),
@@ -140,6 +151,7 @@ func buildRigForDelegationCaps(definitions []loop.Definition, stores *swarmStore
 		rig.WithCeilingFactory(newCeilingFactory(cfg.SecurityCeiling)),
 		rig.WithOffloadGC(rig.OffloadGCPolicy{Interval: offloadGCInterval, Timeout: offloadGCTimeout}),
 	}
+	options = append(options, registration.options()...)
 	if allowMismatch {
 		options = append(options, rig.WithAllowConfigMismatch())
 	}
@@ -208,13 +220,13 @@ func (f *SessionStoreFactory) Open(ctx context.Context, sel SessionSelector, cfg
 // integration tests drive with an injected fake client. A resume threads
 // sel.AllowConfigMismatch into the rig so a deliberate config change can proceed.
 func (f *SessionStoreFactory) openWithClient(ctx context.Context, client inference.Client, factory ModelFactory, sel SessionSelector, cfg Config) (*sessionAgent, error) {
-	root, err := os.Getwd()
-	if err != nil {
-		return nil, &WorkspaceRootError{Cause: err}
-	}
 	definitions, err := swarmDefinitions(client, factory(), cfg)
 	if err != nil {
 		return nil, err
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		return nil, &WorkspaceRootError{Cause: err}
 	}
 	assembly, err := buildRig(definitions, f.stores, root, cfg, sel.AllowConfigMismatch)
 	if err != nil {

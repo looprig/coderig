@@ -116,6 +116,12 @@ func TestModelCatalogInvalidModelIsTyped(t *testing.T) {
 		wantIndex int
 	}{
 		{
+			name:      "standard model with unknown input limit",
+			catalog:   ModelCatalog{Standard: []inference.Model{lmStudioLocal("unknown-limit")}},
+			wantTier:  TierStandard,
+			wantIndex: 0,
+		},
+		{
 			name:      "empty model name in standard",
 			catalog:   ModelCatalog{Standard: []inference.Model{catalogModel("ok"), catalogModel("")}},
 			wantTier:  TierStandard,

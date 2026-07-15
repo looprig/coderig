@@ -4,6 +4,8 @@ package swe
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,7 +15,11 @@ import (
 	"github.com/looprig/core/content"
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/event"
+	"github.com/looprig/harness/pkg/hustle"
 	"github.com/looprig/harness/pkg/identity"
+	"github.com/looprig/harness/pkg/journal"
+	"github.com/looprig/harness/pkg/sessionstore"
+	"github.com/looprig/inference"
 )
 
 // textChunk wraps s as a streamed text chunk for the fake LLM. (The fake_test fakeLLM is
@@ -33,6 +39,130 @@ func newIntegrationFactory(t *testing.T) *SessionStoreFactory {
 	}
 	t.Cleanup(func() { _ = f.Close() })
 	return f
+}
+
+func persistedVisibilityEvents(t *testing.T, sessionID, loopID uuid.UUID) []event.Event {
+	t.Helper()
+	definition, err := newConversationCompactionDefinition()
+	if err != nil {
+		t.Fatalf("newConversationCompactionDefinition() error = %v", err)
+	}
+	internalHeader := func() event.Header {
+		return event.Header{
+			Coordinates:     identity.Coordinates{SessionID: sessionID},
+			EventID:         mustUUID(t),
+			EventVisibility: event.Internal,
+		}
+	}
+	run := func() event.HustleRunDescriptor {
+		return event.HustleRunDescriptor{Definition: definition.Descriptor(), RunID: hustle.RunID(mustUUID(t))}
+	}
+	completedRun := run()
+	completedRun.Runtime = event.ModelRuntime{
+		Key:    inference.ModelKey{Provider: "test", Model: "test"},
+		Limits: inference.ContextLimits{WindowTokens: 100},
+	}
+	publicHeader := event.Header{
+		Coordinates: identity.Coordinates{SessionID: sessionID, LoopID: loopID},
+		EventID:     mustUUID(t),
+	}
+	return []event.Event{
+		event.HustleStarted{Header: internalHeader(), Run: run()},
+		event.HustleCompleted{Header: internalHeader(), Run: completedRun},
+		event.HustleFailed{
+			Header: internalHeader(),
+			Run:    run(), Stage: hustle.StageQueue, ReasonCode: hustle.ReasonCanceled,
+		},
+		event.CompactionRejected{
+			Header:           publicHeader,
+			AttemptID:        event.CompactAttemptID(mustUUID(t)),
+			WaiterCommandIDs: []uuid.UUID{mustUUID(t)},
+			Reason:           event.CompactionReasonManual,
+			Basis:            event.ContextBasis{Revision: 1, ThroughEventID: mustUUID(t)},
+			RejectReason:     event.CompactRejectUnavailable,
+		},
+	}
+}
+
+func drainEventReplay(t *testing.T, replayer journal.EventReplayer) []event.Event {
+	t.Helper()
+	cursor, err := replayer.Open(context.Background(), journal.ReplayRequest{From: journal.Beginning()})
+	if err != nil {
+		t.Fatalf("replayer.Open() error = %v", err)
+	}
+	defer func() { _ = cursor.Close() }()
+	var events []event.Event
+	for {
+		ev, _, nextErr := cursor.Next(context.Background())
+		if errors.Is(nextErr, io.EOF) {
+			return events
+		}
+		if nextErr != nil {
+			t.Fatalf("cursor.Next() error = %v", nextErr)
+		}
+		events = append(events, ev)
+	}
+}
+
+func TestPersistedVisibilityFiltersPublicBacklogAndRetainsAudit(t *testing.T) {
+	factory := newIntegrationFactory(t)
+	sessionID, loopID := mustUUID(t), mustUUID(t)
+	lease, err := factory.stores.session.AcquireLease(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("AcquireLease() error = %v", err)
+	}
+	t.Cleanup(func() { _ = lease.Release(context.Background()) })
+	writer, err := factory.stores.session.OpenJournal(context.Background(), sessionID, lease)
+	if err != nil {
+		t.Fatalf("OpenJournal() error = %v", err)
+	}
+	for _, ev := range persistedVisibilityEvents(t, sessionID, loopID) {
+		if _, err := writer.Append(context.Background(), journal.NewEventRecord(ev)); err != nil {
+			t.Fatalf("Append(%T) error = %v", ev, err)
+		}
+	}
+
+	tests := []struct {
+		name      string
+		load      func(*testing.T) []event.Event
+		wantTypes []string
+	}{
+		{
+			name: "adapter restore backlog exposes only public compaction terminal",
+			load: func(t *testing.T) []event.Event {
+				controller := &fakeController{sessionID: sessionID, sub: newFakeSub()}
+				agent, err := newSessionAgent(context.Background(), controller, factory.stores.session, true)
+				if err != nil {
+					t.Fatalf("newSessionAgent() error = %v", err)
+				}
+				backlog, err := agent.ReplayBacklog(context.Background())
+				if err != nil {
+					t.Fatalf("ReplayBacklog() error = %v", err)
+				}
+				return backlog
+			},
+			wantTypes: []string{"event.CompactionRejected"},
+		},
+		{
+			name: "privileged replay retains internal audit and public terminal",
+			load: func(t *testing.T) []event.Event {
+				replayer, err := factory.stores.session.OpenInternalEventReplayer(sessionID, sessionstore.ReplayRequest{})
+				if err != nil {
+					t.Fatalf("OpenInternalEventReplayer() error = %v", err)
+				}
+				return drainEventReplay(t, replayer)
+			},
+			wantTypes: []string{"event.HustleStarted", "event.HustleCompleted", "event.HustleFailed", "event.CompactionRejected"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := typeNames(tt.load(t))
+			if !reflect.DeepEqual(got, tt.wantTypes) {
+				t.Errorf("event types = %v, want %v", got, tt.wantTypes)
+			}
+		})
+	}
 }
 
 // drainTurn submits input through the persisted agent and drains a fresh subscription to the

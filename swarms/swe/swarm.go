@@ -198,6 +198,17 @@ func skillDefinitionFor(loader tools.SkillLoader, b leafBuiltin, cfg Config) too
 // difference is the primer's appended operatorDelegation guidance. Every collaborator is root-free — the
 // workspace root is a rig placement concern read per bind, never captured here.
 func swarmDefinitions(client inference.Client, model inference.Model, cfg Config) ([]loop.Definition, error) {
+	contextPolicy, err := newConversationContextPolicy(model)
+	if err != nil {
+		return nil, err
+	}
+	return swarmDefinitionsWithContextPolicy(client, model, cfg, contextPolicy)
+}
+
+// swarmDefinitionsWithContextPolicy is the immutable assembly seam. Production
+// resolves policy before entering it; focused tests vary one secret-free policy
+// dimension without mutable package globals.
+func swarmDefinitionsWithContextPolicy(client inference.Client, model inference.Model, cfg Config, contextPolicy conversationContextPolicy) ([]loop.Definition, error) {
 	httpCl := newHTTPClient()
 	runtimeCtx := NewRuntimeContextProvider()
 
@@ -228,11 +239,11 @@ func swarmDefinitions(client inference.Client, model inference.Model, cfg Config
 
 	ctx := context.Background()
 	operatorCatalog := availableSkillsCatalog(ctx, loader, operator.Name, opBuiltin.skills)
-	operatorLeafSystem := Identity + operator.Role + operatorCatalog
-	operatorPrimerSystem := Identity + operator.Role + operatorDelegation + operatorCatalog
-	reviewerSystem := Identity + reviewer.Role + availableSkillsCatalog(ctx, loader, reviewer.Name, revBuiltin.skills)
+	operatorLeafSystem := contextPolicy.system(Identity + operator.Role + operatorCatalog)
+	operatorPrimerSystem := contextPolicy.system(Identity + operator.Role + operatorDelegation + operatorCatalog)
+	reviewerSystem := contextPolicy.system(Identity + reviewer.Role + availableSkillsCatalog(ctx, loader, reviewer.Name, revBuiltin.skills))
 
-	primer, err := loop.Define(
+	primerOptions := []loop.Option{
 		loop.WithName(operatorPrimaryName),
 		loop.WithDisplayName(string(operator.Name)),
 		loop.WithDescription(operator.Description),
@@ -240,39 +251,45 @@ func swarmDefinitions(client inference.Client, model inference.Model, cfg Config
 		loop.WithSystem(operatorPrimerSystem),
 		loop.WithTools(opTools.Definitions...),
 		loop.WithPermissionFactory(managedPrimerPermissionFactory(opTools.Permission)),
-		loop.WithPolicyRevision(opTools.PolicyRevision+":"+managedSubagentToolName),
+		loop.WithPolicyRevision(contextPolicy.policyRevision(opTools.PolicyRevision + ":" + managedSubagentToolName)),
 		loop.WithRuntimeContext(runtimeCtx),
 		loop.WithDelegates(operator.Name, reviewer.Name),
 		loop.WithDelegation(loop.Delegation{Style: loop.DelegationManaged}),
-	)
+	}
+	primerOptions = append(primerOptions, contextPolicy.options()...)
+	primer, err := loop.Define(primerOptions...)
 	if err != nil {
 		return nil, &LoopDefinitionError{Agent: string(operatorPrimaryName), Cause: err}
 	}
 
-	operatorLeaf, err := loop.Define(
+	operatorOptions := []loop.Option{
 		loop.WithName(operator.Name),
 		loop.WithDescription(operator.Description),
 		loop.WithInference(client, model),
 		loop.WithSystem(operatorLeafSystem),
 		loop.WithTools(opTools.Definitions...),
 		loop.WithPermissionFactory(opTools.Permission),
-		loop.WithPolicyRevision(opTools.PolicyRevision),
+		loop.WithPolicyRevision(contextPolicy.policyRevision(opTools.PolicyRevision)),
 		loop.WithRuntimeContext(runtimeCtx),
-	)
+	}
+	operatorOptions = append(operatorOptions, contextPolicy.options()...)
+	operatorLeaf, err := loop.Define(operatorOptions...)
 	if err != nil {
 		return nil, &LoopDefinitionError{Agent: string(operator.Name), Cause: err}
 	}
 
-	reviewerLeaf, err := loop.Define(
+	reviewerOptions := []loop.Option{
 		loop.WithName(reviewer.Name),
 		loop.WithDescription(reviewer.Description),
 		loop.WithInference(client, model),
 		loop.WithSystem(reviewerSystem),
 		loop.WithTools(revTools.Definitions...),
 		loop.WithPermissionFactory(revTools.Permission),
-		loop.WithPolicyRevision(revTools.PolicyRevision),
+		loop.WithPolicyRevision(contextPolicy.policyRevision(revTools.PolicyRevision)),
 		loop.WithRuntimeContext(runtimeCtx),
-	)
+	}
+	reviewerOptions = append(reviewerOptions, contextPolicy.options()...)
+	reviewerLeaf, err := loop.Define(reviewerOptions...)
 	if err != nil {
 		return nil, &LoopDefinitionError{Agent: string(reviewer.Name), Cause: err}
 	}
@@ -301,15 +318,28 @@ func New(ctx context.Context, cfg Config) (tui.Agent, error) {
 // as the exclusive workspace, opens a NEW session, and wraps it as a tui.Agent. ctx bounds
 // construction.
 func newWithClient(ctx context.Context, client inference.Client, factory ModelFactory, cfg Config) (*sessionAgent, error) {
+	return newWithClientUsingStores(ctx, client, factory, cfg, headlessStores)
+}
+
+type swarmStoresProvider func() (*swarmStores, error)
+
+// newWithClientUsingStores validates the full model/context composition before
+// resolving the process store. Tests inject a provider to prove invalid policy
+// cannot open or mutate persistence.
+func newWithClientUsingStores(ctx context.Context, client inference.Client, factory ModelFactory, cfg Config, storesProvider swarmStoresProvider) (*sessionAgent, error) {
+	definitions, err := swarmDefinitions(client, factory(), cfg)
+	if err != nil {
+		return nil, err
+	}
 	root, err := os.Getwd()
 	if err != nil {
 		return nil, &WorkspaceRootError{Cause: err}
 	}
-	stores, err := headlessStores()
+	stores, err := storesProvider()
 	if err != nil {
 		return nil, err
 	}
-	return newSessionOverStores(ctx, client, factory, cfg, stores, root)
+	return newSessionOverStoresWithDefinitions(ctx, definitions, cfg, stores, root)
 }
 
 // newSessionOverStores is the store-injecting construction seam shared by the headless New
@@ -322,6 +352,10 @@ func newSessionOverStores(ctx context.Context, client inference.Client, factory 
 	if err != nil {
 		return nil, err
 	}
+	return newSessionOverStoresWithDefinitions(ctx, definitions, cfg, stores, root)
+}
+
+func newSessionOverStoresWithDefinitions(ctx context.Context, definitions []loop.Definition, cfg Config, stores *swarmStores, root string) (*sessionAgent, error) {
 	assembly, err := buildRig(definitions, stores, root, cfg, false)
 	if err != nil {
 		return nil, err

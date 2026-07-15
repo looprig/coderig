@@ -2,11 +2,14 @@ package swe
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/looprig/harness/pkg/loop"
+	"github.com/looprig/harness/pkg/rig"
 	"github.com/looprig/inference"
 	"github.com/looprig/storage/memstore"
 )
@@ -22,6 +25,198 @@ func mustHeadlessTestStores(t *testing.T) *swarmStores {
 		t.Fatalf("openStores(memstore) error = %v", err)
 	}
 	return stores
+}
+
+func TestBuildRigRegistersConversationCompaction(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  Config
+	}{
+		{name: "default composition"},
+		{name: "runtime skills composition", cfg: Config{RuntimeSkills: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			definitions := swarmDefs(t, tt.cfg)
+			stores := mustHeadlessTestStores(t)
+			if _, err := buildRig(definitions, stores, t.TempDir(), tt.cfg, false); err != nil {
+				t.Fatalf("buildRig() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestInvalidCompactionCompositionDoesNotOpenSession(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		attempt  func(*testing.T, *swarmStores) error
+		wantType func(error) bool
+	}{
+		{
+			name: "unsupported inference policy",
+			attempt: func(t *testing.T, stores *swarmStores) error {
+				unsupported := testModel()
+				unsupported.Provider = "unsupported"
+				_, err := newSessionOverStores(context.Background(), &fakeLLM{}, newModelFactoryFor(unsupported), Config{}, stores, t.TempDir())
+				return err
+			},
+			wantType: func(err error) bool {
+				var target *UnsupportedInferenceProviderError
+				return errors.As(err, &target)
+			},
+		},
+		{
+			name: "invalid loop compaction policy",
+			attempt: func(t *testing.T, _ *swarmStores) error {
+				policy, err := newConversationContextPolicy(testModel())
+				if err != nil {
+					t.Fatalf("newConversationContextPolicy() error = %v", err)
+				}
+				policy.compaction.CounterPolicy = loop.CounterPolicyUnknown
+				_, err = swarmDefinitionsWithContextPolicy(&fakeLLM{}, testModel(), Config{}, policy)
+				return err
+			},
+			wantType: func(err error) bool {
+				var target *LoopDefinitionError
+				return errors.As(err, &target)
+			},
+		},
+		{
+			name: "invalid hustle registration",
+			attempt: func(t *testing.T, stores *swarmStores) error {
+				definitions := swarmDefs(t, Config{})
+				_, err := buildRigWithRegistration(
+					definitions, stores, t.TempDir(), Config{}, false,
+					rig.DelegationLimits{Depth: operatorSpawnDepth, Quota: operatorSpawnQuota},
+					conversationHustleRegistration{limits: conversationHustleLimits()},
+				)
+				return err
+			},
+			wantType: func(err error) bool {
+				var target *rig.DefinitionError
+				return errors.As(err, &target)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stores := mustHeadlessTestStores(t)
+			err := tt.attempt(t, stores)
+			if err == nil || !tt.wantType(err) {
+				t.Fatalf("construction error = %T %v, want expected typed failure", err, err)
+			}
+			metas, listErr := stores.catalog.ListSessions(context.Background())
+			if listErr != nil {
+				t.Fatalf("ListSessions() error = %v", listErr)
+			}
+			if len(metas) != 0 {
+				t.Errorf("session catalog contains %d entries after failed construction, want 0", len(metas))
+			}
+		})
+	}
+}
+
+func TestHeadlessCompactionValidationPrecedesStoreOpen(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		model inference.Model
+	}{
+		{name: "unsupported provider", model: func() inference.Model {
+			value := testModel()
+			value.Provider = "unsupported"
+			return value
+		}()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			storeOpened := false
+			_, err := newWithClientUsingStores(
+				context.Background(), &fakeLLM{}, newModelFactoryFor(tt.model), Config{},
+				func() (*swarmStores, error) {
+					storeOpened = true
+					return mustHeadlessTestStores(t), nil
+				},
+			)
+			var unsupported *UnsupportedInferenceProviderError
+			if !errors.As(err, &unsupported) {
+				t.Fatalf("newWithClientUsingStores() error = %T %v, want *UnsupportedInferenceProviderError", err, err)
+			}
+			if storeOpened {
+				t.Error("store provider called before compaction policy validation")
+			}
+		})
+	}
+}
+
+func TestCompactionWiringSurvivesHeadlessNewRestoreAndClear(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  Config
+	}{
+		{name: "default composition"},
+		{name: "runtime skills composition", cfg: Config{RuntimeSkills: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			stores := mustHeadlessTestStores(t)
+			root := t.TempDir()
+
+			factory := newModelFactoryFor(testModel())
+			first, err := newSessionOverStores(ctx, &fakeLLM{}, factory, tt.cfg, stores, root)
+			if err != nil {
+				t.Fatalf("headless new error = %v", err)
+			}
+			firstID := first.SessionID()
+			firstFingerprint := durableSessionFingerprint(t, stores, firstID)
+			if err := first.Close(ctx); err != nil {
+				t.Fatalf("headless Close() error = %v", err)
+			}
+
+			definitions := swarmDefs(t, tt.cfg)
+			assembly, err := buildRig(definitions, stores, root, tt.cfg, false)
+			if err != nil {
+				t.Fatalf("restore buildRig() error = %v", err)
+			}
+			restoredController, err := assembly.RestoreSession(ctx, firstID)
+			if err != nil {
+				t.Fatalf("RestoreSession() error = %v", err)
+			}
+			restored, err := newSessionAgent(ctx, restoredController, stores.session, true)
+			if err != nil {
+				t.Fatalf("newSessionAgent(restore) error = %v", err)
+			}
+			if err := restored.Close(ctx); err != nil {
+				t.Fatalf("restored Close() error = %v", err)
+			}
+
+			cleared, err := newSessionOverStores(ctx, &fakeLLM{}, factory, tt.cfg, stores, root)
+			if err != nil {
+				t.Fatalf("clear reopen error = %v", err)
+			}
+			defer func() { _ = cleared.Close(ctx) }()
+			if cleared.SessionID() == firstID {
+				t.Fatalf("clear SessionID = original %v, want fresh session", firstID)
+			}
+			clearedFingerprint := durableSessionFingerprint(t, stores, cleared.SessionID())
+			if !clearedFingerprint.Equal(firstFingerprint) {
+				t.Errorf("clear fingerprint = %+v, want original %+v", clearedFingerprint, firstFingerprint)
+			}
+		})
+	}
 }
 
 // TestExclusiveCheckoutContentionAndHandoff proves the Phase-B exclusive-workspace invariant:

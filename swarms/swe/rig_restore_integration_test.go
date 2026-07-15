@@ -135,7 +135,7 @@ func TestRigRestoreStateWorkspaceAndContinuation(t *testing.T) {
 	if !ok {
 		t.Fatal("delegate controller not found")
 	}
-	changedModel := testModel()
+	changedModel := controller.Model()
 	changedModel.Name = "restored-state-model"
 	// SWE production definitions deliberately declare only their base mode. Selecting that
 	// declared mode still traverses the real mode-control boundary without inventing a mode.
@@ -641,7 +641,11 @@ func TestRigRestoreSnapshotFailureAdmission(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			assembly, err := rig.Define(
+			registration, err := newConversationHustleRegistration()
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := []rig.Option{
 				rig.WithLoops(definitions...),
 				rig.WithPrimers(string(operatorPrimaryName)),
 				rig.WithActivePrimer(string(operatorPrimaryName)),
@@ -651,7 +655,9 @@ func TestRigRestoreSnapshotFailureAdmission(t *testing.T) {
 				rig.WithDelegationLimits(rig.DelegationLimits{Depth: operatorSpawnDepth, Quota: operatorSpawnQuota}),
 				rig.WithFingerprintFields(operatorFingerprintFields(Config{})),
 				rig.WithCeilingFactory(newCeilingFactory(0)),
-			)
+			}
+			options = append(options, registration.options()...)
+			assembly, err := rig.Define(options...)
 			if err != nil {
 				t.Fatal(err)
 			}
