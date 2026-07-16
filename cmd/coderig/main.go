@@ -273,7 +273,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 		return factory.Open(ctx, sel, cfg)
 	}, flags.resume, cfg)
 	runCLI := func(ctx context.Context, open tui.OpenAgent, banner runtime.Banner) int {
-		return runtime.Run(ctx, open, banner)
+		return runtime.Run(ctx, open, banner, tui.WithSessionBrowser(factory.SessionBrowser(cfg)))
 	}
 	return runCLIWithStore(ctx, open, runtime.Banner{Name: bannerName, Greeting: coderig.Greeting(cfg)}, runCLI, factory.Close)
 }

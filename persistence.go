@@ -17,7 +17,6 @@ import (
 	"github.com/looprig/inference"
 	"github.com/looprig/storage"
 	"github.com/looprig/storage/memstore"
-	"github.com/looprig/tui/sessionadapter"
 )
 
 // persistence.go is the CodeRig's composition-root wiring for durable session state. The
@@ -172,9 +171,11 @@ type SessionSelector struct {
 // it. It holds the fsstore backend (closed once at teardown) and the store facades + listing
 // catalog over it. Read-only after construction.
 type SessionStoreFactory struct {
-	fs          *fsstore.Store
-	stores      *swarmStores
-	buildClient func() (inference.Client, ModelFactory, error)
+	fs             *fsstore.Store
+	stores         *swarmStores
+	buildClient    func() (inference.Client, ModelFactory, error)
+	mu             sync.Mutex
+	currentSession uuid.UUID
 }
 
 // NewSessionStoreFactory opens the on-disk store rooted at dataDir and returns the production
@@ -208,19 +209,26 @@ func (f *SessionStoreFactory) List(ctx context.Context) ([]sessionstore.SessionM
 // Open builds a fully-persisted CodeRig session for sel (new or resumed) and returns it as
 // a tui.Agent. It builds the provider client + ModelFactory exactly like New (reads
 // LLM_API_KEY, fails loud on a missing key), then delegates to the construction seam.
-func (f *SessionStoreFactory) Open(ctx context.Context, sel SessionSelector, cfg Config) (*sessionadapter.Adapter, error) {
+func (f *SessionStoreFactory) Open(ctx context.Context, sel SessionSelector, cfg Config) (*RuntimeAgent, error) {
 	client, factory, err := f.buildClient()
 	if err != nil {
 		return nil, err
 	}
-	return f.openWithClient(ctx, client, factory, sel, cfg)
+	agent, err := f.openWithClient(ctx, client, factory, sel, cfg)
+	if err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	f.currentSession = agent.SessionID()
+	f.mu.Unlock()
+	return agent, nil
 }
 
 // openWithClient resolves the workspace root, builds the three loop definitions and one rig
 // over the shared store, and opens (Resume zero) or restores the session. It is the seam the
 // integration tests drive with an injected fake client. A resume threads
 // sel.AllowConfigMismatch into the rig so a deliberate config change can proceed.
-func (f *SessionStoreFactory) openWithClient(ctx context.Context, client inference.Client, factory ModelFactory, sel SessionSelector, cfg Config) (*sessionadapter.Adapter, error) {
+func (f *SessionStoreFactory) openWithClient(ctx context.Context, client inference.Client, factory ModelFactory, sel SessionSelector, cfg Config) (*RuntimeAgent, error) {
 	definitions, err := swarmDefinitions(client, factory(), cfg)
 	if err != nil {
 		return nil, err
@@ -229,5 +237,9 @@ func (f *SessionStoreFactory) openWithClient(ctx context.Context, client inferen
 	if err != nil {
 		return nil, &WorkspaceRootError{Cause: err}
 	}
-	return openSessionWithDefinitions(ctx, definitions, cfg, f.stores, root, sel)
+	adapter, err := openSessionWithDefinitions(ctx, definitions, cfg, f.stores, root, sel)
+	if err != nil {
+		return nil, err
+	}
+	return newRuntimeAgent(adapter, adapter.Controller(), root, cfg.SecurityLimit), nil
 }

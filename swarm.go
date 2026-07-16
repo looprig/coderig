@@ -338,7 +338,7 @@ func New(ctx context.Context, cfg Config) (tui.Agent, error) {
 // definitions and one rig over the process-shared in-memory store with the current checkout
 // as the exclusive workspace, opens a NEW session, and wraps it as a tui.Agent. ctx bounds
 // construction.
-func newWithClient(ctx context.Context, client inference.Client, factory ModelFactory, cfg Config) (*sessionadapter.Adapter, error) {
+func newWithClient(ctx context.Context, client inference.Client, factory ModelFactory, cfg Config) (*RuntimeAgent, error) {
 	return newWithClientUsingStores(ctx, client, factory, cfg, headlessStores)
 }
 
@@ -347,7 +347,7 @@ type swarmStoresProvider func() (*swarmStores, error)
 // newWithClientUsingStores validates the full model/context composition before
 // resolving the process store. Tests inject a provider to prove invalid policy
 // cannot open or mutate persistence.
-func newWithClientUsingStores(ctx context.Context, client inference.Client, factory ModelFactory, cfg Config, storesProvider swarmStoresProvider) (*sessionadapter.Adapter, error) {
+func newWithClientUsingStores(ctx context.Context, client inference.Client, factory ModelFactory, cfg Config, storesProvider swarmStoresProvider) (*RuntimeAgent, error) {
 	definitions, err := swarmDefinitions(client, factory(), cfg)
 	if err != nil {
 		return nil, err
@@ -360,7 +360,11 @@ func newWithClientUsingStores(ctx context.Context, client inference.Client, fact
 	if err != nil {
 		return nil, err
 	}
-	return newSessionOverStoresWithDefinitions(ctx, definitions, cfg, stores, root)
+	adapter, err := newSessionOverStoresWithDefinitions(ctx, definitions, cfg, stores, root)
+	if err != nil {
+		return nil, err
+	}
+	return newRuntimeAgent(adapter, adapter.Controller(), root, cfg.SecurityLimit), nil
 }
 
 // newSessionOverStores is the store-injecting construction seam shared by the headless New
@@ -392,11 +396,19 @@ func openSessionWithDefinitions(ctx context.Context, definitions []loop.Definiti
 		if err != nil {
 			return nil, err
 		}
-		return sessionadapter.New(controller), nil
+		adapter, err := sessionadapter.NewWithReplay(ctx, controller, stores.session)
+		if err != nil {
+			return nil, err
+		}
+		return adapter, nil
 	}
 	controller, err := assembly.RestoreSession(ctx, selector.Resume)
 	if err != nil {
 		return nil, err
 	}
-	return sessionadapter.Restore(ctx, controller, stores.session)
+	adapter, err := sessionadapter.Restore(ctx, controller, stores.session)
+	if err != nil {
+		return nil, err
+	}
+	return adapter, nil
 }
