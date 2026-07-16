@@ -48,7 +48,11 @@ func (b *sessionBrowser) ListSessions(ctx context.Context) ([]tui.SessionSummary
 }
 
 func (b *sessionBrowser) ResumeSession(ctx context.Context, id tui.SessionID) (tui.Agent, error) {
-	return b.factory.Open(ctx, SessionSelector{Resume: id}, b.cfg)
+	agent, err := b.factory.Open(ctx, SessionSelector{Resume: id}, b.cfg)
+	if err != nil {
+		return nil, err
+	}
+	return agent, nil
 }
 
 var _ tui.SessionBrowser = (*sessionBrowser)(nil)

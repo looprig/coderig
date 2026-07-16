@@ -2,6 +2,7 @@ package coderig
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/looprig/core/uuid"
@@ -51,5 +52,25 @@ func TestSessionBrowserExcludesCurrentAndResumesSelected(t *testing.T) {
 	}
 	if err := resumed.Close(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSessionBrowserResumeFailureReturnsNilAgent(t *testing.T) {
+	factory, err := NewSessionStoreFactory(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = factory.Close() })
+	restoreErr := errors.New("session: restore config mismatch")
+	factory.buildClient = func() (inference.Client, ModelFactory, error) {
+		return nil, nil, restoreErr
+	}
+
+	agent, err := factory.SessionBrowser(Config{}).ResumeSession(context.Background(), uuid.UUID{1})
+	if !errors.Is(err, restoreErr) {
+		t.Fatalf("ResumeSession error = %v, want %v", err, restoreErr)
+	}
+	if agent != nil {
+		t.Fatalf("ResumeSession agent = %T, want nil on error", agent)
 	}
 }
