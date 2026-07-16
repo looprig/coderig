@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/looprig/coderig"
+	coderig "github.com/looprig/coderig/internal/app"
 	"github.com/looprig/core/content"
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/event"

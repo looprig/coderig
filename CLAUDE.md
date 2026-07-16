@@ -4,8 +4,9 @@ CodeRig is the reference coding Rig built from looprig modules. This repository 
 
 ## Architecture
 
-- `swarm.go` assembles the primary operator and the fixed leaf Loops.
-- `agents/operator` and `agents/reviewer` own role identity and prompts.
+- `internal/app/swarm.go` assembles the primary operator and the fixed leaf Loops.
+- `internal/catalog/operator` and `internal/catalog/reviewer` own role identity and prompts.
+- `cmd/coderig` imports the private `internal/app` composition boundary. The module root has no Go package.
 - The primary operator may delegate to a non-delegating operator or reviewer. Leaves do not receive delegation capability.
 - Each Loop receives only the individual tools it needs. The reviewer has no file mutation tools.
 - `github.com/looprig/tools` provides optional standard tools.

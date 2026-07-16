@@ -3,7 +3,7 @@
 // fsstore-backed session store shared by every session), and either prints the session list
 // (--list) or hands the shared TUI runtime (runtime.Run) a thunk that opens/resumes the PERSISTED
 // swarm session. It is wiring only: all runtime behavior (logging, signal teardown, the TUI)
-// lives in tui, and all Session/persistence behavior lives in the coderig package.
+// lives in tui, and all Session/persistence behavior lives in the internal app package.
 package main
 
 import (
@@ -18,7 +18,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/looprig/coderig"
+	coderig "github.com/looprig/coderig/internal/app"
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/sessionstore"
 	"github.com/looprig/sandbox"

@@ -12,13 +12,13 @@ require (
 	github.com/looprig/confinement v0.1.0
 	github.com/looprig/core v0.2.0
 	github.com/looprig/fsstore v0.2.0
-	github.com/looprig/harness v0.11.0
-	github.com/looprig/inference v0.2.0
-	github.com/looprig/llm v0.2.0
+	github.com/looprig/harness v0.12.0
+	github.com/looprig/inference v0.3.0
+	github.com/looprig/llm v0.3.0
 	github.com/looprig/sandbox v0.1.0
 	github.com/looprig/storage v0.2.0
 	github.com/looprig/tools v0.1.0
-	github.com/looprig/tui v0.7.0
+	github.com/looprig/tui v0.8.0
 )
 
 require (

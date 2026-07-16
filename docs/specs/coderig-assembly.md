@@ -65,7 +65,7 @@ There is no Registry. A static slice may be derived directly from the two defini
 
 Delete `ModelCatalog`, its resolver, and the economy, standard, and premium vocabulary.
 
-Each Loop declares purposeful modes such as `build`, `review`, or `quick`, using `loop.WithModes`. A mode may change the model, reasoning effort, instructions, tools, or tool limits. Reasoning strength uses `inference.Effort`.
+Each Loop declares purposeful modes such as `build`, `review`, or `quick`, using `loop.WithModes`. A mode may change the model, reasoning effort, instructions, tools, or tool limits. Reasoning strength uses `model.Effort`.
 
 The base model remains an explicit CodeRig configuration dependency. There is no unused premium tier and no economy tier that is validated but not selected.
 
