@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"testing"
 	"time"
 
@@ -157,7 +158,7 @@ func TestOperatorFingerprintFields(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := operatorFingerprintFields(tt.cfg)
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("operatorFingerprintFields = %+v, want %+v", got, tt.want)
 			}
 		})

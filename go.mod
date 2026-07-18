@@ -13,7 +13,7 @@ require (
 	github.com/looprig/core v0.2.0
 	github.com/looprig/fsstore v0.2.0
 	github.com/looprig/harness v0.12.0
-	github.com/looprig/inference v0.3.0
+	github.com/looprig/inference v0.3.1-0.20260718005749-13e4d7f173b3
 	github.com/looprig/llm v0.3.0
 	github.com/looprig/sandbox v0.1.0
 	github.com/looprig/storage v0.2.0
