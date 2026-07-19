@@ -47,7 +47,33 @@ Run: `GOWORK=off go test -race ./internal/app -run '^TestOperatorFingerprintFiel
 
 Expected: PASS.
 
-**Step 5: Verify coderig**
+### Task 2: Repair the command test double
+
+**Files:**
+- Modify: `cmd/coderig/main_test.go`
+
+**Step 1: Verify the failing command test build**
+
+Run: `GOWORK=off go test -race ./...`
+
+Expected: build failure because `orderingAgent` lacks the TUI Agent interface's
+`RespondGate` method.
+
+**Step 2: Implement the minimal repair**
+
+Import `encoding/json` and Harness's `gate` package, then add a no-op
+`RespondGate(context.Context, gate.ID, string, map[string]json.RawMessage) error`
+method to `orderingAgent`.
+
+**Step 3: Verify the command package**
+
+Run: `GOWORK=off go test -race ./cmd/coderig`
+
+Expected: PASS.
+
+### Task 3: Verify coderig
+
+**Step 1: Run full verification**
 
 Run: `GOWORK=off go test -race ./...`
 
@@ -55,8 +81,10 @@ Run: `GOWORK=off go build ./...`
 
 Expected: PASS.
 
-**Step 6: Inspect scope**
+**Step 2: Inspect scope**
 
 Run: `git diff --check && git diff --stat && git status --short`
 
-Expected: only `go.mod` and `internal/app/fingerprint_test.go` are modified, plus these approved planning documents.
+Expected: only `go.mod`, `internal/app/fingerprint_test.go`, and
+`cmd/coderig/main_test.go` are modified, plus these approved planning
+documents.

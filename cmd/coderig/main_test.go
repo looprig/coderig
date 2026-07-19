@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"go/parser"
 	"go/token"
@@ -17,6 +18,7 @@ import (
 	"github.com/looprig/core/content"
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/event"
+	"github.com/looprig/harness/pkg/gate"
 	"github.com/looprig/harness/pkg/sessionstore"
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/tui"
@@ -146,6 +148,9 @@ func (*orderingAgent) Approve(context.Context, uuid.UUID, uuid.UUID, tool.Approv
 }
 func (*orderingAgent) Deny(context.Context, uuid.UUID, uuid.UUID) error                  { return nil }
 func (*orderingAgent) ProvideAnswer(context.Context, uuid.UUID, uuid.UUID, string) error { return nil }
+func (*orderingAgent) RespondGate(context.Context, gate.ID, string, map[string]json.RawMessage) error {
+	return nil
+}
 
 var _ tui.Agent = (*orderingAgent)(nil)
 
