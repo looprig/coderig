@@ -52,7 +52,7 @@ type skillScope struct {
 // (so each entry is an authorized, parsed SKILL.md). Names are sorted for a
 // deterministic prompt. An agent with no skills — or whose every skill fails to
 // describe — yields the EMPTY string (no block), so a skill-less agent's system
-// prompt is exactly Identity+Role, unchanged.
+// prompt is exactly catalog.Identity+Role, unchanged.
 //
 // A skill that fails to describe (missing/malformed embedded file — a catalogue
 // integrity bug, not a runtime input) is SKIPPED rather than aborting the whole

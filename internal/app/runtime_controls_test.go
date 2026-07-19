@@ -28,6 +28,9 @@ func TestRuntimeCatalogExposesModesModelAndBoundedAccess(t *testing.T) {
 	if len(access.Choices) != 3 || access.Choices[2].Label != "Writable" {
 		t.Fatalf("access choices = %#v, want levels through configured cap", access.Choices)
 	}
+	if access.Current != "0" {
+		t.Fatalf("current access = %q, want live session level 0", access.Current)
+	}
 }
 
 func TestRuntimeControllerRejectsUnknownTypedChoices(t *testing.T) {

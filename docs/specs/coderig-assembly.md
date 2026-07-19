@@ -28,7 +28,7 @@ CodeRig owns:
 - Loop modes and reasoning effort
 - model and provider defaults
 - Session security limit exposed by the command
-- greeting and product identity
+- startup banner and product identity
 - storage location and command flags
 
 ## Reusable behavior moved out
@@ -59,7 +59,7 @@ assembly, err := rig.Define(
 )
 ```
 
-There is no Registry. A static slice may be derived directly from the two definitions when the greeting needs ordered display metadata. Duplicate Loop names are already rejected by Rig definition validation.
+There is no Registry. Duplicate Loop names are already rejected by Rig definition validation.
 
 ## Modes and effort
 

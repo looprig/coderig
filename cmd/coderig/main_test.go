@@ -138,6 +138,7 @@ func (*orderingAgent) CompactToLoop(context.Context, uuid.UUID) (uuid.UUID, erro
 	return uuid.UUID{}, nil
 }
 func (*orderingAgent) ActiveLoopID() uuid.UUID                                 { return uuid.UUID{} }
+func (*orderingAgent) SessionID() uuid.UUID                                    { return uuid.UUID{0x42} }
 func (*orderingAgent) Interrupt(context.Context) (bool, error)                 { return false, nil }
 func (a *orderingAgent) Close(context.Context) error                           { a.close(); return nil }
 func (*orderingAgent) AcceptsImages(uuid.UUID) bool                            { return false }
@@ -159,13 +160,6 @@ var _ tui.Agent = (*orderingAgent)(nil)
 func TestRunPreservesPublicIdentity(t *testing.T) {
 	if bannerName != "CodeRig" {
 		t.Errorf("bannerName = %q, want %q", bannerName, "CodeRig")
-	}
-	greeting := coderig.Greeting(coderig.Config{Greeting: true})
-	if !strings.Contains(greeting, "operator") {
-		t.Fatalf("greeting missing public operator identity:\n%s", greeting)
-	}
-	if strings.Contains(greeting, "operator-primary") {
-		t.Fatalf("greeting leaked internal operator-primary topology key:\n%s", greeting)
 	}
 }
 
@@ -205,7 +199,7 @@ func TestRunHasNoServeAdapter(t *testing.T) {
 }
 
 // TestParseFlags covers the CodeRig CLI flag parser: --list, --resume <uuid>, --runtime-skills,
-// --greeting, --data-dir, and the boundary validation (an invalid/empty resume id fails at the
+// --data-dir, and the boundary validation (an invalid/empty resume id fails at the
 // boundary, not deep in the wiring; --list and --resume are mutually exclusive). The swarm has
 // no positional agent name (it is a single swarm), so an unexpected positional arg is rejected.
 func TestParseFlags(t *testing.T) {
@@ -221,7 +215,6 @@ func TestParseFlags(t *testing.T) {
 		wantList          bool
 		wantResume        uuid.UUID
 		wantRuntimeSkills bool
-		wantGreeting      bool
 		wantDataDir       string
 		wantErr           bool
 	}{
@@ -234,10 +227,7 @@ func TestParseFlags(t *testing.T) {
 		{name: "runtime-skills flag", args: []string{"-runtime-skills"}, wantRuntimeSkills: true},
 		{name: "runtime-skills flag double dash", args: []string{"--runtime-skills"}, wantRuntimeSkills: true},
 		{name: "runtime-skills with resume", args: []string{"-runtime-skills", "-resume", validID.String()}, wantResume: validID, wantRuntimeSkills: true},
-		{name: "greeting off by default", args: nil, wantGreeting: false},
-		{name: "greeting flag", args: []string{"-greeting"}, wantGreeting: true},
-		{name: "greeting flag double dash", args: []string{"--greeting"}, wantGreeting: true},
-		{name: "greeting with resume", args: []string{"-greeting", "-resume", validID.String()}, wantResume: validID, wantGreeting: true},
+		{name: "removed greeting flag rejected", args: []string{"--greeting"}, wantErr: true},
 		{name: "data-dir default empty", args: nil, wantDataDir: ""},
 		{name: "data-dir flag", args: []string{"-data-dir", "/tmp/coderig-store"}, wantDataDir: "/tmp/coderig-store"},
 		{name: "data-dir double dash", args: []string{"--data-dir", "/tmp/coderig-store"}, wantDataDir: "/tmp/coderig-store"},
@@ -267,9 +257,6 @@ func TestParseFlags(t *testing.T) {
 			}
 			if got.runtimeSkills != tt.wantRuntimeSkills {
 				t.Errorf("runtimeSkills = %v, want %v", got.runtimeSkills, tt.wantRuntimeSkills)
-			}
-			if got.greeting != tt.wantGreeting {
-				t.Errorf("greeting = %v, want %v", got.greeting, tt.wantGreeting)
 			}
 			if got.dataDir != tt.wantDataDir {
 				t.Errorf("dataDir = %q, want %q", got.dataDir, tt.wantDataDir)

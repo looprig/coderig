@@ -23,6 +23,10 @@ type RuntimeAgent struct {
 	maxAccess security.Level
 }
 
+type securityLimitView interface {
+	SecurityLimitSource() security.LimitSource
+}
+
 func newRuntimeAgent(adapter *sessionadapter.Adapter, sess session.SessionController, root string, maxAccess uint8) *RuntimeAgent {
 	return &RuntimeAgent{Adapter: adapter, sess: sess, root: root, maxAccess: security.Level(maxAccess)}
 }
@@ -66,6 +70,19 @@ func (a *RuntimeAgent) AccessOptions(context.Context) (tui.AccessOptions, error)
 			Description: accessDescription(level),
 		})
 	}
+	view, ok := a.sess.(securityLimitView)
+	if !ok {
+		return tui.AccessOptions{}, fmt.Errorf("coderig: live security limit is unavailable")
+	}
+	source := view.SecurityLimitSource()
+	if source == nil {
+		return tui.AccessOptions{}, fmt.Errorf("coderig: live security limit is unavailable")
+	}
+	current := source.Current()
+	if current > a.maxAccess {
+		return tui.AccessOptions{}, fmt.Errorf("coderig: live security limit %d exceeds configured cap %d", current, a.maxAccess)
+	}
+	options.Current = tui.AccessID(strconv.FormatUint(uint64(current), 10))
 	return options, nil
 }
 

@@ -1,7 +1,6 @@
 package app
 
 import (
-	"github.com/looprig/harness/pkg/identity"
 	model "github.com/looprig/inference/model"
 	"github.com/looprig/sandbox"
 )
@@ -25,15 +24,8 @@ func ParseSecurityMode(name string) (uint8, bool) {
 // Config contains the user-selected CodeRig application modes.
 type Config struct {
 	RuntimeSkills bool
-	Greeting      bool
 	SecurityLimit uint8
 }
 
 // ModelFactory returns the secret-free model descriptor shared by CodeRig Loops.
 type ModelFactory func() model.Model
-
-// LoopDisplay is the ordered public metadata used by the greeting.
-type LoopDisplay struct {
-	Name        identity.AgentName
-	Description string
-}

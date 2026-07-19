@@ -41,16 +41,14 @@ const (
 
 // cliFlags is the parsed CLI invocation: whether to list sessions and exit (--list), which
 // session to resume (--resume <uuid>; zero = new session), whether to enable the untrusted,
-// human-gated workspace skill source (--runtime-skills; off by default, §7a), whether to show
-// the optional UI-only startup greeting (--greeting; off by default, §5a), the session
+// human-gated workspace skill source (--runtime-skills; off by default, §7a), the session
 // store root (--data-dir; empty = the ~/.looprig/store default), and the session security
-// security limit (--security-mode; default write, §8). There is no positional agent name because
+// limit (--security-mode; default write, §8). There is no positional agent name because
 // CodeRig is one fixed Rig.
 type cliFlags struct {
 	list          bool
 	resume        uuid.UUID
 	runtimeSkills bool
-	greeting      bool
 	dataDir       string
 	// securityLimit is the Session security-mode limit ordinal (min(role, this) is
 	// each leaf's effective mode; see coderig.Config.SecurityLimit). Parsed from the
@@ -89,7 +87,6 @@ func parseFlags(args []string) (cliFlags, error) {
 		list          = fs.Bool("list", false, "list resumable sessions and exit")
 		resume        = fs.String("resume", "", "resume the session with this id")
 		runtimeSkills = fs.Bool("runtime-skills", false, "enable the untrusted, human-gated workspace skill source (.skills/) for read-only agents")
-		greeting      = fs.Bool("greeting", false, "show a UI-only startup greeting listing the swarm's agents and skills")
 		dataDir       = fs.String("data-dir", "", "session store root (default ~/.looprig/store)")
 		securityMode  = fs.String("security-mode", "write", "session security limit: zerotrust|readonly|write|trusted (caps per-role auto-approval)")
 	)
@@ -110,7 +107,7 @@ func parseFlags(args []string) (cliFlags, error) {
 		return cliFlags{}, &FlagParseError{Reason: "invalid --security-mode " + strconv.Quote(*securityMode) + " (want zerotrust|readonly|write|trusted)"}
 	}
 
-	out := cliFlags{list: *list, runtimeSkills: *runtimeSkills, greeting: *greeting, dataDir: strings.TrimSpace(*dataDir), securityLimit: securityLimitOrd}
+	out := cliFlags{list: *list, runtimeSkills: *runtimeSkills, dataDir: strings.TrimSpace(*dataDir), securityLimit: securityLimitOrd}
 
 	// Detect whether --resume was explicitly given (vs left at its empty default): an
 	// explicit --resume with an empty/whitespace value is a malformed invocation, rejected
@@ -263,19 +260,16 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 	}
 
 	// The initial open honors --resume; every /clear reopen starts a FRESH persisted session.
-	// The --runtime-skills and --greeting modes apply to every open. The startup greeting (§5a)
-	// is built once from the fixed definitions (deterministic, no LLM call) and is empty unless --greeting
-	// is set — and handed to the TUI as an opening transcript entry via the Banner; it is NOT a
-	// turn, NOT a command, and never enters the model's context. runtime.Run owns logging, signal
-	// teardown, the TUI, and bounded Close.
-	cfg := coderig.Config{RuntimeSkills: flags.runtimeSkills, Greeting: flags.greeting, SecurityLimit: flags.securityLimit}
+	// The --runtime-skills mode applies to every open. runtime.Run owns logging, signal
+	// teardown, the TUI, the session-identifying startup banner, and bounded Close.
+	cfg := coderig.Config{RuntimeSkills: flags.runtimeSkills, SecurityLimit: flags.securityLimit}
 	open := openThunk(func(ctx context.Context, sel coderig.SessionSelector, cfg coderig.Config) (tui.Agent, error) {
 		return factory.Open(ctx, sel, cfg)
 	}, flags.resume, cfg)
 	runCLI := func(ctx context.Context, open tui.OpenAgent, banner runtime.Banner) int {
 		return runtime.Run(ctx, open, banner, tui.WithSessionBrowser(factory.SessionBrowser(cfg)))
 	}
-	return runCLIWithStore(ctx, open, runtime.Banner{Name: bannerName, Greeting: coderig.Greeting(cfg)}, runCLI, factory.Close)
+	return runCLIWithStore(ctx, open, runtime.Banner{Name: bannerName}, runCLI, factory.Close)
 }
 
 func main() {

@@ -1,14 +1,15 @@
-package app
+// Package catalog defines CodeRig's shared identity and role prompts.
+package catalog
 
-// Identity is the CodeRig's shared, cross-cutting system-prompt fragment. It
-// is identity-only: the persona, persistence, security, and reversibility
-// guidance every agent in the swarm inherits regardless of its role. The swarm
-// (a later phase) prepends this to each agent's own <role> to assemble the
-// agent's full system prompt — so this constant owns ONLY what is common to all
-// agents, never any role-specific behavior or any toolset.
+// Identity is CodeRig's shared, cross-cutting system-prompt fragment. It is
+// identity-only: the persona, persistence, security, and reversibility guidance
+// every agent in the swarm inherits regardless of its role. Application assembly
+// prepends it to each agent's own <role> to build the full system prompt, so this
+// constant owns only what is common to all agents, never role-specific behavior
+// or a toolset.
 //
-// It is a single well-formed <identity product="CodeRig"> element so the assembly
-// step can compose it with a <role> deterministically.
+// It is a single well-formed <identity product="CodeRig"> element so application
+// assembly can compose it with a <role> deterministically.
 const Identity = `<identity product="CodeRig">
   <persona>You are a member of the CodeRig software-engineering swarm. Be concise and direct: report findings and conclusions, not narration. Prefer specifics (paths, symbols, line ranges, commands) over generalities. No filler, no flattery.</persona>
   <persistence>Keep going until the task is genuinely resolved; do not stop at the first plausible answer or hand back a half-done result. If you are blocked or uncertain, say so plainly and state what is needed — never fabricate a fact, a file path, an API, or a result to appear complete.</persistence>

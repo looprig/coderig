@@ -12,17 +12,16 @@ import (
 // the agent's <available_skills> catalog are both derived from.
 var operatorSkills = []string{"code-style"}
 
-// leafBuiltin is each agent's package-exported boundary as pure metadata: Name/Description/
-// Role plus allowed embedded Skills, runtime-skills eligibility, and the static per-role
+// leafBuiltin is each agent's package-exported boundary as pure metadata: Name and Role
+// plus allowed embedded Skills, runtime-skills eligibility, and the static per-role
 // security mode. It no longer carries a tool builder — the composition root (swarm.go) builds
 // each loop.Definition directly from the leaf package's BuildTools — so this struct is the ONE
 // place the per-agent skill set, runtime-skills eligibility, and role prompt are declared for
-// the greeting, the skill loader allow-map, and the <available_skills> catalog.
+// the skill loader allow-map and the <available_skills> catalog.
 type leafBuiltin struct {
-	name        identity.AgentName
-	description string
-	role        string
-	skills      []string
+	name   identity.AgentName
+	role   string
+	skills []string
 	// allowsRuntimeSkills marks a leaf eligible for the untrusted, human-gated workspace
 	// skill source (§7a). True ONLY for the operator (the approved decision extended
 	// eligibility to it once the operator merged write/exec capability); the reviewer stays
@@ -38,7 +37,6 @@ type leafBuiltin struct {
 func operatorBuiltin() leafBuiltin {
 	return leafBuiltin{
 		name:                operator.Name,
-		description:         operator.Description,
 		role:                operator.Role,
 		skills:              operatorSkills,
 		allowsRuntimeSkills: true, // §7a: extended to operator (approved) — bounded, human-gated workspace load.
@@ -49,9 +47,8 @@ func operatorBuiltin() leafBuiltin {
 // runtime-skills eligibility.
 func reviewerBuiltin() leafBuiltin {
 	return leafBuiltin{
-		name:        reviewer.Name,
-		description: reviewer.Description,
-		role:        reviewer.Role,
+		name: reviewer.Name,
+		role: reviewer.Role,
 	}
 }
 

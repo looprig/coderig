@@ -1,5 +1,5 @@
 // Package coderig assembles the CodeRig: it owns the model/provider, the Loop definitions,
-// system identity, and the composition root that turns harness's rig into a runnable
+// system prompt assembly, and the composition root that turns harness's rig into a runnable
 // tui.Agent. The swarm's topology is three immutable loop.Definitions over ONE rig: an
 // operator-primary primer (the sole primer, active; DISPLAYS as "operator") that delegates
 // to two delegate-free leaves — an operator leaf and a reviewer leaf. New is the headless
@@ -13,6 +13,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/looprig/coderig/internal/catalog"
 	"github.com/looprig/coderig/internal/catalog/operator"
 	"github.com/looprig/coderig/internal/catalog/reviewer"
 	"github.com/looprig/harness/pkg/identity"
@@ -255,9 +256,9 @@ func swarmDefinitionsWithContextPolicy(client inference.Client, model model.Mode
 
 	ctx := context.Background()
 	operatorCatalog := availableSkillsCatalog(ctx, loader, operator.Name, opBuiltin.skills)
-	operatorLeafSystem := contextPolicy.system(Identity + operator.Role + operatorCatalog)
-	operatorPrimerSystem := contextPolicy.system(Identity + operator.Role + operatorDelegation + operatorCatalog)
-	reviewerSystem := contextPolicy.system(Identity + reviewer.Role + availableSkillsCatalog(ctx, loader, reviewer.Name, revBuiltin.skills))
+	operatorLeafSystem := contextPolicy.system(catalog.Identity + operator.Role + operatorCatalog)
+	operatorPrimerSystem := contextPolicy.system(catalog.Identity + operator.Role + operatorDelegation + operatorCatalog)
+	reviewerSystem := contextPolicy.system(catalog.Identity + reviewer.Role + availableSkillsCatalog(ctx, loader, reviewer.Name, revBuiltin.skills))
 
 	primerOptions := []loop.Option{
 		loop.WithName(operatorPrimaryName),
