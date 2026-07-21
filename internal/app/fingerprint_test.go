@@ -152,6 +152,15 @@ func TestOperatorFingerprintFields(t *testing.T) {
 			cfg:  Config{RuntimeSkills: true},
 			want: rig.ConfigFingerprintFields{AgentKind: "coderig:operator", RuntimeSkills: true},
 		},
+		{
+			name: "access profile and digest fold in",
+			cfg:  Config{AccessProfile: AccessTrusted, AccessConfigRev: "coderig-access-v1:deadbeef"},
+			want: rig.ConfigFingerprintFields{
+				AgentKind:                 "coderig:operator",
+				NativePermissionPolicyRev: "coderig-access-v1:deadbeef",
+				AppFields:                 map[string]string{"access_profile": "trusted"},
+			},
+		},
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -162,6 +171,30 @@ func TestOperatorFingerprintFields(t *testing.T) {
 				t.Errorf("operatorFingerprintFields = %+v, want %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestAccessConfigInvalidatesFingerprintFields proves the durable access
+// configuration is drift-detecting at the rig-fingerprint boundary: a
+// product-profile, reviewer-restriction, or egress-boundary change (all folded
+// into AccessConfigRev), or the selected profile name, changes the rig-level
+// fingerprint fields, so a restore with different authority is a mismatch rather
+// than a silent authority change.
+func TestAccessConfigInvalidatesFingerprintFields(t *testing.T) {
+	t.Parallel()
+
+	base := operatorFingerprintFields(Config{AccessProfile: AccessReadOnly, AccessConfigRev: "rev-a"})
+
+	if got := operatorFingerprintFields(Config{AccessProfile: AccessReadOnly, AccessConfigRev: "rev-a"}); !reflect.DeepEqual(got, base) {
+		t.Fatalf("identical access config produced different fields:\n got=%+v\nbase=%+v", got, base)
+	}
+	// A changed access digest (profile/reviewer/egress change) must invalidate.
+	if got := operatorFingerprintFields(Config{AccessProfile: AccessReadOnly, AccessConfigRev: "rev-b"}); reflect.DeepEqual(got, base) {
+		t.Error("changed AccessConfigRev did not change the fingerprint fields")
+	}
+	// A changed selected profile name must invalidate.
+	if got := operatorFingerprintFields(Config{AccessProfile: AccessTrusted, AccessConfigRev: "rev-a"}); reflect.DeepEqual(got, base) {
+		t.Error("changed AccessProfile did not change the fingerprint fields")
 	}
 }
 

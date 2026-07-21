@@ -42,18 +42,21 @@ const (
 // cliFlags is the parsed CLI invocation: whether to list sessions and exit (--list), which
 // session to resume (--resume <uuid>; zero = new session), whether to enable the untrusted,
 // human-gated workspace skill source (--runtime-skills; off by default, §7a), the session
-// store root (--data-dir; empty = the ~/.looprig/store default), and the session security
-// limit (--security-mode; default write, §8). There is no positional agent name because
-// CodeRig is one fixed Rig.
+// store root (--data-dir; empty = the ~/.looprig/store default), the selected access profile
+// (--access-profile readonly|trusted|unconfined; default readonly), and the explicit
+// unconfined acknowledgement (--acknowledge-unconfined; required to select unconfined). There
+// is no positional agent name because CodeRig is one fixed Rig.
 type cliFlags struct {
 	list          bool
 	resume        uuid.UUID
 	runtimeSkills bool
 	dataDir       string
-	// securityLimit is the Session security-mode limit ordinal (min(role, this) is
-	// each leaf's effective mode; see coderig.Config.SecurityLimit). Parsed from the
-	// --security-mode NAME flag, defaulting to coderig.DefaultSecurityMode (Write).
-	securityLimit uint8
+	// accessProfile is the session-fixed product access profile, validated at this
+	// boundary against exactly the three known names before the Rig is constructed.
+	accessProfile coderig.AccessProfile
+	// acknowledgeUnconfined is the explicit opt-in required to select the unconfined
+	// profile (direct host execution). Selecting unconfined without it fails closed.
+	acknowledgeUnconfined bool
 }
 
 // FlagParseError reports a malformed CLI invocation (an unknown flag, a non-UUID --resume
@@ -88,7 +91,8 @@ func parseFlags(args []string) (cliFlags, error) {
 		resume        = fs.String("resume", "", "resume the session with this id")
 		runtimeSkills = fs.Bool("runtime-skills", false, "enable the untrusted, human-gated workspace skill source (.skills/) for read-only agents")
 		dataDir       = fs.String("data-dir", "", "session store root (default ~/.looprig/store)")
-		securityMode  = fs.String("security-mode", "write", "session security limit: zerotrust|readonly|write|trusted (caps per-role auto-approval)")
+		accessProfile = fs.String("access-profile", string(coderig.DefaultAccessProfile), "session access profile: readonly|trusted|unconfined")
+		ackUnconfined = fs.Bool("acknowledge-unconfined", false, "acknowledge that --access-profile unconfined runs commands directly on the host with no OS confinement")
 	)
 	if err := fs.Parse(args); err != nil {
 		return cliFlags{}, &FlagParseError{Reason: "invalid flags", Cause: err}
@@ -100,14 +104,22 @@ func parseFlags(args []string) (cliFlags, error) {
 		return cliFlags{}, &FlagParseError{Reason: "unexpected argument " + strconv.Quote(fs.Arg(0))}
 	}
 
-	// Validate the security-mode name at this boundary (untrusted CLI input): an unknown
-	// mode fails closed rather than silently defaulting to a surprising permissiveness.
-	securityLimitOrd, ok := coderig.ParseSecurityMode(strings.ToLower(strings.TrimSpace(*securityMode)))
+	// Validate the access-profile name at this boundary (untrusted CLI input): only the
+	// three known names are accepted, so an unknown value fails closed rather than
+	// silently defaulting to a surprising authority. The name is validated before the Rig
+	// is constructed.
+	profile, ok := coderig.ParseAccessProfile(strings.ToLower(strings.TrimSpace(*accessProfile)))
 	if !ok {
-		return cliFlags{}, &FlagParseError{Reason: "invalid --security-mode " + strconv.Quote(*securityMode) + " (want zerotrust|readonly|write|trusted)"}
+		return cliFlags{}, &FlagParseError{Reason: "invalid --access-profile " + strconv.Quote(*accessProfile) + " (want readonly|trusted|unconfined)"}
 	}
 
-	out := cliFlags{list: *list, runtimeSkills: *runtimeSkills, dataDir: strings.TrimSpace(*dataDir), securityLimit: securityLimitOrd}
+	// Unconfined requires an explicit, separate acknowledgement: selecting direct host
+	// execution by accident must be impossible.
+	if profile == coderig.AccessUnconfined && !*ackUnconfined {
+		return cliFlags{}, &FlagParseError{Reason: "--access-profile unconfined requires --acknowledge-unconfined (it runs commands directly on the host with no OS confinement)"}
+	}
+
+	out := cliFlags{list: *list, runtimeSkills: *runtimeSkills, dataDir: strings.TrimSpace(*dataDir), accessProfile: profile, acknowledgeUnconfined: *ackUnconfined}
 
 	// Detect whether --resume was explicitly given (vs left at its empty default): an
 	// explicit --resume with an empty/whitespace value is a malformed invocation, rejected
@@ -259,10 +271,17 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) int {
 		return exitOK
 	}
 
+	// Selecting unconfined execution surfaces an explicit warning before the session opens:
+	// the profile runs commands directly on the host with the invoking user's authority and
+	// no OS confinement. The acknowledgement flag was already required at the boundary.
+	if flags.accessProfile == coderig.AccessUnconfined {
+		fmt.Fprintln(errOut, "coderig: WARNING: --access-profile unconfined runs commands directly on the host with no OS confinement (real HOME, full filesystem and network authority).")
+	}
+
 	// The initial open honors --resume; every /clear reopen starts a FRESH persisted session.
 	// The --runtime-skills mode applies to every open. runtime.Run owns logging, signal
 	// teardown, the TUI, the session-identifying startup banner, and bounded Close.
-	cfg := coderig.Config{RuntimeSkills: flags.runtimeSkills, SecurityLimit: flags.securityLimit}
+	cfg := coderig.Config{RuntimeSkills: flags.runtimeSkills, AccessProfile: flags.accessProfile}
 	open := openThunk(func(ctx context.Context, sel coderig.SessionSelector, cfg coderig.Config) (tui.Agent, error) {
 		return factory.Open(ctx, sel, cfg)
 	}, flags.resume, cfg)

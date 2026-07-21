@@ -216,23 +216,34 @@ func TestParseFlags(t *testing.T) {
 		wantResume        uuid.UUID
 		wantRuntimeSkills bool
 		wantDataDir       string
+		wantProfile       coderig.AccessProfile
+		wantAck           bool
 		wantErr           bool
 	}{
-		{name: "no flags → new session", args: nil},
-		{name: "list flag", args: []string{"-list"}, wantList: true},
-		{name: "list flag double dash", args: []string{"--list"}, wantList: true},
-		{name: "resume a session", args: []string{"-resume", validID.String()}, wantResume: validID},
-		{name: "resume double dash", args: []string{"--resume", validID.String()}, wantResume: validID},
-		{name: "runtime-skills off by default", args: nil, wantRuntimeSkills: false},
-		{name: "runtime-skills flag", args: []string{"-runtime-skills"}, wantRuntimeSkills: true},
-		{name: "runtime-skills flag double dash", args: []string{"--runtime-skills"}, wantRuntimeSkills: true},
-		{name: "runtime-skills with resume", args: []string{"-runtime-skills", "-resume", validID.String()}, wantResume: validID, wantRuntimeSkills: true},
+		{name: "no flags → new session", args: nil, wantProfile: coderig.AccessReadOnly},
+		{name: "list flag", args: []string{"-list"}, wantList: true, wantProfile: coderig.AccessReadOnly},
+		{name: "list flag double dash", args: []string{"--list"}, wantList: true, wantProfile: coderig.AccessReadOnly},
+		{name: "resume a session", args: []string{"-resume", validID.String()}, wantResume: validID, wantProfile: coderig.AccessReadOnly},
+		{name: "resume double dash", args: []string{"--resume", validID.String()}, wantResume: validID, wantProfile: coderig.AccessReadOnly},
+		{name: "runtime-skills off by default", args: nil, wantRuntimeSkills: false, wantProfile: coderig.AccessReadOnly},
+		{name: "runtime-skills flag", args: []string{"-runtime-skills"}, wantRuntimeSkills: true, wantProfile: coderig.AccessReadOnly},
+		{name: "runtime-skills flag double dash", args: []string{"--runtime-skills"}, wantRuntimeSkills: true, wantProfile: coderig.AccessReadOnly},
+		{name: "runtime-skills with resume", args: []string{"-runtime-skills", "-resume", validID.String()}, wantResume: validID, wantRuntimeSkills: true, wantProfile: coderig.AccessReadOnly},
 		{name: "removed greeting flag rejected", args: []string{"--greeting"}, wantErr: true},
-		{name: "data-dir default empty", args: nil, wantDataDir: ""},
-		{name: "data-dir flag", args: []string{"-data-dir", "/tmp/coderig-store"}, wantDataDir: "/tmp/coderig-store"},
-		{name: "data-dir double dash", args: []string{"--data-dir", "/tmp/coderig-store"}, wantDataDir: "/tmp/coderig-store"},
-		{name: "data-dir whitespace trimmed to empty", args: []string{"-data-dir", "   "}, wantDataDir: ""},
-		{name: "data-dir with resume", args: []string{"-data-dir", "/tmp/s", "-resume", validID.String()}, wantResume: validID, wantDataDir: "/tmp/s"},
+		{name: "removed security-mode flag rejected", args: []string{"--security-mode", "write"}, wantErr: true},
+		{name: "data-dir default empty", args: nil, wantDataDir: "", wantProfile: coderig.AccessReadOnly},
+		{name: "data-dir flag", args: []string{"-data-dir", "/tmp/coderig-store"}, wantDataDir: "/tmp/coderig-store", wantProfile: coderig.AccessReadOnly},
+		{name: "data-dir double dash", args: []string{"--data-dir", "/tmp/coderig-store"}, wantDataDir: "/tmp/coderig-store", wantProfile: coderig.AccessReadOnly},
+		{name: "data-dir whitespace trimmed to empty", args: []string{"-data-dir", "   "}, wantDataDir: "", wantProfile: coderig.AccessReadOnly},
+		{name: "data-dir with resume", args: []string{"-data-dir", "/tmp/s", "-resume", validID.String()}, wantResume: validID, wantDataDir: "/tmp/s", wantProfile: coderig.AccessReadOnly},
+		{name: "access-profile default is readonly", args: nil, wantProfile: coderig.AccessReadOnly},
+		{name: "access-profile trusted", args: []string{"--access-profile", "trusted"}, wantProfile: coderig.AccessTrusted},
+		{name: "access-profile readonly explicit", args: []string{"-access-profile", "readonly"}, wantProfile: coderig.AccessReadOnly},
+		{name: "access-profile case-insensitive", args: []string{"--access-profile", "TRUSTED"}, wantProfile: coderig.AccessTrusted},
+		{name: "access-profile unknown rejected", args: []string{"--access-profile", "write"}, wantErr: true},
+		{name: "unconfined requires acknowledgement", args: []string{"--access-profile", "unconfined"}, wantErr: true},
+		{name: "unconfined with acknowledgement", args: []string{"--access-profile", "unconfined", "--acknowledge-unconfined"}, wantProfile: coderig.AccessUnconfined, wantAck: true},
+		{name: "acknowledgement without unconfined is harmless", args: []string{"--acknowledge-unconfined"}, wantProfile: coderig.AccessReadOnly, wantAck: true},
 		{name: "invalid resume id rejected", args: []string{"-resume", "not-a-uuid"}, wantErr: true},
 		{name: "empty resume id rejected", args: []string{"-resume", ""}, wantErr: true},
 		{name: "list and resume are mutually exclusive", args: []string{"-list", "-resume", validID.String()}, wantErr: true},
@@ -260,6 +271,12 @@ func TestParseFlags(t *testing.T) {
 			}
 			if got.dataDir != tt.wantDataDir {
 				t.Errorf("dataDir = %q, want %q", got.dataDir, tt.wantDataDir)
+			}
+			if got.accessProfile != tt.wantProfile {
+				t.Errorf("accessProfile = %q, want %q", got.accessProfile, tt.wantProfile)
+			}
+			if got.acknowledgeUnconfined != tt.wantAck {
+				t.Errorf("acknowledgeUnconfined = %v, want %v", got.acknowledgeUnconfined, tt.wantAck)
 			}
 		})
 	}

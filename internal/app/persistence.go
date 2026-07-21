@@ -11,7 +11,6 @@ import (
 	"github.com/looprig/fsstore"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/rig"
-	"github.com/looprig/harness/pkg/security"
 	"github.com/looprig/harness/pkg/sessionstore"
 	"github.com/looprig/harness/pkg/workspacestore"
 	"github.com/looprig/inference"
@@ -93,26 +92,33 @@ func headlessStores() (*swarmStores, error) {
 	return headlessResult, headlessError
 }
 
-// newSecurityLimitFactory returns the rig SecurityLimitFactory: each session gets a fresh clamped security limit
-// state seeded at the configured ordinal (BOTH the initial security limit and the runtime cap — a
-// journaled SetSecurityLimit can lower it, or raise it only up to this value, never past).
-func newSecurityLimitFactory(ordinal uint8) rig.SecurityLimitFactory {
-	return func() *security.Limit {
-		state := security.NewBounded(security.Level(ordinal))
-		state.Set(security.Level(ordinal))
-		return state
+// operatorFingerprintFields assembles the rig-level config-fingerprint inputs that are not
+// part of a loop.Definition: the swarm+primary AgentKind, the human-set RuntimeSkills mode,
+// and the durable access configuration identity. NativePermissionPolicyRev carries the
+// secret-free access digest (access ABI version, selected profile, normalized operator and
+// reviewer profiles, and the non-secret egress route identity/guarantees) so a product-profile,
+// reviewer-restriction, or egress-boundary change invalidates a restore rather than silently
+// resuming with different authority. AppFields additionally surfaces the human-visible profile
+// name for the richer manifest (the 5.2 SessionPresenter consumes it). The workspace-root field
+// is owned by the rig's exclusive-workspace placement, so it is not set here. A zero Config
+// (AccessProfile/AccessConfigRev empty) leaves both access inputs empty, keeping the fields
+// additive for callers that do not select a profile.
+func operatorFingerprintFields(cfg Config) rig.ConfigFingerprintFields {
+	return rig.ConfigFingerprintFields{
+		AgentKind:                 operatorAgentKind,
+		RuntimeSkills:             cfg.RuntimeSkills,
+		NativePermissionPolicyRev: cfg.AccessConfigRev,
+		AppFields:                 accessAppFields(cfg.AccessProfile),
 	}
 }
 
-// operatorFingerprintFields assembles the rig-level config-fingerprint inputs that are not
-// part of a loop.Definition: the swarm+primary AgentKind and the human-set RuntimeSkills
-// mode. The workspace-root field is owned by the rig's exclusive-workspace placement (it
-// folds the canonical root into the fingerprint), so it is not set here.
-func operatorFingerprintFields(cfg Config) rig.ConfigFingerprintFields {
-	return rig.ConfigFingerprintFields{
-		AgentKind:     operatorAgentKind,
-		RuntimeSkills: cfg.RuntimeSkills,
+// accessAppFields returns the secret-free, human-visible access manifest fields, or nil when no
+// profile is selected (keeping the manifest additive).
+func accessAppFields(profile AccessProfile) map[string]string {
+	if profile == "" {
+		return nil
 	}
+	return map[string]string{"access_profile": string(profile)}
 }
 
 // buildRig assembles ONE immutable rig from the three loop definitions over the given store
@@ -148,7 +154,6 @@ func buildRigWithRegistration(definitions []loop.Definition, stores *swarmStores
 		rig.WithSnapshots(rig.SnapshotPolicy{Trigger: rig.SnapshotOnIdle, Priority: rig.SnapshotBestEffort, Timeout: snapshotTimeout}),
 		rig.WithDelegationLimits(limits),
 		rig.WithFingerprintFields(operatorFingerprintFields(cfg)),
-		rig.WithSecurityLimitFactory(newSecurityLimitFactory(cfg.SecurityLimit)),
 		rig.WithOffloadGC(rig.OffloadGCPolicy{Interval: offloadGCInterval, Timeout: offloadGCTimeout}),
 	}
 	options = append(options, registration.options()...)
@@ -241,5 +246,10 @@ func (f *SessionStoreFactory) openWithClient(ctx context.Context, client inferen
 	if err != nil {
 		return nil, err
 	}
-	return newRuntimeAgent(adapter, adapter.Controller(), root, cfg.SecurityLimit), nil
+	// The in-session security-limit runtime surface (RuntimeAgent.maxAccess,
+	// runtime_controls.go SetAccess/AccessOptions/SetSecurityLimit) is retired: the
+	// selected access profile is fixed for the session and the TUI only displays it.
+	// Task 5.2 replaces RuntimeAgent's ordinal access presentation with the
+	// session-fixed profile SessionPresenter; until then this passes a zero limit.
+	return newRuntimeAgent(adapter, adapter.Controller(), root, 0), nil
 }
