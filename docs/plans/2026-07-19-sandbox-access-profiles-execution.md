@@ -51,12 +51,15 @@ Govulncheck, and Astro for published documentation.
 | `tui` | `/Users/ipotter/code/looprig/tui` | `main` | Combined approval presentation |
 | `coderig` | `/Users/ipotter/code/looprig/coderig` | `main` | Product policy and direct assembly |
 | `confinement` | `/Users/ipotter/code/looprig/confinement` | `main` | Retired bridge |
+| `tests` | `/Users/ipotter/code/looprig/tests` | `main` | Cross-module and platform integration coverage |
 | `profile` | `/Users/ipotter/code/looprig/www/looprig` | current pinned submodule commit | Public `.github` profile docs |
 | `www` | `/Users/ipotter/code/looprig/www` | `build/landing-site` | Website and profile submodule pointer |
 
 The live code dependency sweep found no required behavior change in `core`,
-`eval`, `flow`, `foreignloops`, `inference`, `llm`, `storage`, `fsstore`, or the
-standalone tests repository. Vendored copies do not make those repositories
+`eval`, `flow`, `foreignloop`, `inference`, `llm`, `storage`, or `fsstore`.
+Those unchanged sibling modules remain source links. The standalone `tests`
+repository is an affected consumer because it owns cross-module and real
+platform integration coverage. Vendored copies do not make other repositories
 implementation consumers.
 
 ## Subagent and commit protocol
@@ -327,12 +330,48 @@ Linux CI must separately run the race suite with rung-1 user/network namespaces
 enabled and with a rung-2 Landlock-v4 environment. Record those as required
 pre-merge checks if they are unavailable locally.
 
+### Task 1.5: Add Sandbox integration coverage in the tests module
+
+**Files:**
+
+- Add focused integration-tag tests under `tests/`
+- Modify `tests/go.mod` and `tests/go.sum` only as required to consume the local
+  Sandbox worktree
+- Update `tests/Makefile` only if a distinct platform-integration target is
+  required
+
+Keep module-owned unit and conformance tests in `sandbox`. Put real
+cross-module/process/platform integration scenarios in `tests`: construct
+profiles through the public `ExecutorSet` API, verify owned HOME/TMPDIR cleanup,
+exercise exact Path versus recursive Tree grants and post-approval symlink-swap
+rejection, prove combined target-network and broad-DNS behavior where the host
+can enforce it, and assert unsupported platform/profile combinations fail
+closed. Do not duplicate private backend compiler tests.
+
+On macOS, run the native Seatbelt integration cases. On Linux CI, run the same
+integration suite once with rung-1 user/network namespaces enabled and once in
+a Landlock-v4 rung-2 environment. Tests must skip only when their documented OS
+or kernel prerequisite is absent; they must not silently turn an enforcement
+failure into a skip.
+
+Verification:
+
+```bash
+cd "$integration_root/tests"
+GOWORK=off go test -tags integration -race ./...
+GOWORK=off go vet -tags integration ./...
+make check
+```
+
+Cross-compile any platform-specific test packages locally. Record the two Linux
+runtime variants as required pre-merge CI checks when executing on macOS.
+
 ### Phase 1 boundary
 
-Review the entire Sandbox branch delta against the access spec and the achieved
-platform guarantees, then run code-quality review. Require README/SPEC examples
-to match the hard-cut API. Commit review fixes only after the full Sandbox check
-set passes.
+Review the complete Sandbox and tests-module phase delta against the access spec
+and the achieved platform guarantees, then run code-quality review. Require
+README/SPEC examples and integration tests to match the hard-cut API. Commit
+review fixes only after both repositories' full check sets pass.
 
 ## Phase 2: Replace Harness permission and security contracts
 
@@ -754,6 +793,7 @@ cd "$integration_root/tools" && GOWORK=off go test -race ./... && GOWORK=off mak
 cd "$integration_root/mcp" && GOWORK=off go test -race ./... && GOWORK=off make secure
 cd "$integration_root/tui" && GOWORK=off go test -race ./... && GOWORK=off make secure
 cd "$integration_root/coderig" && GOWORK=off make build && GOWORK=off make test && GOWORK=off make secure
+cd "$integration_root/tests" && GOWORK=off make check
 cd "$integration_root/www" && npm run build
 ```
 
