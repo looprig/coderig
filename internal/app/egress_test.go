@@ -113,11 +113,17 @@ func TestResolveEgressRouteMalformed(t *testing.T) {
 		t.Errorf("error leaked credential: %v", err)
 	}
 
-	// A malformed NO_PROXY entry (embedded scheme/credentials) fails closed.
-	if _, err := resolveEgressRoute(envMap(map[string]string{
-		"NO_PROXY": "http://user:pw@host",
-	})); err == nil {
-		t.Error("malformed NO_PROXY = nil error; want fail-closed")
+	// A malformed NO_PROXY entry (embedded scheme/credentials) fails closed
+	// without echoing the credential-bearing entry into the error.
+	const noProxySecret = "npsecret"
+	_, npErr := resolveEgressRoute(envMap(map[string]string{
+		"NO_PROXY": "http://user:" + noProxySecret + "@host",
+	}))
+	if npErr == nil {
+		t.Fatal("malformed NO_PROXY = nil error; want fail-closed")
+	}
+	if strings.Contains(npErr.Error(), noProxySecret) {
+		t.Errorf("NO_PROXY error leaked credential: %v", npErr)
 	}
 }
 

@@ -140,7 +140,9 @@ func parseNoProxy(raw string) (entries []string, wildcard bool, err error) {
 			continue
 		}
 		if strings.ContainsAny(entry, " \t/@") || strings.Contains(entry, "://") {
-			return nil, false, &EgressRouteError{Reason: "malformed NO_PROXY entry " + entry}
+			// Do not echo the entry: a fat-fingered credential-bearing proxy URL
+			// (user:pw@host) matches exactly this branch and must not reach stderr.
+			return nil, false, &EgressRouteError{Reason: "malformed NO_PROXY entry: contains a scheme, credentials, path, or whitespace"}
 		}
 		entries = append(entries, entry)
 	}
