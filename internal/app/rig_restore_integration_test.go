@@ -21,7 +21,6 @@ import (
 	"github.com/looprig/harness/pkg/identity"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/rig"
-	"github.com/looprig/harness/pkg/security"
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/harness/pkg/workspacestore"
 	"github.com/looprig/inference"
@@ -115,7 +114,7 @@ func TestRigRestoreStateWorkspaceAndContinuation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a1, err := f1.openWithClient(context.Background(), client, newModelFactory(), SessionSelector{}, Config{SecurityLimit: DefaultSecurityMode})
+	a1, err := f1.openWithClient(context.Background(), client, newModelFactory(), SessionSelector{}, Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,9 +148,6 @@ func TestRigRestoreStateWorkspaceAndContinuation(t *testing.T) {
 	if err := controller.Change(context.Background(), loop.ChangeModel(changedModel), loop.ChangeEffort(model.EffortHigh)); err != nil {
 		t.Fatalf("Change(delegate inference): %v", err)
 	}
-	if err := a1.sess.SetSecurityLimit(context.Background(), security.Level(1)); err != nil {
-		t.Fatalf("SetSecurityLimit(read-only): %v", err)
-	}
 	const filename, body = "restore-state.txt", "checkpointed before shutdown"
 	if err := os.WriteFile(filepath.Join(workspace, filename), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -175,7 +171,7 @@ func TestRigRestoreStateWorkspaceAndContinuation(t *testing.T) {
 		t.Fatalf("fresh NewSessionStoreFactory: %v", err)
 	}
 	t.Cleanup(func() { _ = f2.Close() })
-	a2, err := f2.openWithClient(context.Background(), client, newModelFactory(), SessionSelector{Resume: sessionID}, Config{SecurityLimit: DefaultSecurityMode})
+	a2, err := f2.openWithClient(context.Background(), client, newModelFactory(), SessionSelector{Resume: sessionID}, Config{})
 	if err != nil {
 		t.Fatalf("restore from fresh factory: %v", err)
 	}
@@ -194,10 +190,6 @@ func TestRigRestoreStateWorkspaceAndContinuation(t *testing.T) {
 	}
 	if got := child.Mode(); got != "" {
 		t.Errorf("restored delegate mode = %q, want production base mode", got)
-	}
-	securityLimitView, ok := a2.sess.(interface{ SecurityLimitSource() security.LimitSource })
-	if !ok || securityLimitView.SecurityLimitSource().Current() != security.Level(1) {
-		t.Fatalf("restored security securityLimit unavailable or incorrect before submit")
 	}
 	gotBody, err := os.ReadFile(filepath.Join(workspace, filename))
 	if err != nil || string(gotBody) != body {
@@ -463,13 +455,9 @@ func TestManagedDelegateDeclaredModeFSStore(t *testing.T) {
 	modeModel.Name = "declared-build-model"
 	definitions := func(t *testing.T) []loop.Definition {
 		t.Helper()
-		permission := &typedDelegatePermission{}
 		primer, err := loop.Define(
 			loop.WithName(operatorPrimaryName), loop.WithInference(client, testModel()), loop.WithSystem("mode-test-primary"),
-			loop.WithPermissionFactory(func(_ context.Context, bindings tool.Bindings) (loop.PermissionGate, error) {
-				permission.controller = bindings.Delegate
-				return permission, nil
-			}),
+			loop.WithAccessGate(approveAllAccessGate{}),
 			loop.WithPolicyRevision("mode-test-primary-v1"), loop.WithDelegates(operator.Name),
 			loop.WithDelegation(loop.Delegation{Style: loop.DelegationManaged}),
 		)
@@ -513,7 +501,7 @@ func TestManagedDelegateDeclaredModeFSStore(t *testing.T) {
 			childID = started.LoopID
 		}
 	}
-	childController, ok := a1.sess.LoopController(childID)
+	childController, ok := controller1.LoopController(childID)
 	if !ok {
 		t.Fatal("declared-mode child controller missing")
 	}
@@ -523,7 +511,7 @@ func TestManagedDelegateDeclaredModeFSStore(t *testing.T) {
 	if err := childController.SetMode(context.Background(), "build"); err != nil {
 		t.Fatal(err)
 	}
-	if err := a1.sess.SetActiveLoop(context.Background(), childID); err != nil {
+	if err := controller1.SetActiveLoop(context.Background(), childID); err != nil {
 		t.Fatal(err)
 	}
 	if err := a1.Close(context.Background()); err != nil {
@@ -566,7 +554,7 @@ func TestManagedDelegateDeclaredModeFSStore(t *testing.T) {
 	if !replayedChild {
 		t.Fatal("restored all-loop backlog omitted delegate LoopStarted")
 	}
-	restoredChild, ok := a2.sess.Loop(childID)
+	restoredChild, ok := controller2.Loop(childID)
 	if !ok {
 		t.Fatal("restored declared-mode child missing before submit")
 	}
@@ -639,7 +627,8 @@ func TestRigRestoreSnapshotFailureAdmission(t *testing.T) {
 			client := &managedScript{fn: func(context.Context, inference.Request) ([]content.Chunk, error) {
 				return finalText("snapshot turn complete"), nil
 			}}
-			definitions, err := swarmDefinitions(client, testModel(), Config{})
+			access, cfg := headlessTestAccess(t, Config{}, root)
+			definitions, err := swarmDefinitions(client, testModel(), cfg, access)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -655,8 +644,7 @@ func TestRigRestoreSnapshotFailureAdmission(t *testing.T) {
 				rig.WithExclusiveWorkspace(workspace, root, f.stores.leaser),
 				rig.WithSnapshots(rig.SnapshotPolicy{Trigger: rig.SnapshotOnIdle, Priority: tc.priority, Timeout: 5 * time.Second}),
 				rig.WithDelegationLimits(rig.DelegationLimits{Depth: operatorSpawnDepth, Quota: operatorSpawnQuota}),
-				rig.WithFingerprintFields(operatorFingerprintFields(Config{})),
-				rig.WithSecurityLimitFactory(newSecurityLimitFactory(0)),
+				rig.WithFingerprintFields(operatorFingerprintFields(cfg)),
 			}
 			options = append(options, registration.options()...)
 			assembly, err := rig.Define(options...)
@@ -680,7 +668,7 @@ func TestRigRestoreSnapshotFailureAdmission(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatalf("snapshot attempt not observed: %v", ctx.Err())
 			}
-			idle := a.sess.(interface{ WaitIdle(context.Context) error })
+			idle := controller.(interface{ WaitIdle(context.Context) error })
 			idleErr := idle.WaitIdle(ctx)
 			if tc.required {
 				if idleErr == nil {
@@ -717,19 +705,17 @@ func TestRigRestoreSiblingOwnershipScopes(t *testing.T) {
 	client := &managedScript{fn: func(context.Context, inference.Request) ([]content.Chunk, error) {
 		return finalText("scoped worker complete"), nil
 	}}
-	var parentA, parentB tool.DelegateController
+	var probeA, probeB *delegateProbe
 	definitions := func(t *testing.T) []loop.Definition {
 		t.Helper()
-		parent := func(name string, capture *tool.DelegateController) loop.Definition {
-			permission := &typedDelegatePermission{}
+		parent := func(name string, capture **delegateProbe) loop.Definition {
+			probe := &delegateProbe{}
+			*capture = probe
 			def, err := loop.Define(
 				loop.WithName(identity.AgentName(name)),
 				loop.WithInference(client, testModel()),
-				loop.WithPermissionFactory(func(_ context.Context, bindings tool.Bindings) (loop.PermissionGate, error) {
-					permission.controller = bindings.Delegate
-					*capture = bindings.Delegate
-					return permission, nil
-				}),
+				loop.WithTools(probe.definition()),
+				loop.WithAccessGate(approveAllAccessGate{}),
 				loop.WithPolicyRevision(name+"-v1"),
 				loop.WithDelegates("scoped-worker"),
 				loop.WithDelegation(loop.Delegation{Style: loop.DelegationManaged}),
@@ -743,7 +729,7 @@ func TestRigRestoreSiblingOwnershipScopes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return []loop.Definition{parent("parent-a", &parentA), parent("parent-b", &parentB), worker}
+		return []loop.Definition{parent("parent-a", &probeA), parent("parent-b", &probeB), worker}
 	}
 	build := func(t *testing.T, f *SessionStoreFactory) *rig.Rig {
 		t.Helper()
@@ -772,6 +758,10 @@ func TestRigRestoreSiblingOwnershipScopes(t *testing.T) {
 		t.Fatal(err)
 	}
 	sid := s1.SessionID()
+	parentA, parentB := probeA.captured(), probeB.captured()
+	if parentA == nil || parentB == nil {
+		t.Fatal("initial bind did not capture both scoped controllers")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	aChild, err := parentA.Execute(ctx, tool.DelegateRequest{Operation: tool.DelegateStart, Agent: "scoped-worker", Message: "a", Wait: true})
@@ -792,7 +782,7 @@ func TestRigRestoreSiblingOwnershipScopes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	parentA, parentB = nil, nil
+	probeA, probeB = nil, nil
 	f2, err := NewSessionStoreFactory(dataDir)
 	if err != nil {
 		t.Fatal(err)
@@ -803,6 +793,7 @@ func TestRigRestoreSiblingOwnershipScopes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s2.Shutdown(context.Background()) })
+	parentA, parentB = probeA.captured(), probeB.captured()
 	if parentA == nil || parentB == nil {
 		t.Fatal("restore did not rebind both scoped controllers")
 	}
@@ -816,156 +807,6 @@ func TestRigRestoreSiblingOwnershipScopes(t *testing.T) {
 	} {
 		if _, err := parentA.Execute(ctx, request); err == nil || !strings.Contains(err.Error(), "not owned") {
 			t.Fatalf("parent A cross-owner %v error = %v, want ownership rejection", request.Operation, err)
-		}
-	}
-}
-
-// TestRigRestoreDelegateGateSandboxRoot restores an active production operator delegate,
-// then drives its real Bash tool through the restored security limit-aware permission/sandbox
-// binding. The gate is persisted, routed by the delegate loop id, resolved through the
-// adapter, and removed; pwd proves the bound executor retained the restored checkout root.
-// This intentionally opens a NEW gate after restore. Gates that were open at a crash are
-// non-restorable by contract and restore closes them with CloseRestoreUnavailable because
-// their blocked in-process continuation no longer exists.
-func TestRigRestoreDelegateGateSandboxRoot(t *testing.T) {
-	dataDir, root := t.TempDir(), t.TempDir()
-	t.Chdir(root)
-	phase, primaryCalls, childCalls := "initial", 0, 0
-	var childID uuid.UUID
-	var pwdResult, deniedResult string
-	client := &managedScript{}
-	client.fn = func(_ context.Context, req inference.Request) ([]content.Chunk, error) {
-		if strings.Contains(req.System, operatorDelegation) {
-			primaryCalls++
-			if primaryCalls == 1 {
-				return toolCall("sandbox-child", `{"agent":"operator","message":"prepare","wait":true}`), nil
-			}
-			return finalText("parent prepared"), nil
-		}
-		if phase == "initial" {
-			return finalText("child prepared"), nil
-		}
-		childCalls++
-		switch childCalls {
-		case 1:
-			return []content.Chunk{&content.ToolUseChunk{Index: 0, ID: "restored-pwd", Name: "Bash", InputJSON: `{"command":"pwd"}`}}, nil
-		case 2:
-			pwdResult = lastToolText(req)
-			return []content.Chunk{&content.ToolUseChunk{Index: 0, ID: "restored-clamp", Name: "Bash", InputJSON: `{"command":"touch restored-securityLimit-must-deny"}`}}, nil
-		default:
-			deniedResult = lastToolText(req)
-			return finalText("restored bash complete"), nil
-		}
-	}
-	f1, err := NewSessionStoreFactory(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a1, err := f1.openWithClient(context.Background(), client, newModelFactory(), SessionSelector{}, Config{SecurityLimit: DefaultSecurityMode})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sid := a1.SessionID()
-	_, events := runManagedTurnObserved(t, a1, "create delegate")
-	for _, ev := range events {
-		if started, ok := ev.(event.LoopStarted); ok && !started.Cause.Coordinates.LoopID.IsZero() {
-			childID = started.LoopID
-		}
-	}
-	if childID.IsZero() {
-		t.Fatal("delegate missing")
-	}
-	if err := a1.sess.SetActiveLoop(context.Background(), childID); err != nil {
-		t.Fatal(err)
-	}
-	if err := a1.sess.SetSecurityLimit(context.Background(), security.Level(1)); err != nil {
-		t.Fatal(err)
-	}
-	if err := a1.Close(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := f1.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	phase = "restored"
-	f2, err := NewSessionStoreFactory(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = f2.Close() })
-	a2, err := f2.openWithClient(context.Background(), client, newModelFactory(), SessionSelector{Resume: sid}, Config{SecurityLimit: DefaultSecurityMode})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = a2.Close(context.Background()) })
-	if a2.ActiveLoopID() != childID {
-		t.Fatalf("restored active loop = %v, want %v", a2.ActiveLoopID(), childID)
-	}
-	sub, err := a2.Subscribe(event.EventFilter{Enduring: event.LoopScope{All: true}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = sub.Close() }()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	commandID, err := a2.Submit(ctx, []content.Block{&content.TextBlock{Text: "show restored root"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var turnID uuid.UUID
-	gateCalls := make(map[uuid.UUID]uuid.UUID)
-	resolved := make(map[uuid.UUID]bool)
-	for {
-		select {
-		case <-ctx.Done():
-			t.Fatalf("restored Bash timed out: %v", ctx.Err())
-		case delivery, ok := <-sub.Events():
-			if !ok {
-				t.Fatalf("restored Bash subscription closed before turn completion")
-			}
-			switch ev := delivery.Event.(type) {
-			case event.TurnStarted:
-				if ev.Cause.CommandID == commandID {
-					turnID = ev.TurnID
-				}
-			case event.GateOpened:
-				if ev.EventHeader().LoopID != childID {
-					t.Fatalf("gate loop = %v, want %v", ev.EventHeader().LoopID, childID)
-				}
-				gateID := ev.Gate.ID
-				callID := ev.Gate.Subject.ToolExecutionID
-				gateCalls[gateID] = callID
-				if err := a2.Approve(ctx, childID, callID, tool.ScopeOnce); err != nil {
-					t.Fatal(err)
-				}
-			case event.GateResolved:
-				resolved[ev.GateID] = true
-			case event.TurnFailed:
-				t.Fatalf("restored Bash turn failed: %v", ev.Err)
-			case event.TurnDone:
-				if ev.TurnID != turnID || turnID.IsZero() {
-					continue
-				}
-				if len(gateCalls) != 2 || len(resolved) != 2 {
-					t.Fatalf("gate lifecycle incomplete: calls=%v resolved=%v", gateCalls, resolved)
-				}
-				if !strings.Contains(pwdResult, root) {
-					t.Fatalf("restored Bash pwd result = %q, want root %q", pwdResult, root)
-				}
-				if !strings.Contains(strings.ToLower(deniedResult), "operation not permitted") && !strings.Contains(deniedResult, "exit code") {
-					t.Fatalf("restored securityLimit did not deny write command: %q", deniedResult)
-				}
-				if _, err := os.Stat(filepath.Join(root, "restored-securityLimit-must-deny")); !os.IsNotExist(err) {
-					t.Fatalf("restored read-only securityLimit allowed touch; stat error = %v", err)
-				}
-				for _, callID := range gateCalls {
-					if _, err := a2.gateIDFor(childID, callID); err == nil {
-						t.Fatal("resolved gate remained indexed")
-					}
-				}
-				return
-			}
 		}
 	}
 }

@@ -9,7 +9,6 @@ tool (
 )
 
 require (
-	github.com/looprig/confinement v0.1.0
 	github.com/looprig/core v0.2.0
 	github.com/looprig/fsstore v0.2.0
 	github.com/looprig/harness v0.12.0
@@ -115,7 +114,6 @@ require (
 // insteadOf config, so `go` cannot fetch them over HTTPS — the local replaces are load-bearing
 // for every offline build (GOWORK=off GOPROXY=off GOPRIVATE=github.com/looprig/*).
 replace (
-	github.com/looprig/confinement => ../confinement
 	github.com/looprig/core => ../core
 	github.com/looprig/fsstore => ../fsstore
 	github.com/looprig/harness => ../harness

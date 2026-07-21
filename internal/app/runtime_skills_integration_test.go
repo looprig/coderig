@@ -14,7 +14,7 @@ import (
 	"github.com/looprig/core/content"
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/event"
-	"github.com/looprig/harness/pkg/tool"
+	"github.com/looprig/harness/pkg/gate"
 	"github.com/looprig/inference"
 )
 
@@ -148,11 +148,10 @@ func TestRuntimeSkillsWorkspaceLoadGatedEndToEnd(t *testing.T) {
 				if ev.EventHeader().LoopID != childID || childID.IsZero() {
 					t.Fatalf("workspace-skill gate loop = %v, want delegate %v", ev.EventHeader().LoopID, childID)
 				}
-				fields := ev.Gate.Prompt.Schema.Fields
-				if len(fields) != 1 || len(fields[0].Options) != 1 || fields[0].Options[0].Value != "once" {
-					t.Fatalf("workspace-skill scope prompt = %+v, want only once", fields)
-				}
-				if err := a.Approve(ctx, childID, ev.Gate.Subject.ToolExecutionID, tool.ScopeOnce); err != nil {
+				// The untrusted workspace skill load (context.load) is Gated by CodeRig's
+				// product access source, so it surfaces one combined approval on the delegate
+				// loop; approving it once admits the exact skill identity.
+				if err := a.Approve(ctx, childID, ev.Gate.Subject.ToolExecutionID, gate.ApprovalApprove); err != nil {
 					t.Fatal(err)
 				}
 				approved = true

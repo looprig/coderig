@@ -20,6 +20,7 @@ import (
 	"github.com/looprig/harness/pkg/journal"
 	"github.com/looprig/harness/pkg/sessionstore"
 	model "github.com/looprig/inference/model"
+	"github.com/looprig/tui"
 )
 
 // textChunk wraps s as a streamed text chunk for the fake LLM. (The fake_test fakeLLM is
@@ -168,7 +169,7 @@ func TestPersistedVisibilityFiltersPublicBacklogAndRetainsAudit(t *testing.T) {
 // drainTurn submits input through the persisted agent and drains a fresh subscription to the
 // turn terminal — deterministic (unlike a WaitIdle that can race the fire-and-forget submit). The
 // subscription is created BEFORE the submit so the terminal is never missed.
-func drainTurn(t *testing.T, a *sessionAdapter, text string) {
+func drainTurn(t *testing.T, a tui.Agent, text string) {
 	t.Helper()
 	sub, err := a.Subscribe(event.EventFilter{Enduring: event.LoopScope{All: true}})
 	if err != nil {
@@ -201,7 +202,7 @@ func drainTurn(t *testing.T, a *sessionAdapter, text string) {
 // checkpoint at quiescence lands (event.WorkspaceCheckpointed, published by CheckpointWorkspace
 // after the Active→Idle edge). The subscription is created before the submit so the checkpoint is
 // never missed.
-func drainUntilCheckpoint(t *testing.T, a *sessionAdapter, text string) {
+func drainUntilCheckpoint(t *testing.T, a tui.Agent, text string) {
 	t.Helper()
 	sub, err := a.Subscribe(event.EventFilter{Enduring: event.LoopScope{All: true}})
 	if err != nil {
@@ -250,8 +251,9 @@ func TestNewSessionStoreFactoryOpensAndCloses(t *testing.T) {
 
 // TestSessionStoreNewSessionBasics proves openWithClient with a ZERO selector builds a NEW
 // persisted session over the shared store: it has a non-zero SessionID (the factory minted +
-// injected it) and, being a NEW (not restored) session, ReplayBacklog returns nil so the TUI
-// skips the cold-restore repaint.
+// injected it) and, being a fresh session, its cold-repaint backlog carries only the session
+// initialization events (SessionStarted + the primer's LoopStarted) — no turn or content
+// history to repaint.
 func TestSessionStoreNewSessionBasics(t *testing.T) {
 	f := newIntegrationFactory(t)
 
@@ -265,10 +267,12 @@ func TestSessionStoreNewSessionBasics(t *testing.T) {
 	if a.SessionID().IsZero() {
 		t.Fatal("new persisted session has a zero SessionID")
 	}
-	if backlog, err := a.ReplayBacklog(context.Background()); err != nil {
+	backlog, err := a.ReplayBacklog(context.Background())
+	if err != nil {
 		t.Fatalf("new-session ReplayBacklog: %v", err)
-	} else if len(backlog) != 0 {
-		t.Errorf("new-session ReplayBacklog returned %d events, want 0", len(backlog))
+	}
+	if got := typeNames(backlog); !reflect.DeepEqual(got, []string{"event.SessionStarted", "event.LoopStarted"}) {
+		t.Errorf("new-session ReplayBacklog = %v, want only the session initialization events", got)
 	}
 }
 

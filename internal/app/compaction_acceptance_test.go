@@ -124,7 +124,7 @@ func (e *acceptanceCompactionFixtureError) Error() string {
 
 func (e *acceptanceCompactionFixtureError) Unwrap() error { return e.Cause }
 
-func openAcceptanceAgentWithClient(t *testing.T, client inference.Client) (*sessionAdapter, *swarmStores) {
+func openAcceptanceAgentWithClient(t *testing.T, client inference.Client) (*RuntimeAgent, *swarmStores) {
 	t.Helper()
 	stores := mustHeadlessTestStores(t)
 	agent, err := newSessionOverStores(context.Background(), client, newModelFactoryFor(testModel()), Config{}, stores, t.TempDir())
@@ -470,12 +470,14 @@ func openAcceptanceAgentWithContextPolicy(t *testing.T, client inference.Client,
 	if err := compaction.Validate(capability); err != nil {
 		t.Fatalf("compaction policy validation error = %v", err)
 	}
-	definitions, err := swarmDefinitionsWithContextPolicy(client, selectedModel, Config{}, policy)
+	root := t.TempDir()
+	access, cfg := headlessTestAccess(t, Config{}, root)
+	definitions, err := swarmDefinitionsWithContextPolicy(client, selectedModel, cfg, policy, access)
 	if err != nil {
 		t.Fatalf("swarmDefinitionsWithContextPolicy() error = %v", err)
 	}
 	stores := mustHeadlessTestStores(t)
-	assembly, err := buildRig(definitions, stores, t.TempDir(), Config{}, false)
+	assembly, err := buildRig(definitions, stores, root, cfg, false)
 	if err != nil {
 		t.Fatalf("buildRig() error = %v", err)
 	}
@@ -624,11 +626,13 @@ func TestAcceptanceCompactionFinalizationFailureFaultsSession(t *testing.T) {
 					entered: invokeEntered, release: invokeRelease,
 				}},
 			}
-			definitions, err := swarmDefinitions(client, testModel(), Config{})
+			root := t.TempDir()
+			access, cfg := headlessTestAccess(t, Config{}, root)
+			definitions, err := swarmDefinitions(client, testModel(), cfg, access)
 			if err != nil {
 				t.Fatalf("swarmDefinitions() error = %v", err)
 			}
-			assembly, err := buildRig(definitions, stores, t.TempDir(), Config{}, false)
+			assembly, err := buildRig(definitions, stores, root, cfg, false)
 			if err != nil {
 				t.Fatalf("buildRig() error = %v", err)
 			}

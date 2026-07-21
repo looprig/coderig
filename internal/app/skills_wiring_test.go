@@ -29,7 +29,8 @@ func testSkillLoader() skill.SkillLoader {
 func TestDefinitionSystemPromptsCarrySkillCatalog(t *testing.T) {
 	t.Parallel()
 
-	defs, err := swarmDefinitions(&fakeLLM{}, testModel(), Config{})
+	access, cfg := headlessTestAccess(t, Config{}, t.TempDir())
+	defs, err := swarmDefinitions(&fakeLLM{}, testModel(), cfg, access)
 	if err != nil {
 		t.Fatalf("swarmDefinitions() error = %v", err)
 	}

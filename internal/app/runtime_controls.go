@@ -3,11 +3,9 @@ package app
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/loop"
-	"github.com/looprig/harness/pkg/security"
 	"github.com/looprig/harness/pkg/session"
 	model "github.com/looprig/inference/model"
 	"github.com/looprig/tui"
@@ -15,20 +13,49 @@ import (
 )
 
 // RuntimeAgent keeps provider and policy knowledge in CodeRig while embedding the stable
-// session adapter used by the TUI data plane.
+// session adapter used by the TUI data plane. It OWNS the session's executor-set closers
+// (through access) and supplies the synchronous, session-fixed presentation metadata
+// (profile name, workspace root, permission diagnostics) the TUI displays. The access
+// profile is fixed at Open; there is no in-session authority mutation surface.
 type RuntimeAgent struct {
 	*sessionadapter.Adapter
-	sess      session.SessionController
-	root      string
-	maxAccess security.Level
+	sess   session.SessionController
+	root   string
+	access *sessionAccess
 }
 
-type securityLimitView interface {
-	SecurityLimitSource() security.LimitSource
+func newRuntimeAgent(adapter *sessionadapter.Adapter, sess session.SessionController, root string, access *sessionAccess) *RuntimeAgent {
+	return &RuntimeAgent{Adapter: adapter, sess: sess, root: root, access: access}
 }
 
-func newRuntimeAgent(adapter *sessionadapter.Adapter, sess session.SessionController, root string, maxAccess uint8) *RuntimeAgent {
-	return &RuntimeAgent{Adapter: adapter, sess: sess, root: root, maxAccess: security.Level(maxAccess)}
+// Close shuts the session down and then releases the session's executor sets exactly once.
+// The adapter is closed FIRST (stopping any in-flight loop that could still use an executor),
+// then the executor sets are closed, removing their owned scratch HOME directories and
+// revoking their grant keys and egress proxies.
+func (a *RuntimeAgent) Close(ctx context.Context) error {
+	err := a.Adapter.Close(ctx)
+	if a.access != nil {
+		if closeErr := a.access.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}
+	return err
+}
+
+// SessionPresentation supplies the TUI's synchronous session security context: the fixed
+// access profile name, the workspace root, and the manual out-of-catalog permission
+// diagnostics surfaced by the workspace permission-store load. The TUI reads it at screen
+// construction and on cross-session resume so it always displays THIS session's context.
+func (a *RuntimeAgent) SessionPresentation() tui.SessionPresentation {
+	presentation := tui.SessionPresentation{WorkspaceRoot: a.root}
+	if a.access != nil {
+		presentation.ProfileName = a.access.profileName
+		presentation.PermissionDiagnostics = a.access.diagnostics
+		if presentation.WorkspaceRoot == "" {
+			presentation.WorkspaceRoot = a.access.workspace
+		}
+	}
+	return presentation
 }
 
 func (a *RuntimeAgent) LoopRuntimeOptions(_ context.Context, loopID uuid.UUID) (tui.LoopRuntimeOptions, error) {
@@ -58,49 +85,6 @@ func (a *RuntimeAgent) LoopRuntimeOptions(_ context.Context, loopID uuid.UUID) (
 		}
 	}
 	return options, nil
-}
-
-func (a *RuntimeAgent) AccessOptions(context.Context) (tui.AccessOptions, error) {
-	labels := []string{"Untrusted", "Read Only", "Writable", "Trusted", "Unconfined"}
-	options := tui.AccessOptions{Root: a.root}
-	for level := security.Level(0); level <= a.maxAccess && int(level) < len(labels); level++ {
-		options.Choices = append(options.Choices, tui.AccessOption{
-			ID:          tui.AccessID(strconv.FormatUint(uint64(level), 10)),
-			Label:       labels[level],
-			Description: accessDescription(level),
-		})
-	}
-	view, ok := a.sess.(securityLimitView)
-	if !ok {
-		return tui.AccessOptions{}, fmt.Errorf("coderig: live security limit is unavailable")
-	}
-	source := view.SecurityLimitSource()
-	if source == nil {
-		return tui.AccessOptions{}, fmt.Errorf("coderig: live security limit is unavailable")
-	}
-	current := source.Current()
-	if current > a.maxAccess {
-		return tui.AccessOptions{}, fmt.Errorf("coderig: live security limit %d exceeds configured cap %d", current, a.maxAccess)
-	}
-	options.Current = tui.AccessID(strconv.FormatUint(uint64(current), 10))
-	return options, nil
-}
-
-func accessDescription(level security.Level) string {
-	switch level {
-	case 0:
-		return "workspace-only reads with network denied"
-	case 1:
-		return "broad reads with writes gated"
-	case 2:
-		return "writes confined to workspace and temporary files"
-	case 3:
-		return "sandboxed writes with trusted network access"
-	case 4:
-		return "full user-level authority"
-	default:
-		return ""
-	}
 }
 
 func (a *RuntimeAgent) SetMode(ctx context.Context, loopID uuid.UUID, id tui.ModeID) error {
@@ -135,16 +119,11 @@ func (a *RuntimeAgent) SetEffort(ctx context.Context, loopID uuid.UUID, id tui.E
 	return controller.Change(ctx, loop.ChangeEffort(effort))
 }
 
-func (a *RuntimeAgent) SetAccess(ctx context.Context, id tui.AccessID) error {
-	ordinal, err := strconv.ParseUint(string(id), 10, 8)
-	if err != nil || security.Level(ordinal) > a.maxAccess {
-		return fmt.Errorf("coderig: access choice %q is unknown or exceeds the configured cap", id)
-	}
-	return a.sess.SetSecurityLimit(ctx, security.Level(ordinal))
-}
-
 func modelID(value model.Model) string { return string(value.Provider) + "/" + value.Name }
 
-var _ tui.Agent = (*RuntimeAgent)(nil)
-var _ tui.RuntimeCatalog = (*RuntimeAgent)(nil)
-var _ tui.RuntimeController = (*RuntimeAgent)(nil)
+var (
+	_ tui.Agent             = (*RuntimeAgent)(nil)
+	_ tui.RuntimeCatalog    = (*RuntimeAgent)(nil)
+	_ tui.RuntimeController = (*RuntimeAgent)(nil)
+	_ tui.SessionPresenter  = (*RuntimeAgent)(nil)
+)

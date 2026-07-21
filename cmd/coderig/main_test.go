@@ -20,7 +20,6 @@ import (
 	"github.com/looprig/harness/pkg/event"
 	"github.com/looprig/harness/pkg/gate"
 	"github.com/looprig/harness/pkg/sessionstore"
-	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/tui"
 	"github.com/looprig/tui/runtime"
 )
@@ -144,7 +143,7 @@ func (a *orderingAgent) Close(context.Context) error                           {
 func (*orderingAgent) AcceptsImages(uuid.UUID) bool                            { return false }
 func (*orderingAgent) Subscribe(event.EventFilter) (event.Subscription, error) { return nil, nil }
 func (*orderingAgent) ReplayBacklog(context.Context) ([]event.Event, error)    { return nil, nil }
-func (*orderingAgent) Approve(context.Context, uuid.UUID, uuid.UUID, tool.ApprovalScope) error {
+func (*orderingAgent) Approve(context.Context, uuid.UUID, uuid.UUID, gate.ApprovalAction) error {
 	return nil
 }
 func (*orderingAgent) Deny(context.Context, uuid.UUID, uuid.UUID) error                  { return nil }

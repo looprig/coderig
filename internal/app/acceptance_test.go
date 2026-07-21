@@ -24,8 +24,9 @@ import (
 // The composed managed-delegation action flows live in managed_delegation_test.go; the
 // fresh-fsstore restore and runtime-skill matrix lives in the integration-tagged tests.
 
-// openAcceptanceAgent opens a headless CodeRig session over an isolated store + temp root.
-func openAcceptanceAgent(t *testing.T) (*sessionAdapter, *swarmStores) {
+// openAcceptanceAgent opens a headless CodeRig session over an isolated store + temp root and
+// returns the composition-root runtime agent (which owns the session's executor-set closers).
+func openAcceptanceAgent(t *testing.T) (*RuntimeAgent, *swarmStores) {
 	t.Helper()
 	stores := mustHeadlessTestStores(t)
 	agent, err := newSessionOverStores(context.Background(), &fakeLLM{}, newModelFactoryFor(testModel()), Config{}, stores, t.TempDir())

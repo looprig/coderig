@@ -174,6 +174,23 @@ func testModel() model.Model {
 	return selected
 }
 
+// headlessTestAccess builds the headless session access wiring over root (a read-only
+// permission store and non-prompting gate evaluators) and registers its executor-set
+// closers for cleanup. Registering the cleanup here (before the caller builds its agent)
+// means the agent's own cleanup runs first (t.Cleanup is LIFO), so the session shuts down
+// before its executor sets are closed. It also folds the access digest into cfg so tests
+// build sessions with the production fingerprint. The updated cfg is returned.
+func headlessTestAccess(t *testing.T, cfg Config, root string) (*sessionAccess, Config) {
+	t.Helper()
+	access, err := buildHeadlessAccess(cfg, root)
+	if err != nil {
+		t.Fatalf("buildHeadlessAccess() error = %v", err)
+	}
+	t.Cleanup(func() { _ = access.Close() })
+	cfg.AccessConfigRev = access.configRev
+	return access, cfg
+}
+
 // newTestAgent builds an ISOLATED headless sessionAdapter over a FRESH in-memory store and a
 // throwaway workspace root, so a test never contends on the process-shared headless store's
 // exclusive checkout lease (which would serialize every parallel test on the real cwd) and
@@ -182,7 +199,8 @@ func testModel() model.Model {
 func newTestAgent(t *testing.T, client inference.Client, cfg Config) *sessionAdapter {
 	t.Helper()
 	root := t.TempDir()
-	definitions, err := swarmDefinitions(client, testModel(), cfg)
+	access, cfg := headlessTestAccess(t, cfg, root)
+	definitions, err := swarmDefinitions(client, testModel(), cfg, access)
 	if err != nil {
 		t.Fatalf("swarmDefinitions() error = %v", err)
 	}

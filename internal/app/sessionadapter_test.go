@@ -28,8 +28,6 @@ func mustUUID(t *testing.T) uuid.UUID {
 	return id
 }
 
-func mustBindingID(t *testing.T) uuid.UUID { return mustUUID(t) }
-
 type testWorkspaceCoordinator struct{}
 
 func (*testWorkspaceCoordinator) Acquire(context.Context, tool.WorkspaceOperation, string) (tool.WorkspacePermit, error) {

@@ -17,7 +17,6 @@ import (
 	"github.com/looprig/harness/pkg/identity"
 	"github.com/looprig/harness/pkg/journal"
 	"github.com/looprig/harness/pkg/loop"
-	"github.com/looprig/harness/pkg/security"
 	"github.com/looprig/harness/pkg/sessionstore"
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/inference/contextcount"
@@ -35,7 +34,8 @@ import (
 // swarmDefs builds the three definitions with the fake client + test model under cfg.
 func swarmDefs(t *testing.T, cfg Config) []loop.Definition {
 	t.Helper()
-	defs, err := swarmDefinitions(&fakeLLM{}, testModel(), cfg)
+	access, cfg := headlessTestAccess(t, cfg, t.TempDir())
+	defs, err := swarmDefinitions(&fakeLLM{}, testModel(), cfg, access)
 	if err != nil {
 		t.Fatalf("swarmDefinitions() error = %v", err)
 	}
@@ -119,14 +119,15 @@ func TestSwarmDefinitionsCompactionComposition(t *testing.T) {
 
 	client := &fakeLLM{}
 	model := testModel()
-	defs, err := swarmDefinitions(client, model, Config{})
+	root := t.TempDir()
+	access, cfg := headlessTestAccess(t, Config{}, root)
+	defs, err := swarmDefinitions(client, model, cfg, access)
 	if err != nil {
 		t.Fatalf("swarmDefinitions() error = %v", err)
 	}
 	if len(defs) != 3 {
 		t.Fatalf("swarmDefinitions() len = %d, want 3", len(defs))
 	}
-	root := t.TempDir()
 	wantCounter := contextcount.CounterCapability{
 		Transport:    contextcount.CounterTransportLocal,
 		Retention:    contextcount.RetentionNone,
@@ -162,9 +163,8 @@ func TestSwarmDefinitionsCompactionComposition(t *testing.T) {
 			}
 
 			bound, bindErr := tt.def.Bind(context.Background(), tool.Bindings{
-				SessionID:     mustUUID(t),
-				LoopID:        mustUUID(t),
-				SecurityLimit: security.New(),
+				SessionID: mustUUID(t),
+				LoopID:    mustUUID(t),
 				Workspace: &tool.WorkspaceBinding{
 					Root:         root,
 					Coordinator:  &testWorkspaceCoordinator{},

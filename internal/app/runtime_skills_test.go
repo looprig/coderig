@@ -7,7 +7,6 @@ import (
 	"github.com/looprig/coderig/internal/catalog/operator"
 	"github.com/looprig/coderig/internal/catalog/reviewer"
 	"github.com/looprig/core/uuid"
-	"github.com/looprig/harness/pkg/security"
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/tools/skill"
 )
@@ -32,10 +31,9 @@ func buildSkillTool(t *testing.T, def tool.Definition, root string) []string {
 		t.Fatalf("uuid.New() error = %v", err)
 	}
 	built, err := def.Build(context.Background(), tool.Bindings{
-		SessionID:     id,
-		LoopID:        id,
-		SecurityLimit: security.New(),
-		Workspace:     &tool.WorkspaceBinding{Root: root, Coordinator: &testWorkspaceCoordinator{}, Observations: tool.NewWorkspaceObservations()},
+		SessionID: id,
+		LoopID:    id,
+		Workspace: &tool.WorkspaceBinding{Root: root, Coordinator: &testWorkspaceCoordinator{}, Observations: tool.NewWorkspaceObservations()},
 	})
 	if err != nil {
 		t.Fatalf("def.Build() error = %v", err)

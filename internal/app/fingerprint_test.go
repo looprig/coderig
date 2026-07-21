@@ -19,13 +19,14 @@ import (
 
 func compactionFingerprintFor(t *testing.T, root string, client *fakeLLM, policy conversationContextPolicy, registration conversationHustleRegistration) event.ConfigFingerprint {
 	t.Helper()
-	definitions, err := swarmDefinitionsWithContextPolicy(client, testModel(), Config{}, policy)
+	access, cfg := headlessTestAccess(t, Config{}, root)
+	definitions, err := swarmDefinitionsWithContextPolicy(client, testModel(), cfg, policy, access)
 	if err != nil {
 		t.Fatalf("swarmDefinitionsWithContextPolicy() error = %v", err)
 	}
 	stores := mustHeadlessTestStores(t)
 	assembly, err := buildRigWithRegistration(
-		definitions, stores, root, Config{}, false,
+		definitions, stores, root, cfg, false,
 		rig.DelegationLimits{Depth: operatorSpawnDepth, Quota: operatorSpawnQuota}, registration,
 	)
 	if err != nil {

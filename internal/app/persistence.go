@@ -234,22 +234,13 @@ func (f *SessionStoreFactory) Open(ctx context.Context, sel SessionSelector, cfg
 // integration tests drive with an injected fake client. A resume threads
 // sel.AllowConfigMismatch into the rig so a deliberate config change can proceed.
 func (f *SessionStoreFactory) openWithClient(ctx context.Context, client inference.Client, factory ModelFactory, sel SessionSelector, cfg Config) (*RuntimeAgent, error) {
-	definitions, err := swarmDefinitions(client, factory(), cfg)
-	if err != nil {
-		return nil, err
-	}
 	root, err := os.Getwd()
 	if err != nil {
 		return nil, &WorkspaceRootError{Cause: err}
 	}
-	adapter, err := openSessionWithDefinitions(ctx, definitions, cfg, f.stores, root, sel)
-	if err != nil {
-		return nil, err
-	}
-	// The in-session security-limit runtime surface (RuntimeAgent.maxAccess,
-	// runtime_controls.go SetAccess/AccessOptions/SetSecurityLimit) is retired: the
-	// selected access profile is fixed for the session and the TUI only displays it.
-	// Task 5.2 replaces RuntimeAgent's ordinal access presentation with the
-	// session-fixed profile SessionPresenter; until then this passes a zero limit.
-	return newRuntimeAgent(adapter, adapter.Controller(), root, 0), nil
+	// Persisted CodeRig is INTERACTIVE: a human at the TUI resolves gates, so the
+	// access wiring uses the HOME-derived workspace permission store and interactive
+	// gate evaluators. The selected access profile is fixed for the session; the TUI
+	// only displays it (SessionPresenter). New and restore share this one path.
+	return openRuntimeAgent(ctx, client, factory, cfg, f.stores, root, sel, true)
 }

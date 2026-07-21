@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -18,17 +17,17 @@ import (
 	"github.com/looprig/core/content"
 	"github.com/looprig/core/uuid"
 	"github.com/looprig/harness/pkg/event"
+	"github.com/looprig/harness/pkg/gate"
 	"github.com/looprig/harness/pkg/journal"
 	"github.com/looprig/harness/pkg/loop"
 	"github.com/looprig/harness/pkg/rig"
-	"github.com/looprig/harness/pkg/security"
 	"github.com/looprig/harness/pkg/session"
 	"github.com/looprig/harness/pkg/sessionstore"
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/inference"
 	stream "github.com/looprig/inference/stream"
 	"github.com/looprig/storage/memstore"
-	"github.com/looprig/tools/todo"
+	"github.com/looprig/tui"
 )
 
 // managedScript is a deterministic provider fake that drives the model-facing Subagent
@@ -101,13 +100,13 @@ func parseQueued(text string) (queuedHandle, error) {
 	return got, nil
 }
 
-func runManagedTurn(t *testing.T, agent *sessionAdapter, prompt string) string {
+func runManagedTurn(t *testing.T, agent tui.Agent, prompt string) string {
 	t.Helper()
 	text, _ := runManagedTurnObserved(t, agent, prompt)
 	return text
 }
 
-func runManagedTurnObserved(t *testing.T, agent *sessionAdapter, prompt string) (string, []event.Event) {
+func runManagedTurnObserved(t *testing.T, agent tui.Agent, prompt string) (string, []event.Event) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	t.Cleanup(cancel)
@@ -163,198 +162,35 @@ func toolNamesFromRequest(req inference.Request) []string {
 	return names
 }
 
-// TestOperatorPermissionAntiDrift binds the actual CodeRig primer and operator leaf
-// definitions and compares their private permission gates. The primer's wrapper may
-// add exactly the rig-owned Subagent approval; every ordinary tool decision and grant
-// must remain identical to the operator leaf's base policy.
-func TestOperatorPermissionAntiDrift(t *testing.T) {
+// approveAllAccessGate is a trivial loop.AccessGate that approves every request.
+// Focused delegation-topology tests use it where the gate itself is not under
+// test (delegation is driven directly through the rig-bound controller).
+type approveAllAccessGate struct{}
+
+func (approveAllAccessGate) Authorize(context.Context, tool.Request) (gate.Resolution, error) {
+	return gate.Resolution{Approved: true}, nil
+}
+
+// TestManagedSubagentAutoAllowed proves the rig-injected managed Subagent tool prepares
+// an empty access request, so the role's combined access gate auto-allows it end to end:
+// a managed delegation turn completes without any permission prompt or denial.
+func TestManagedSubagentAutoAllowed(t *testing.T) {
 	t.Parallel()
-	defs := swarmDefs(t, Config{})
-	root := t.TempDir()
-	bind := func(def loop.Definition) loop.BoundDefinition {
-		t.Helper()
-		bound, err := def.Bind(context.Background(), tool.Bindings{
-			SessionID:     mustBindingID(t),
-			LoopID:        mustBindingID(t),
-			SecurityLimit: security.New(),
-			Workspace: &tool.WorkspaceBinding{
-				Root:         root,
-				Coordinator:  &testWorkspaceCoordinator{},
-				Observations: tool.NewWorkspaceObservations(),
-			},
-		})
-		if err != nil {
-			t.Fatalf("Bind(%s): %v", def.Name(), err)
+	calls := 0
+	client := &managedScript{}
+	client.fn = func(_ context.Context, req inference.Request) ([]content.Chunk, error) {
+		if !strings.Contains(req.System, operatorDelegation) {
+			return finalText("child done"), nil
 		}
-		return bound
-	}
-	primer, leaf := bind(defs[0]), bind(defs[1])
-
-	primerTools := invokableToolsByName(t, primer.Tools())
-	leafTools := invokableToolsByName(t, leaf.Tools())
-	for _, tc := range []struct {
-		name string
-		args string
-	}{
-		{name: "Todo", args: `{"action":"list"}`},
-		{name: "Bash", args: `{"command":"git status --short"}`},
-		{name: "WriteFile", args: `{"path":"notes.txt","content":"x"}`},
-	} {
-		primerTool, primerOK := primerTools[tc.name]
-		leafTool, leafOK := leafTools[tc.name]
-		if !primerOK || !leafOK {
-			t.Fatalf("%s binding: primer=%v leaf=%v", tc.name, primerOK, leafOK)
+		calls++
+		if calls == 1 {
+			return toolCall("auto-allow", `{"agent":"reviewer","message":"review","wait":true}`), nil
 		}
-		beforePrimer := primer.Permission().Check(context.Background(), primerTool, tc.name, tc.args)
-		beforeLeaf := leaf.Permission().Check(context.Background(), leafTool, tc.name, tc.args)
-		if beforePrimer != beforeLeaf {
-			t.Errorf("%s pre-grant effect: primer=%v leaf=%v", tc.name, beforePrimer, beforeLeaf)
-		}
-		primerErr := primer.Permission().Grant(context.Background(), tc.name, tc.args, tool.ScopeSession)
-		leafErr := leaf.Permission().Grant(context.Background(), tc.name, tc.args, tool.ScopeSession)
-		if !sameError(primerErr, leafErr) {
-			t.Errorf("%s Grant errors: primer=%v leaf=%v", tc.name, primerErr, leafErr)
-		}
-		afterPrimer := primer.Permission().Check(context.Background(), primerTool, tc.name, tc.args)
-		afterLeaf := leaf.Permission().Check(context.Background(), leafTool, tc.name, tc.args)
-		if afterPrimer != afterLeaf {
-			t.Errorf("%s post-grant effect: primer=%v leaf=%v", tc.name, afterPrimer, afterLeaf)
-		}
+		return finalText("parent done"), nil
 	}
-
-	primerSpoof := primer.Permission().Check(context.Background(), primerTools["Todo"], managedSubagentToolName, `{}`)
-	leafSpoof := leaf.Permission().Check(context.Background(), leafTools["Todo"], managedSubagentToolName, `{}`)
-	if primerSpoof != leafSpoof || primerSpoof == loop.EffectAutoApprove {
-		t.Errorf("name-spoofed Todo effect: primer=%v leaf=%v, want identical non-auto result", primerSpoof, leafSpoof)
-	}
-	if _, ok := leafTools[managedSubagentToolName]; ok {
-		t.Fatal("operator leaf received Subagent")
-	}
-}
-
-func invokableToolsByName(t *testing.T, invokables []tool.InvokableTool) map[string]tool.InvokableTool {
-	t.Helper()
-	result := make(map[string]tool.InvokableTool, len(invokables))
-	for _, invokable := range invokables {
-		info, err := invokable.Info(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		result[info.Name] = invokable
-	}
-	return result
-}
-
-func sameError(a, b error) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return reflect.TypeOf(a) == reflect.TypeOf(b) && a.Error() == b.Error()
-}
-
-type permissionCapabilityProbe struct {
-	decision loop.PermissionDecision
-	grants   []string
-}
-
-func (p *permissionCapabilityProbe) Check(context.Context, tool.InvokableTool, string, string) loop.Effect {
-	return p.decision.Effect
-}
-
-func (p *permissionCapabilityProbe) CheckDecision(context.Context, tool.InvokableTool, string, string) loop.PermissionDecision {
-	return p.decision
-}
-
-func (*permissionCapabilityProbe) Grant(context.Context, string, string, tool.ApprovalScope) error {
-	return nil
-}
-
-func (p *permissionCapabilityProbe) ApprovedGrants(context.Context, string, string) []string {
-	return append([]string(nil), p.grants...)
-}
-
-type inertDelegateController struct{}
-
-func (inertDelegateController) Execute(context.Context, tool.DelegateRequest) (tool.DelegateResult, error) {
-	return tool.DelegateResult{}, nil
-}
-
-type namedInvokable string
-
-func (n namedInvokable) Info(context.Context) (*tool.ToolInfo, error) {
-	return &tool.ToolInfo{Name: string(n), Desc: "test tool", Schema: json.RawMessage(`{"type":"object"}`)}, nil
-}
-
-func (namedInvokable) InvokableRun(context.Context, string) (*tool.ToolResult, error) {
-	return tool.TextResult("ok"), nil
-}
-
-// TestManagedPrimerPermissionPreservesOptionalCapabilities guards the optional interfaces
-// used for durable decision reasons and escalation-grant re-minting. Only a structurally
-// genuine bound Subagent gets the primer-specific approval; a name-spoofed ordinary tool
-// follows the base gate.
-func TestManagedPrimerPermissionPreservesOptionalCapabilities(t *testing.T) {
-	t.Parallel()
-	base := &permissionCapabilityProbe{
-		decision: loop.PermissionDecision{Effect: loop.EffectAsk, Reason: "base-reason"},
-		grants:   []string{"grant-a", "grant-b"},
-	}
-	wrapped := managedPrimerPermission{PermissionGate: base}
-	ordinary := todo.NewTodo()
-
-	decision := wrapped.CheckDecision(context.Background(), ordinary, "Todo", `{"action":"list"}`)
-	if decision != base.decision {
-		t.Fatalf("ordinary decision = %+v, want %+v", decision, base.decision)
-	}
-	if grants := wrapped.ApprovedGrants(context.Background(), "Todo", `{"action":"list"}`); !slices.Equal(grants, base.grants) {
-		t.Fatalf("ordinary grants = %v, want %v", grants, base.grants)
-	}
-	if got := wrapped.Check(context.Background(), ordinary, managedSubagentToolName, `{}`); got != base.decision.Effect {
-		t.Fatalf("name-spoofed Todo effect = %v, want delegated %v", got, base.decision.Effect)
-	}
-
-	subagentDef := tool.NewDefinition(managedSubagentToolName, tool.RequiresDelegateController, func(context.Context, tool.Bindings) ([]tool.InvokableTool, error) {
-		return []tool.InvokableTool{namedInvokable(managedSubagentToolName)}, nil
-	})
-	primer, err := swarmDefs(t, Config{})[0].Bind(context.Background(), tool.Bindings{
-		SessionID:     mustBindingID(t),
-		LoopID:        mustBindingID(t),
-		SecurityLimit: security.New(),
-		Workspace: &tool.WorkspaceBinding{
-			Root:         t.TempDir(),
-			Coordinator:  &testWorkspaceCoordinator{},
-			Observations: tool.NewWorkspaceObservations(),
-		},
-		Delegate:   inertDelegateController{},
-		ExtraTools: []tool.Definition{subagentDef},
-	})
-	if err != nil {
-		t.Fatalf("bind production primer with injected Subagent: %v", err)
-	}
-	subagent, ok := invokableToolsByName(t, primer.Tools())[managedSubagentToolName]
-	if !ok {
-		t.Fatal("production primer binding has no injected Subagent")
-	}
-	if got := primer.Permission().Check(context.Background(), subagent, managedSubagentToolName, `{}`); got != loop.EffectAutoApprove {
-		t.Fatalf("bound Subagent effect = %v, want auto-approve", got)
-	}
-	decisionGate, ok := primer.Permission().(interface {
-		CheckDecision(context.Context, tool.InvokableTool, string, string) loop.PermissionDecision
-	})
-	if !ok {
-		t.Fatal("production primer permission dropped CheckDecision")
-	}
-	if got := decisionGate.CheckDecision(context.Background(), subagent, managedSubagentToolName, `{}`); got.Effect != loop.EffectAutoApprove || got.Reason != managedSubagentDecisionReason {
-		t.Fatalf("bound Subagent decision = %+v, want explicit auto-approve reason", got)
-	}
-	grantGate, ok := primer.Permission().(interface {
-		ApprovedGrants(context.Context, string, string) []string
-	})
-	if !ok {
-		t.Fatal("production primer permission dropped ApprovedGrants")
-	}
-	if grants := grantGate.ApprovedGrants(context.Background(), managedSubagentToolName, `{}`); len(grants) != 0 {
-		t.Fatalf("bound Subagent grants = %v, want none", grants)
+	agent := newTestAgent(t, client, Config{})
+	if got := runManagedTurn(t, agent, "go"); got != "parent done" {
+		t.Fatalf("managed turn final = %q, want the Subagent to be auto-allowed and the turn to complete", got)
 	}
 }
 
@@ -565,7 +401,9 @@ func TestRestoredDelegateComposed(t *testing.T) {
 		}
 	}
 
-	definitions, err := swarmDefinitions(client, testModel(), Config{})
+	root := t.TempDir()
+	access, cfg := headlessTestAccess(t, Config{}, root)
+	definitions, err := swarmDefinitions(client, testModel(), cfg, access)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +411,7 @@ func TestRestoredDelegateComposed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assembly, err := buildRig(definitions, stores, t.TempDir(), Config{}, false)
+	assembly, err := buildRig(definitions, stores, root, cfg, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,16 +520,38 @@ func TestManagedSubagentLimitsComposed(t *testing.T) {
 	})
 }
 
-type typedDelegatePermission struct {
+// delegateProbe captures the rig-bound, parent-scoped delegate controller at bind. The
+// probe tool declares RequiresDelegateController so the rig populates bindings.Delegate,
+// letting the test drive delegation through the same controller the managed Subagent tool
+// would use — without the removed permission-factory bind hook.
+type delegateProbe struct {
+	mu         sync.Mutex
 	controller tool.DelegateController
 }
 
-func (*typedDelegatePermission) Check(context.Context, tool.InvokableTool, string, string) loop.Effect {
-	return loop.EffectAutoApprove
+func (p *delegateProbe) definition() tool.Definition {
+	return tool.NewDefinition("delegate-probe", tool.RequiresDelegateController, func(_ context.Context, bindings tool.Bindings) ([]tool.InvokableTool, error) {
+		p.mu.Lock()
+		p.controller = bindings.Delegate
+		p.mu.Unlock()
+		return []tool.InvokableTool{probeTool{}}, nil
+	})
 }
 
-func (*typedDelegatePermission) Grant(context.Context, string, string, tool.ApprovalScope) error {
-	return nil
+func (p *delegateProbe) captured() tool.DelegateController {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.controller
+}
+
+type probeTool struct{}
+
+func (probeTool) Info(context.Context) (*tool.ToolInfo, error) {
+	return &tool.ToolInfo{Name: "delegate-probe", Desc: "test probe", Schema: json.RawMessage(`{"type":"object"}`)}, nil
+}
+
+func (probeTool) InvokableRun(context.Context, string) (*tool.ToolResult, error) {
+	return tool.TextResult("ok"), nil
 }
 
 // newTypedDelegateTestRig composes the same CodeRig rig path with the smallest managed topology
@@ -701,14 +561,12 @@ func newTypedDelegateTestRig(t *testing.T, limits rig.DelegationLimits) (*sessio
 	client := &managedScript{fn: func(context.Context, inference.Request) ([]content.Chunk, error) {
 		return finalText("child done"), nil
 	}}
-	permission := &typedDelegatePermission{}
+	probe := &delegateProbe{}
 	primer, err := loop.Define(
 		loop.WithName(operatorPrimaryName),
 		loop.WithInference(client, testModel()),
-		loop.WithPermissionFactory(func(_ context.Context, bindings tool.Bindings) (loop.PermissionGate, error) {
-			permission.controller = bindings.Delegate
-			return permission, nil
-		}),
+		loop.WithTools(probe.definition()),
+		loop.WithAccessGate(approveAllAccessGate{}),
 		loop.WithPolicyRevision("typed-delegate-test"),
 		loop.WithDelegates(operator.Name),
 		loop.WithDelegation(loop.Delegation{Style: loop.DelegationManaged}),
@@ -737,10 +595,10 @@ func newTypedDelegateTestRig(t *testing.T, limits rig.DelegationLimits) (*sessio
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = agent.Close(context.Background()) })
-	if permission.controller == nil {
-		t.Fatal("rig supplied no scoped delegate controller to primer permission binding")
+	if probe.captured() == nil {
+		t.Fatal("rig supplied no scoped delegate controller to primer binding")
 	}
-	return agent, stores, permission.controller
+	return agent, stores, probe.captured()
 }
 
 func storedLoopStartedCount(t *testing.T, store *sessionstore.Store, sessionID uuid.UUID) int {

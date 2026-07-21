@@ -21,7 +21,6 @@ import (
 	"github.com/looprig/harness/pkg/tool"
 	"github.com/looprig/inference"
 	model "github.com/looprig/inference/model"
-	"github.com/looprig/sandbox"
 	"github.com/looprig/tools/skill"
 	"github.com/looprig/tui"
 	"github.com/looprig/tui/sessionadapter"
@@ -34,7 +33,6 @@ import (
 const skillToolName = "Skill"
 
 const managedSubagentToolName = "Subagent"
-const managedSubagentDecisionReason = "managed_subagent"
 const initialCodingMode = loop.ModeName("quick")
 
 func codingModes() []loop.Mode {
@@ -44,63 +42,11 @@ func codingModes() []loop.Mode {
 	}
 }
 
-// managedPrimerPermission adds the rig-injected Subagent capability to the operator
-// leaf's permission policy. Every non-Subagent decision and every persisted grant is
-// delegated unchanged, keeping the two operator faces on one policy source of truth.
-type managedPrimerPermission struct{ loop.PermissionGate }
-
-func (p managedPrimerPermission) Check(ctx context.Context, invokable tool.InvokableTool, name, args string) loop.Effect {
-	if isManagedSubagent(ctx, invokable, name) {
-		return loop.EffectAutoApprove
-	}
-	return p.PermissionGate.Check(ctx, invokable, name, args)
-}
-
-// CheckDecision preserves the production checker's optional durable-reason capability.
-// The rig-owned Subagent gets an explicit reason; ordinary calls retain the base reason.
-func (p managedPrimerPermission) CheckDecision(ctx context.Context, invokable tool.InvokableTool, name, args string) loop.PermissionDecision {
-	if isManagedSubagent(ctx, invokable, name) {
-		return loop.PermissionDecision{Effect: loop.EffectAutoApprove, Reason: managedSubagentDecisionReason}
-	}
-	if gate, ok := p.PermissionGate.(interface {
-		CheckDecision(context.Context, tool.InvokableTool, string, string) loop.PermissionDecision
-	}); ok {
-		return gate.CheckDecision(ctx, invokable, name, args)
-	}
-	return loop.PermissionDecision{Effect: p.PermissionGate.Check(ctx, invokable, name, args)}
-}
-
-// ApprovedGrants preserves the production checker's optional grant re-mint capability.
-// Subagent never needs escalation grants; all ordinary tool calls forward unchanged.
-func (p managedPrimerPermission) ApprovedGrants(ctx context.Context, name, args string) []string {
-	if name == managedSubagentToolName {
-		return nil
-	}
-	if gate, ok := p.PermissionGate.(interface {
-		ApprovedGrants(context.Context, string, string) []string
-	}); ok {
-		return gate.ApprovedGrants(ctx, name, args)
-	}
-	return nil
-}
-
-func isManagedSubagent(ctx context.Context, invokable tool.InvokableTool, name string) bool {
-	if invokable == nil || name != managedSubagentToolName {
-		return false
-	}
-	info, err := invokable.Info(ctx)
-	return err == nil && info != nil && info.Name == managedSubagentToolName
-}
-
-func managedPrimerPermissionFactory(base loop.PermissionFactory) loop.PermissionFactory {
-	return func(ctx context.Context, bindings tool.Bindings) (loop.PermissionGate, error) {
-		permission, err := base(ctx, bindings)
-		if err != nil {
-			return nil, err
-		}
-		return managedPrimerPermission{PermissionGate: permission}, nil
-	}
-}
+// The rig-injected managed Subagent tool prepares an empty access request, so the
+// role's combined access gate auto-allows it — no primer-specific permission
+// wrapper is needed. The primer and operator leaf share the operator role's access
+// gate; only the primer records the additive Subagent capability in its policy
+// revision and declares delegates.
 
 // operatorPrimaryName is the PRIMER loop's identity: distinct from the operator leaf so
 // definition-wide delegation never hands a spawned operator another Subagent. It DISPLAYS as
@@ -208,18 +154,22 @@ func skillDefinitionFor(loader skill.SkillLoader, b leafBuiltin, cfg Config) too
 // Subagent and records that additive capability in its policy revision. The ONLY prompt
 // difference is the primer's appended operatorDelegation guidance. Every collaborator is root-free — the
 // workspace root is a rig placement concern read per bind, never captured here.
-func swarmDefinitions(client inference.Client, model model.Model, cfg Config) ([]loop.Definition, error) {
+func swarmDefinitions(client inference.Client, model model.Model, cfg Config, access *sessionAccess) ([]loop.Definition, error) {
 	contextPolicy, err := newConversationContextPolicy(model)
 	if err != nil {
 		return nil, err
 	}
-	return swarmDefinitionsWithContextPolicy(client, model, cfg, contextPolicy)
+	return swarmDefinitionsWithContextPolicy(client, model, cfg, contextPolicy, access)
 }
 
 // swarmDefinitionsWithContextPolicy is the immutable assembly seam. Production
 // resolves policy before entering it; focused tests vary one secret-free policy
-// dimension without mutable package globals.
-func swarmDefinitionsWithContextPolicy(client inference.Client, model model.Model, cfg Config, contextPolicy conversationContextPolicy) ([]loop.Definition, error) {
+// dimension without mutable package globals. access carries the session-fixed
+// role gates, executor sets, and per-role policy revisions the definitions bind:
+// the operator-primary and operator leaf share the operator role's gate + executor
+// set (distinct executors keyed by Loop ID), and the reviewer uses its restricted
+// role gate + executor set.
+func swarmDefinitionsWithContextPolicy(client inference.Client, model model.Model, cfg Config, contextPolicy conversationContextPolicy, access *sessionAccess) ([]loop.Definition, error) {
 	httpCl := newHTTPClient()
 	runtimeCtx := NewRuntimeContextProvider()
 
@@ -230,29 +180,15 @@ func swarmDefinitionsWithContextPolicy(client inference.Client, model model.Mode
 	}
 	loader := skill.NewEmbeddedSkillLoader(SkillsFS, buildSkillAllow(scopes))
 
-	// ONE confine.Factory per role: operator-primary + operator leaf share the operator
-	// factory (each memoizes per bound LoopID, so the two loops still get fresh executors);
-	// reviewer gets its own read-only factory.
-	operatorConf, err := newConfinement(sandbox.Write)
-	if err != nil {
-		return nil, err
-	}
-	reviewerConf, err := newConfinement(sandbox.ReadOnly)
-	if err != nil {
-		return nil, err
-	}
-
 	opBuiltin := operatorBuiltin()
 	revBuiltin := reviewerBuiltin()
 
-	opTools, err := buildOperatorTools(operatorConf, httpCl, skillDefinitionFor(loader, opBuiltin, cfg))
-	if err != nil {
-		return nil, err
-	}
-	revTools, err := buildReviewerTools(reviewerConf, skillDefinitionFor(loader, revBuiltin, cfg))
-	if err != nil {
-		return nil, err
-	}
+	// The operator faces share the operator role's confined executor set; the
+	// reviewer uses its own restricted set. Tool definitions resolve the per-Loop
+	// executor from the role set at bind, so the operator-primary and operator leaf
+	// get distinct executor instances (and grants) over the same operator profile.
+	operatorTools := operatorToolDefinitions(access.operatorSet, httpCl, skillDefinitionFor(loader, opBuiltin, cfg))
+	reviewerTools := reviewerToolDefinitions(access.reviewerSet, skillDefinitionFor(loader, revBuiltin, cfg))
 
 	ctx := context.Background()
 	operatorCatalog := availableSkillsCatalog(ctx, loader, operator.Name, opBuiltin.skills)
@@ -266,9 +202,9 @@ func swarmDefinitionsWithContextPolicy(client inference.Client, model model.Mode
 		loop.WithDescription(operator.Description),
 		loop.WithInference(client, model),
 		loop.WithSystem(operatorPrimerSystem),
-		loop.WithTools(opTools.definitions...),
-		loop.WithPermissionFactory(managedPrimerPermissionFactory(opTools.permission)),
-		loop.WithPolicyRevision(contextPolicy.policyRevision(opTools.policyRevision + ":" + managedSubagentToolName)),
+		loop.WithTools(operatorTools...),
+		loop.WithAccessGate(access.operatorGate),
+		loop.WithPolicyRevision(contextPolicy.policyRevision(access.operatorPolicyRev + ":" + managedSubagentToolName)),
 		loop.WithRuntimeContext(runtimeCtx),
 		loop.WithDelegates(operator.Name, reviewer.Name),
 		loop.WithDelegation(loop.Delegation{Style: loop.DelegationManaged}),
@@ -286,9 +222,9 @@ func swarmDefinitionsWithContextPolicy(client inference.Client, model model.Mode
 		loop.WithDescription(operator.Description),
 		loop.WithInference(client, model),
 		loop.WithSystem(operatorLeafSystem),
-		loop.WithTools(opTools.definitions...),
-		loop.WithPermissionFactory(opTools.permission),
-		loop.WithPolicyRevision(contextPolicy.policyRevision(opTools.policyRevision)),
+		loop.WithTools(operatorTools...),
+		loop.WithAccessGate(access.operatorGate),
+		loop.WithPolicyRevision(contextPolicy.policyRevision(access.operatorPolicyRev)),
 		loop.WithRuntimeContext(runtimeCtx),
 		loop.WithModes(codingModes()...),
 		loop.WithInitialMode(initialCodingMode),
@@ -304,9 +240,9 @@ func swarmDefinitionsWithContextPolicy(client inference.Client, model model.Mode
 		loop.WithDescription(reviewer.Description),
 		loop.WithInference(client, model),
 		loop.WithSystem(reviewerSystem),
-		loop.WithTools(revTools.definitions...),
-		loop.WithPermissionFactory(revTools.permission),
-		loop.WithPolicyRevision(contextPolicy.policyRevision(revTools.policyRevision)),
+		loop.WithTools(reviewerTools...),
+		loop.WithAccessGate(access.reviewerGate),
+		loop.WithPolicyRevision(contextPolicy.policyRevision(access.reviewerPolicyRev)),
 		loop.WithRuntimeContext(runtimeCtx),
 		loop.WithModes(codingModes()...),
 		loop.WithInitialMode(initialCodingMode),
@@ -348,42 +284,75 @@ type swarmStoresProvider func() (*swarmStores, error)
 
 // newWithClientUsingStores validates the full model/context composition before
 // resolving the process store. Tests inject a provider to prove invalid policy
-// cannot open or mutate persistence.
+// cannot open or mutate persistence. It resolves the HEADLESS access wiring (a
+// read-only permission store and non-prompting gate evaluators), folds its digest
+// into the fingerprint, and returns the runtime agent that owns the executor-set
+// closers. Composition failure closes the partial access and never touches
+// persistence.
 func newWithClientUsingStores(ctx context.Context, client inference.Client, factory ModelFactory, cfg Config, storesProvider swarmStoresProvider) (*RuntimeAgent, error) {
-	definitions, err := swarmDefinitions(client, factory(), cfg)
-	if err != nil {
-		return nil, err
-	}
 	root, err := os.Getwd()
 	if err != nil {
 		return nil, &WorkspaceRootError{Cause: err}
 	}
+	access, err := buildHeadlessAccess(cfg, root)
+	if err != nil {
+		return nil, err
+	}
+	cfg.AccessConfigRev = access.configRev
+	definitions, err := swarmDefinitions(client, factory(), cfg, access)
+	if err != nil {
+		_ = access.Close()
+		return nil, err
+	}
 	stores, err := storesProvider()
 	if err != nil {
+		_ = access.Close()
 		return nil, err
 	}
-	adapter, err := newSessionOverStoresWithDefinitions(ctx, definitions, cfg, stores, root)
+	adapter, err := openSessionWithDefinitions(ctx, definitions, cfg, stores, root, SessionSelector{})
 	if err != nil {
+		_ = access.Close()
 		return nil, err
 	}
-	return newRuntimeAgent(adapter, adapter.Controller(), root, cfg.SecurityLimit), nil
+	return newRuntimeAgent(adapter, adapter.Controller(), root, access), nil
 }
 
 // newSessionOverStores is the store-injecting construction seam shared by the headless New
 // path (over the process-shared in-memory store + current checkout) and tests (over an
 // isolated store + a temp root, so parallel session tests never contend on the current
-// checkout's exclusive root lease). It builds the three definitions, one rig placing root as
-// the exclusive workspace, opens a NEW session, and wraps it as a tui.Agent.
-func newSessionOverStores(ctx context.Context, client inference.Client, factory ModelFactory, cfg Config, stores *swarmStores, root string) (*sessionadapter.Adapter, error) {
-	definitions, err := swarmDefinitions(client, factory(), cfg)
+// checkout's exclusive root lease). It resolves the headless access wiring, builds the three
+// definitions, one rig placing root as the exclusive workspace, opens a NEW session, and wraps
+// it as the runtime agent that owns the executor-set closers.
+func newSessionOverStores(ctx context.Context, client inference.Client, factory ModelFactory, cfg Config, stores *swarmStores, root string) (*RuntimeAgent, error) {
+	return openRuntimeAgent(ctx, client, factory, cfg, stores, root, SessionSelector{}, false)
+}
+
+// openRuntimeAgent is CodeRig's single session-assembly path. It resolves the
+// session-fixed access wiring (interactive or headless), folds its secret-free
+// digest into the config fingerprint, builds the three definitions and one rig
+// over the injected stores, opens (Resume zero) or restores the session, and
+// returns the runtime agent that OWNS the executor-set closers. Any failure after
+// the access is built closes the partial assembly so no scratch HOME leaks. New,
+// restore, headless, and interactive construction differ only in the injected
+// stores, selector, and the interactive flag (which selects the permission store +
+// evaluator kind).
+func openRuntimeAgent(ctx context.Context, client inference.Client, factory ModelFactory, cfg Config, stores *swarmStores, root string, selector SessionSelector, interactive bool) (*RuntimeAgent, error) {
+	access, err := buildSessionAccess(cfg, root, interactive)
 	if err != nil {
 		return nil, err
 	}
-	return newSessionOverStoresWithDefinitions(ctx, definitions, cfg, stores, root)
-}
-
-func newSessionOverStoresWithDefinitions(ctx context.Context, definitions []loop.Definition, cfg Config, stores *swarmStores, root string) (*sessionadapter.Adapter, error) {
-	return openSessionWithDefinitions(ctx, definitions, cfg, stores, root, SessionSelector{})
+	cfg.AccessConfigRev = access.configRev
+	definitions, err := swarmDefinitions(client, factory(), cfg, access)
+	if err != nil {
+		_ = access.Close()
+		return nil, err
+	}
+	adapter, err := openSessionWithDefinitions(ctx, definitions, cfg, stores, root, selector)
+	if err != nil {
+		_ = access.Close()
+		return nil, err
+	}
+	return newRuntimeAgent(adapter, adapter.Controller(), root, access), nil
 }
 
 // openSessionWithDefinitions is CodeRig's single new-or-restore assembly path.

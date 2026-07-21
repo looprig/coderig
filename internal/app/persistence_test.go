@@ -79,7 +79,8 @@ func TestInvalidCompactionCompositionDoesNotOpenSession(t *testing.T) {
 					t.Fatalf("newConversationContextPolicy() error = %v", err)
 				}
 				policy.compaction.CounterPolicy = loop.CounterPolicyUnknown
-				_, err = swarmDefinitionsWithContextPolicy(&fakeLLM{}, testModel(), Config{}, policy)
+				access, cfg := headlessTestAccess(t, Config{}, t.TempDir())
+				_, err = swarmDefinitionsWithContextPolicy(&fakeLLM{}, testModel(), cfg, policy, access)
 				return err
 			},
 			wantType: func(err error) bool {
@@ -187,7 +188,11 @@ func TestCompactionWiringSurvivesHeadlessNewRestoreAndClear(t *testing.T) {
 			}
 
 			definitions := swarmDefs(t, tt.cfg)
-			assembly, err := buildRig(definitions, stores, root, tt.cfg, false)
+			// Restore folds the SAME workspace-derived access digest as the original open
+			// (new and restore over the same checkout produce the same digest), so the
+			// rig-level fingerprint matches.
+			_, restoreCfg := headlessTestAccess(t, tt.cfg, root)
+			assembly, err := buildRig(definitions, stores, root, restoreCfg, false)
 			if err != nil {
 				t.Fatalf("restore buildRig() error = %v", err)
 			}
@@ -284,11 +289,12 @@ func TestHeadlessNewAndRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("Close error = %v", err)
 	}
 
-	definitions, err := swarmDefinitions(&fakeLLM{}, newModelFactory()(), Config{})
+	access, restoreCfg := headlessTestAccess(t, Config{}, root)
+	definitions, err := swarmDefinitions(&fakeLLM{}, newModelFactory()(), restoreCfg, access)
 	if err != nil {
 		t.Fatalf("swarmDefinitions error = %v", err)
 	}
-	assembly, err := buildRig(definitions, stores, root, Config{}, false)
+	assembly, err := buildRig(definitions, stores, root, restoreCfg, false)
 	if err != nil {
 		t.Fatalf("buildRig error = %v", err)
 	}

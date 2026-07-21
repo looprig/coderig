@@ -7,9 +7,8 @@ import (
 	"github.com/looprig/tui"
 )
 
-func TestRuntimeCatalogExposesModesModelAndBoundedAccess(t *testing.T) {
-	adapter, _ := openAcceptanceAgent(t)
-	agent := newRuntimeAgent(adapter, adapter.Controller(), t.TempDir(), 2)
+func TestRuntimeCatalogExposesModesAndModel(t *testing.T) {
+	agent, _ := openAcceptanceAgent(t)
 
 	options, err := agent.LoopRuntimeOptions(context.Background(), agent.ActiveLoopID())
 	if err != nil {
@@ -21,28 +20,35 @@ func TestRuntimeCatalogExposesModesModelAndBoundedAccess(t *testing.T) {
 	if len(options.Models) != 1 || options.Models[0].ID == "" {
 		t.Fatalf("models = %#v, want one stable current model", options.Models)
 	}
-	access, err := agent.AccessOptions(context.Background())
-	if err != nil {
-		t.Fatal(err)
+}
+
+// TestSessionPresentationReportsFixedProfile proves the runtime agent surfaces the
+// session-fixed access profile name and workspace root through the TUI's
+// SessionPresenter contract. The default (empty) Config resolves to the readonly
+// profile.
+func TestSessionPresentationReportsFixedProfile(t *testing.T) {
+	agent, _ := openAcceptanceAgent(t)
+
+	var presenter tui.SessionPresenter = agent
+	presentation := presenter.SessionPresentation()
+	if presentation.ProfileName != string(DefaultAccessProfile) {
+		t.Fatalf("ProfileName = %q, want %q", presentation.ProfileName, DefaultAccessProfile)
 	}
-	if len(access.Choices) != 3 || access.Choices[2].Label != "Writable" {
-		t.Fatalf("access choices = %#v, want levels through configured cap", access.Choices)
+	if presentation.WorkspaceRoot == "" {
+		t.Fatal("WorkspaceRoot is empty, want the session workspace root")
 	}
-	if access.Current != "0" {
-		t.Fatalf("current access = %q, want live session level 0", access.Current)
+	// A clean headless read-only store carries no out-of-catalog family diagnostics.
+	if len(presentation.PermissionDiagnostics) != 0 {
+		t.Fatalf("PermissionDiagnostics = %v, want none for a clean store", presentation.PermissionDiagnostics)
 	}
 }
 
 func TestRuntimeControllerRejectsUnknownTypedChoices(t *testing.T) {
-	adapter, _ := openAcceptanceAgent(t)
-	agent := newRuntimeAgent(adapter, adapter.Controller(), t.TempDir(), 2)
+	agent, _ := openAcceptanceAgent(t)
 	if err := agent.SetModel(context.Background(), agent.ActiveLoopID(), tui.ModelID("unknown/model")); err == nil {
 		t.Fatal("SetModel(unknown) succeeded")
 	}
 	if err := agent.SetEffort(context.Background(), agent.ActiveLoopID(), tui.EffortID("impossible")); err == nil {
 		t.Fatal("SetEffort(unknown) succeeded")
-	}
-	if err := agent.SetAccess(context.Background(), tui.AccessID("3")); err == nil {
-		t.Fatal("SetAccess(over cap) succeeded")
 	}
 }
